@@ -40,7 +40,7 @@ const SEARCH_PORT := 24751  # the host listens here for players on its network l
 const SNAPSHOT_RATE := 15.0  # monster updates per second sent to the other players
 const CODE_LETTERS := "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # for invite codes (no I, L, O or U)
 # The game server (relay/worker.js) that lists public games and passes messages
-# along, so no router ports are needed. Empty: always connect straight to the host.
+# along, so no router ports are needed. Empty: only games on the local network.
 # Start the game with "-- --relay=http://127.0.0.1:8787" to use a test server.
 const RELAY_URL := "https://gtd-relay.gtd-relay.workers.dev"
 
@@ -359,15 +359,13 @@ var net_mode := ""  # "" alone, "host", "searching", "connecting" or "client"
 var net_addresses: Array = []  # client: the host's addresses, tried in order
 var net_connect_time := 0.0
 var net_status := ""  # shown in the menu
-var invite_code := ""  # host: 7 letters and digits (see make_invite_code)
+var invite_code := ""  # host: 5 letters and digits, from the game server or make_code()
 var search_peer: PacketPeerUDP  # host: answers searches; player: sends them
 var search_time := 0.0
 var search_send_timer := 0.0
 var search_code := ""
 var search_found: Array = []  # addresses of hosts that answered
 var snapshot_timer := 0.0
-var upnp: UPNP  # host: the router port opening, removed again when hosting stops
-var upnp_thread: Thread
 var relay_url := RELAY_URL
 var relay: RelayPeer  # the connection when it goes through the game server
 var public_game := false  # host: shown in everyone's list of public games
@@ -1164,7 +1162,7 @@ func _process(delta: float) -> void:
 		net_connect_time += delta
 		if relay == null and net_connect_time > 4.0:
 			try_next_address()
-		elif relay != null and net_connect_time > 10.0:
+		elif relay != null and net_connect_time > 6.0:
 			relay_join_failed()
 	elif net_mode == "host":
 		if search_peer != null:
@@ -1829,7 +1827,7 @@ func update_relay_host(delta: float) -> void:
 			invite_code = relay.code
 			net_status = "Works for anyone, anywhere. No router setup needed."
 			game_info_timer = 0.0
-		elif relay.get_connection_status() == MultiplayerPeer.CONNECTION_DISCONNECTED or net_connect_time > 8.0:
+		elif relay.get_connection_status() == MultiplayerPeer.CONNECTION_DISCONNECTED or net_connect_time > 5.0:
 			close_connection()
 			net_mode = ""
 			host_direct()
@@ -1883,11 +1881,10 @@ func host_direct() -> void:
 	search_peer = PacketPeerUDP.new()
 	if search_peer.bind(SEARCH_PORT) != OK:
 		search_peer = null
-	# The code is made once we know whether the router lets the internet in
-	invite_code = ""
-	net_status = ""
-	upnp_thread = Thread.new()
-	upnp_thread.start(open_router_port)
+	invite_code = make_code()
+	net_status = "Couldn't reach the game server, so only players on your network (Wi-Fi) can join."
+	if search_peer == null:
+		net_status = "Another game on this PC is already hosting, so players on your network can't find this one."
 
 
 # Host: answers players on the local network who are looking for our code.
@@ -1899,45 +1896,7 @@ func answer_searches() -> void:
 			search_peer.put_packet(("GTD!" + invite_code).to_utf8_buffer())
 
 
-# Runs in the background, since talking to the router takes a few seconds.
-func open_router_port() -> void:
-	var u := UPNP.new()
-	var public_ip := ""
-	if u.discover(2000, 2) == UPNP.UPNP_RESULT_SUCCESS and u.get_gateway() != null and u.get_gateway().is_valid_gateway():
-		if u.add_port_mapping(NET_PORT, NET_PORT, "Gettic's first TD", "UDP") == UPNP.UPNP_RESULT_SUCCESS:
-			public_ip = u.query_external_address()
-	_on_router_port_done.call_deferred(u, public_ip)
-
-
-func _on_router_port_done(u: UPNP, public_ip: String) -> void:
-	upnp_thread.wait_to_finish()
-	upnp_thread = null
-	var opened := public_ip.is_valid_ip_address() and not public_ip.contains(":")
-	if net_mode != "host":
-		if opened:
-			u.delete_port_mapping(NET_PORT, "UDP")
-		return
-	if opened:
-		upnp = u
-		invite_code = make_invite_code(public_ip)
-		net_status = "Works for friends on your Wi-Fi and over the internet."
-	else:
-		invite_code = make_invite_code("")
-		net_status = "Works for friends on your Wi-Fi. Your router didn't let players from the internet in, so friends far away need a VPN like Radmin VPN."
-	if search_peer == null:
-		net_status = "Another game on this PC is already hosting, so players on your network can't find this one."
-
-
-func close_router_port() -> void:
-	if upnp != null:
-		upnp.delete_port_mapping(NET_PORT, "UDP")
-		upnp = null
-
-
 func _exit_tree() -> void:
-	if upnp_thread != null:
-		upnp_thread.wait_to_finish()
-	close_router_port()
 	close_search()
 
 
@@ -1956,22 +1915,12 @@ func search_targets() -> Array:
 	return targets
 
 
-# The invite code is 7 letters and digits (35 bits). If the host's router lets
-# the internet in, the first bit is 1, then 2 random bits (so two hosts in the
-# same house get different codes), then the host's internet address. Otherwise
-# the first bit is 0 and the rest is random, and only the local network works.
-# A joining game always looks for the code on its own network first, so the
-# same code works at home and over the internet.
-func make_invite_code(public_ip: String) -> String:
-	var value := ((randi() % 4) << 32) | randi()
-	if public_ip != "":
-		var ip := 0
-		for part in public_ip.split("."):
-			ip = (ip << 8) | part.to_int()
-		value = (1 << 34) | ((randi() % 4) << 32) | ip
+# A random 5-letter code for a game hosted on the local network. (The game
+# server makes the codes for its games.)
+func make_code() -> String:
 	var code := ""
-	for i in 7:
-		code += CODE_LETTERS[(value >> (30 - i * 5)) & 31]
+	for i in 5:
+		code += CODE_LETTERS[randi() % CODE_LETTERS.length()]
 	return code
 
 
@@ -1985,28 +1934,16 @@ func clean_code(typed: String) -> String:
 	return code
 
 
-# The host's internet address in a code, or "" if it has none.
-func code_internet_address(code: String) -> String:
-	var value := 0
-	for ch in code:
-		value = (value << 5) | CODE_LETTERS.find(ch)
-	if ((value >> 34) & 1) == 0:
-		return ""
-	return "%d.%d.%d.%d" % [(value >> 24) & 255, (value >> 16) & 255, (value >> 8) & 255, value & 255]
-
-
+# Looks for the game on the local network first, then on the game server.
 func join_game() -> void:
 	code_input.release_focus()
 	var code := clean_code(code_input.text)
-	if code.length() == 5 and relay_url != "":
-		join_relay(code)
-	elif code.length() == 7:
-		start_search(code)
-	else:
-		net_status = "That invite code doesn't look right. It has 5 or 7 letters and digits."
+	if code.length() != 5:
+		net_status = "That invite code doesn't look right. It has 5 letters and digits."
+		return
+	start_search(code)
 
 
-# 5-letter codes are games on the game server.
 func join_relay(code: String) -> void:
 	close_connection()
 	relay = RelayPeer.new(relay_address("/join?code=" + code))
@@ -2060,22 +1997,19 @@ func update_search(delta: float) -> void:
 			else:
 				search_found.append(ip)
 	# Once someone answered, wait a moment for answers from other networks, then connect
-	var internet := code_internet_address(search_code)
 	if not search_found.is_empty() and search_send_timer < 0.2:
 		close_search()
 		net_addresses = search_found.duplicate()
 		net_mode = "connecting"
 		try_next_address()
-	elif internet != "" and search_time > 1.5:
-		# Not on this network: try the host's internet address from the code
+	elif search_time > 0.8:
+		# Not on this network: ask the game server
 		close_search()
-		net_addresses = [internet]
-		net_mode = "connecting"
-		try_next_address()
-	elif search_time > 3.0:
-		close_search()
-		net_mode = ""
-		net_status = "Couldn't find game %s. Check the code. If your friend is far away and their router doesn't let the internet in, you both need a VPN like Radmin VPN." % search_code
+		if relay_url != "":
+			join_relay(search_code)
+		else:
+			net_mode = ""
+			net_status = "Couldn't find game %s on your network. Check the code." % search_code
 
 
 func close_search() -> void:
@@ -2110,7 +2044,6 @@ func close_connection() -> void:
 
 func stop_hosting() -> void:
 	close_connection()
-	close_router_port()
 	close_search()
 	net_mode = ""
 	invite_code = ""

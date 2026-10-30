@@ -91,7 +91,7 @@ A new game is **private**: only friends with the code can join. The host can cli
 
 **If the game server can't be reached**
 
-The game then hosts straight from your computer and gives a 7-letter code instead (like `JYE8PFR`). That code works for friends on your **Wi-Fi**, and over the **internet** if the host's router lets the game open its port (UPnP); the menu tells you if it worked. If it doesn't, friends far away can still join if everyone uses a free VPN like [Radmin VPN](https://www.radmin-vpn.com/) or ZeroTier. The first time you host this way, Windows may ask whether to let the game through the firewall: click **Allow**.
+For example with no internet: the game then hosts on your own network instead, still with a 5-letter code, and only friends on the same **Wi-Fi** can join. When you join, the game always looks for the code on your own network first, then asks the game server. The first time you host this way, Windows may ask whether to let the game through the firewall: click **Allow**.
 
 Everyone needs the same game version.
 
@@ -107,5 +107,5 @@ All the game code is in `main.gd`. Good places to start:
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.
 - `build_world()` sets up the 3D scene: camera angle, lighting and map colors. `build_gate()` builds the gates.
 - `build_tower_node()` builds each tower's 3D model.
-- The **multiplayer** section of `main.gd` has the networking: `RELAY_URL` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used when hosting straight from your computer.
+- The **multiplayer** section of `main.gd` has the networking: `RELAY_URL` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used for games on your own network.
 - The game server itself is in the `relay` folder (see [relay/README.md](relay/README.md)).
