@@ -4,7 +4,7 @@ A small 3D tower defense game made with [Godot 4](https://godotengine.org/), ins
 
 ![Made with AI](https://img.shields.io/badge/made%20with-AI%20%28Claude%29-8A63D2)
 
-The code for this game was written by Claude, an AI by Anthropic. Gettic came up with the ideas, made the choices and play-tested it.
+The code for this game was written by Claude. Gettic came up with the ideas, made the choices and play-tested it.
 
 ![Screenshot of the game](screenshot.png)
 
