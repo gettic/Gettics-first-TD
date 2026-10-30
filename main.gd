@@ -201,6 +201,9 @@ func check_for_update() -> void:
 	# Clean up the old game file left behind by the last update.
 	if OS.has_feature("template"):
 		DirAccess.remove_absolute(game_exe_path() + ".old")
+		for arg in OS.get_cmdline_user_args():
+			if arg.begins_with("--remove-old="):
+				remove_old_exe(arg.trim_prefix("--remove-old="))
 	var http := HTTPRequest.new()
 	http.timeout = 10.0
 	add_child(http)
@@ -276,45 +279,73 @@ func _on_update_downloaded(result: int, code: int, _headers: PackedStringArray, 
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
 		update_failed("The download failed. Check your internet connection.")
 		return
-	var err := install_update(zip_path, game_exe_path())
+	var exe := game_exe_path()
+	var result_text := install_update(zip_path, exe)
 	DirAccess.remove_absolute(zip_path)
-	if err != "":
-		update_failed(err)
+	if not result_text.ends_with(".exe"):
+		update_failed(result_text)
 		return
-	restart_game()
+	restart_game(result_text, exe)
 
 
-# Puts the new game file in place of the old one. Returns an error message, or "" if it worked.
-# Windows won't let a running program be overwritten, but it can be renamed,
-# so the old file is renamed to .old and deleted the next time the game starts.
+# Puts the new game file next to the old one, using the name from the download
+# (like "Gettic's first TD v1.6.exe"). Returns the new file's path, or an error message.
 func install_update(zip_path: String, exe: String) -> String:
 	var zip := ZIPReader.new()
 	if zip.open(zip_path) != OK:
 		return "The downloaded file is damaged."
 	var new_exe := PackedByteArray()
+	var new_name := ""
 	for file in zip.get_files():
 		if file.to_lower().ends_with(".exe"):
 			new_exe = zip.read_file(file)
+			new_name = file.get_file()
 			break
 	zip.close()
 	if new_exe.is_empty():
 		return "The download doesn't contain the game."
-	var old := exe + ".old"
-	DirAccess.remove_absolute(old)
-	if DirAccess.rename_absolute(exe, old) != OK:
-		return "Could not replace the game file."
-	var f := FileAccess.open(exe, FileAccess.WRITE)
+	var target := exe.get_base_dir().path_join(new_name)
+	if target.to_lower() == exe.to_lower():
+		# Same name as the running game. Windows won't let a running program be
+		# overwritten, but it can be renamed, so move it to .old first.
+		var old := exe + ".old"
+		DirAccess.remove_absolute(old)
+		if DirAccess.rename_absolute(exe, old) != OK:
+			return "Could not replace the game file."
+	var f := FileAccess.open(target, FileAccess.WRITE)
 	if f == null:
-		DirAccess.rename_absolute(old, exe)
+		if FileAccess.file_exists(exe + ".old") and not FileAccess.file_exists(exe):
+			DirAccess.rename_absolute(exe + ".old", exe)
 		return "Could not write the new game file."
 	f.store_buffer(new_exe)
 	f.close()
-	return ""
+	return target
 
 
-func restart_game() -> void:
-	OS.create_process(game_exe_path(), [])
+# Starts the new version and closes this one. The new version deletes this
+# version's file once it has closed (see remove_old_exe).
+func restart_game(new_exe: String, old_exe: String) -> void:
+	var args := PackedStringArray()
+	if new_exe.to_lower() != old_exe.to_lower():
+		args = ["--", "--remove-old=" + old_exe]
+	OS.create_process(new_exe, args)
 	get_tree().quit()
+
+
+# Deletes the previous version's game file after an update. Only files next to
+# this game whose name starts like the game's own are ever deleted.
+func remove_old_exe(path: String, tries := 10) -> void:
+	var exe := game_exe_path()
+	var name := path.get_file().to_lower()
+	if path.get_base_dir() != exe.get_base_dir() or path.to_lower() == exe.to_lower() \
+			or not name.ends_with(".exe") or not (name.begins_with("gettic's first td") or name.begins_with("getticsfirsttd")):
+		return
+	if not FileAccess.file_exists(path):
+		return
+	# The old version may still be closing, so try again a few times.
+	if DirAccess.remove_absolute(path) != OK and tries > 1:
+		await get_tree().create_timer(0.5).timeout
+		remove_old_exe(path, tries - 1)
 
 
 func update_failed(message: String) -> void:
