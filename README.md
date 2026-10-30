@@ -1,12 +1,12 @@
 # Gettic's first TD
 
-A small tower defense game made with [Godot 4](https://godotengine.org/), inspired by the classic Warcraft III custom tower defense maps.
+A small 3D tower defense game made with [Godot 4](https://godotengine.org/), inspired by the classic Warcraft III custom tower defense maps.
 
 ![Screenshot of the game](screenshot.png)
 
 Enemies walk a spiral path toward a portal in the middle of the map. Build towers on the grass beside the path, upgrade them, and stop the enemies before they get through. Survive all 30 waves to win.
 
-Everything is drawn with simple shapes in code, so the game has no image or sound files.
+The 3D world is built from simple shapes in code, so the game has no image, model or sound files.
 
 ## Download
 
@@ -66,3 +66,5 @@ All the game code is in `main.gd`. Good places to start:
 - `START_GOLD`, `START_LIVES` and `MAX_WAVE` set the starting values and the number of waves.
 - `WAYPOINTS` sets the shape of the path.
 - `start_wave()` controls how much health enemies get each wave.
+- `build_world()` sets up the 3D scene: camera angle, lighting and map colors.
+- `build_tower_node()` builds each tower's 3D model.

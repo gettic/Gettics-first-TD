@@ -1,13 +1,16 @@
-extends Node2D
-## Spiral TD - a small tower defense game.
+﻿extends Node3D
+## Gettic's first TD - a small 3D tower defense game.
 ## Enemies walk a spiral path toward the portal in the middle.
-## Everything is drawn with simple shapes in _draw(), so there are no assets.
+## The game logic runs on a flat map measured in pixels (CELL pixels per tile).
+## to3d() turns those positions into the 3D world, where one tile is one unit.
+## The side panel, health bars and lightning are drawn in 2D on top (draw_hud).
 
 const CELL := 40
 const COLS := 24
 const ROWS := 18
-const MAP_W := COLS * CELL
-const MAP_H := ROWS * CELL
+const SCREEN_W := 1280
+const SCREEN_H := 720
+const PANEL_LEFT := 960
 const MAX_WAVE := 30
 const START_GOLD := 150
 const START_LIVES := 20
@@ -61,8 +64,8 @@ const TOWERS := {
 	},
 }
 
-# Panel layout
-const PANEL_X := MAP_W + 16
+# Panel layout (screen pixels)
+const PANEL_X := PANEL_LEFT + 16
 const UPGRADE_RECT := Rect2(PANEL_X, 480, 140, 40)
 const SELL_RECT := Rect2(PANEL_X + 148, 480, 140, 40)
 const WAVE_RECT := Rect2(PANEL_X, 610, 200, 44)
@@ -84,6 +87,9 @@ class Enemy:
 	var slow_time := 0.0
 	var traveled := 0.0
 	var dead := false
+	var node: MeshInstance3D
+	var mat: StandardMaterial3D
+	var bob := 0.0
 
 
 class Tower:
@@ -93,7 +99,9 @@ class Tower:
 	var level := 0
 	var cooldown := 0.0
 	var spent := 0
-	var aim := Vector2.RIGHT
+	var aim := Vector2.UP
+	var node: Node3D
+	var head: Node3D
 
 
 class Shot:
@@ -104,6 +112,7 @@ class Shot:
 	var level := 0
 	var speed := 420.0
 	var done := false
+	var node: MeshInstance3D
 
 
 var path_cells := {}
@@ -127,6 +136,21 @@ var state := "playing"  # "playing", "won" or "lost"
 var message := ""
 var message_time := 0.0
 var font: Font
+var time := 0.0
+
+# 3D scene pieces
+var camera: Camera3D
+var hud: Node2D
+var portal: Node3D
+var range_disc: MeshInstance3D
+var ghost: MeshInstance3D
+var ghost_mat: StandardMaterial3D
+var stone_mat: StandardMaterial3D
+var dark_mat: StandardMaterial3D
+var gold_mat: StandardMaterial3D
+var pip_mesh: SphereMesh
+var boom_mesh: SphereMesh
+var shot_mats := {}
 
 
 func _ready() -> void:
@@ -144,10 +168,20 @@ func _ready() -> void:
 			c += step
 	for w in WAYPOINTS:
 		path_points.append(cell_center(w))
+	build_world()
 	new_game()
 
 
 func new_game() -> void:
+	for e in enemies:
+		e.node.queue_free()
+	for t: Tower in towers.values():
+		t.node.queue_free()
+	for s in shots:
+		s.node.queue_free()
+	for fx in effects:
+		if fx.has("node"):
+			fx["node"].queue_free()
 	enemies.clear()
 	towers.clear()
 	shots.clear()
@@ -168,14 +202,31 @@ func cell_center(c: Vector2i) -> Vector2:
 	return Vector2(c.x * CELL + CELL / 2.0, c.y * CELL + CELL / 2.0)
 
 
+func to3d(p: Vector2, height := 0.0) -> Vector3:
+	return Vector3(p.x / CELL, height, p.y / CELL)
+
+
+func mouse_over_panel() -> bool:
+	return get_viewport().get_mouse_position().x >= PANEL_LEFT
+
+
+# Finds the map tile under the mouse by shooting a ray from the camera to the ground.
 func mouse_cell() -> Vector2i:
-	var p := get_global_mouse_position()
-	return Vector2i(floori(p.x / CELL), floori(p.y / CELL))
+	var mp := get_viewport().get_mouse_position()
+	var from := camera.project_ray_origin(mp)
+	var dir := camera.project_ray_normal(mp)
+	if absf(dir.y) < 0.0001:
+		return Vector2i(-100, -100)
+	var hit := from + dir * (-from.y / dir.y)
+	return Vector2i(floori(hit.x), floori(hit.z))
+
+
+func in_map(c: Vector2i) -> bool:
+	return c.x >= 0 and c.y >= 0 and c.x < COLS and c.y < ROWS
 
 
 func can_build(c: Vector2i) -> bool:
-	return c.x >= 0 and c.y >= 0 and c.x < COLS and c.y < ROWS \
-		and not path_cells.has(c) and not towers.has(c)
+	return in_map(c) and not path_cells.has(c) and not towers.has(c)
 
 
 func flash(text: String) -> void:
@@ -185,6 +236,226 @@ func flash(text: String) -> void:
 
 func tower_button_rect(i: int) -> Rect2:
 	return Rect2(PANEL_X, 150 + i * 64, 288, 56)
+
+
+# ---------------------------------------------------------------- 3D world
+
+func mat(col: Color, glow := 0.0, alpha := 1.0) -> StandardMaterial3D:
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(col, alpha)
+	if glow > 0.0:
+		m.emission_enabled = true
+		m.emission = col
+		m.emission_energy_multiplier = glow
+	if alpha < 1.0:
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	return m
+
+
+func add_mesh(parent: Node3D, mesh: Mesh, material: Material, pos := Vector3.ZERO) -> MeshInstance3D:
+	var mi := MeshInstance3D.new()
+	mi.mesh = mesh
+	mi.material_override = material
+	mi.position = pos
+	parent.add_child(mi)
+	return mi
+
+
+func build_world() -> void:
+	var env := Environment.new()
+	env.background_mode = Environment.BG_COLOR
+	env.background_color = Color(0.015, 0.02, 0.03)
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.55, 0.6, 0.7)
+	env.ambient_light_energy = 0.35
+	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	env.glow_enabled = true
+	var world_env := WorldEnvironment.new()
+	world_env.environment = env
+	add_child(world_env)
+
+	var sun := DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-55, -30, 0)
+	sun.light_energy = 1.0
+	sun.shadow_enabled = true
+	sun.directional_shadow_max_distance = 60.0
+	add_child(sun)
+
+	camera = Camera3D.new()
+	camera.fov = 40.0
+	camera.position = Vector3(COLS / 2.0, 27.0, ROWS / 2.0 + 14.0)
+	add_child(camera)
+	camera.look_at(Vector3(COLS / 2.0, 0.0, ROWS / 2.0 + 0.3))
+	# Shift the view so the map is centered in the area left of the side panel
+	camera.h_offset = 4.4
+
+	# Ground: grass tiles, with the path sunk a little lower
+	var tile := BoxMesh.new()
+	tile.size = Vector3(1, 0.5, 1)
+	var grass_a := mat(Color(0.11, 0.24, 0.09))
+	var grass_b := mat(Color(0.13, 0.28, 0.11))
+	var dirt := mat(Color(0.3, 0.2, 0.12))
+	for x in COLS:
+		for y in ROWS:
+			if path_cells.has(Vector2i(x, y)):
+				add_mesh(self, tile, dirt, Vector3(x + 0.5, -0.33, y + 0.5))
+			else:
+				add_mesh(self, tile, grass_a if (x + y) % 2 == 0 else grass_b, Vector3(x + 0.5, -0.25, y + 0.5))
+	var base := BoxMesh.new()
+	base.size = Vector3(COLS + 0.6, 1.0, ROWS + 0.6)
+	add_mesh(self, base, mat(Color(0.16, 0.12, 0.09)), Vector3(COLS / 2.0, -0.85, ROWS / 2.0))
+
+	# Portal at the end of the path
+	portal = Node3D.new()
+	portal.position = to3d(path_points[path_points.size() - 1])
+	add_child(portal)
+	var ring := TorusMesh.new()
+	ring.inner_radius = 0.28
+	ring.outer_radius = 0.42
+	var ring_node := add_mesh(portal, ring, mat(Color(0.75, 0.35, 1.0), 2.5), Vector3(0, 0.5, 0))
+	ring_node.rotation_degrees.x = 90
+	var core := SphereMesh.new()
+	core.radius = 0.22
+	core.height = 0.44
+	add_mesh(portal, core, mat(Color(0.35, 0.1, 0.55), 1.5), Vector3(0, 0.5, 0))
+	var portal_light := OmniLight3D.new()
+	portal_light.light_color = Color(0.7, 0.35, 1.0)
+	portal_light.omni_range = 3.0
+	portal_light.light_energy = 1.5
+	portal_light.position = Vector3(0, 0.8, 0)
+	portal.add_child(portal_light)
+
+	# Range circle and build preview
+	var disc := CylinderMesh.new()
+	disc.top_radius = 1.0
+	disc.bottom_radius = 1.0
+	disc.height = 0.02
+	disc.radial_segments = 48
+	range_disc = add_mesh(self, disc, mat(Color.WHITE, 0.0, 0.07))
+	range_disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	range_disc.visible = false
+	var ghost_mesh := BoxMesh.new()
+	ghost_mesh.size = Vector3(0.95, 0.1, 0.95)
+	ghost_mat = mat(Color.GREEN, 0.0, 0.4)
+	ghost = add_mesh(self, ghost_mesh, ghost_mat)
+	ghost.visible = false
+
+	# Shared materials and meshes
+	stone_mat = mat(Color(0.35, 0.35, 0.4))
+	dark_mat = mat(Color(0.15, 0.15, 0.18))
+	gold_mat = mat(Color(1.0, 0.85, 0.3), 1.0)
+	pip_mesh = SphereMesh.new()
+	pip_mesh.radius = 0.05
+	pip_mesh.height = 0.1
+	boom_mesh = SphereMesh.new()
+	boom_mesh.radius = 1.0
+	boom_mesh.height = 2.0
+
+	# 2D layer for the panel, health bars and lightning
+	var layer := CanvasLayer.new()
+	add_child(layer)
+	hud = Node2D.new()
+	layer.add_child(hud)
+	hud.draw.connect(draw_hud)
+
+
+func build_tower_node(t: Tower) -> void:
+	if t.node != null:
+		t.node.queue_free()
+	var col: Color = TOWERS[t.type]["color"]
+	var root := Node3D.new()
+	root.position = to3d(t.pos)
+	add_child(root)
+	var base := BoxMesh.new()
+	base.size = Vector3(0.8, 0.3, 0.8)
+	add_mesh(root, base, stone_mat, Vector3(0, 0.15, 0))
+	# The tower gets taller with each level
+	var h := 0.35 + t.level * 0.2
+	var body := CylinderMesh.new()
+	body.top_radius = 0.2
+	body.bottom_radius = 0.28
+	body.height = h
+	add_mesh(root, body, mat(col.darkened(0.3)), Vector3(0, 0.3 + h / 2.0, 0))
+	var head := Node3D.new()
+	head.position = Vector3(0, 0.3 + h + 0.15, 0)
+	root.add_child(head)
+	match t.type:
+		"arrow":
+			var box := BoxMesh.new()
+			box.size = Vector3(0.34, 0.22, 0.34)
+			add_mesh(head, box, mat(col))
+			var barrel := BoxMesh.new()
+			barrel.size = Vector3(0.07, 0.07, 0.4)
+			add_mesh(head, barrel, dark_mat, Vector3(0, 0.02, -0.3))
+		"cannon":
+			var ball := SphereMesh.new()
+			ball.radius = 0.24
+			ball.height = 0.48
+			add_mesh(head, ball, mat(col))
+			var barrel := CylinderMesh.new()
+			barrel.top_radius = 0.08
+			barrel.bottom_radius = 0.1
+			barrel.height = 0.45
+			add_mesh(head, barrel, dark_mat, Vector3(0, 0.04, -0.28)).rotation_degrees.x = 90
+		"frost":
+			# Two four-sided cones make a crystal
+			var cone := CylinderMesh.new()
+			cone.top_radius = 0.0
+			cone.bottom_radius = 0.18
+			cone.height = 0.35
+			cone.radial_segments = 4
+			cone.rings = 1
+			var crystal := mat(col, 1.2)
+			add_mesh(head, cone, crystal, Vector3(0, 0.17, 0))
+			add_mesh(head, cone, crystal, Vector3(0, -0.17, 0)).rotation_degrees.x = 180
+		"spark":
+			var orb := SphereMesh.new()
+			orb.radius = 0.2
+			orb.height = 0.4
+			add_mesh(head, orb, mat(col, 2.0), Vector3(0, 0.1, 0))
+			var ring := TorusMesh.new()
+			ring.inner_radius = 0.26
+			ring.outer_radius = 0.31
+			add_mesh(head, ring, dark_mat, Vector3(0, 0.1, 0)).rotation_degrees.x = 60
+	for i in t.level + 1:
+		add_mesh(root, pip_mesh, gold_mat, Vector3(-0.3 + i * 0.2, 0.32, 0.36))
+	t.node = root
+	t.head = head
+
+
+func update_visuals(delta: float) -> void:
+	time += delta
+	portal.rotation.y += delta * 1.5
+	for e in enemies:
+		var r := e.radius / CELL
+		e.node.position = to3d(e.pos, -0.08 + r + absf(sin(time * 8.0 + e.bob)) * 0.06)
+		e.mat.albedo_color = e.color.lerp(Color(0.55, 0.9, 1.0), 0.55) if e.slow_time > 0.0 else e.color
+	for t: Tower in towers.values():
+		if t.type == "arrow" or t.type == "cannon":
+			t.head.rotation.y = atan2(-t.aim.x, -t.aim.y)
+		else:
+			t.head.rotation.y += delta * 2.0
+	for s in shots:
+		s.node.position = to3d(s.pos, 0.6)
+
+	range_disc.visible = false
+	ghost.visible = false
+	if selected != null:
+		show_range(selected.pos, TOWERS[selected.type]["range"][selected.level])
+	elif build_type != "" and not mouse_over_panel() and state == "playing":
+		var c := mouse_cell()
+		if in_map(c):
+			ghost.visible = true
+			ghost.position = Vector3(c.x + 0.5, 0.05, c.y + 0.5)
+			ghost_mat.albedo_color = Color(0.3, 1, 0.3, 0.4) if can_build(c) else Color(1, 0.2, 0.2, 0.4)
+			show_range(cell_center(c), TOWERS[build_type]["range"][0])
+
+
+func show_range(p: Vector2, rng: float) -> void:
+	range_disc.visible = true
+	range_disc.position = to3d(p, 0.02)
+	var s := rng / CELL
+	range_disc.scale = Vector3(s, 1, s)
 
 
 # ---------------------------------------------------------------- waves
@@ -239,6 +510,22 @@ func spawn_enemy(kind: String) -> void:
 			e.leak = 5
 			e.color = Color(0.9, 0.15, 0.15)
 	e.hp = e.max_hp
+
+	var r := e.radius / CELL
+	var ball := SphereMesh.new()
+	ball.radius = r
+	ball.height = r * 2.0
+	e.mat = mat(e.color)
+	if kind == "armored":
+		e.mat.metallic = 0.8
+		e.mat.roughness = 0.3
+	e.node = add_mesh(self, ball, e.mat, to3d(e.pos, r))
+	if kind == "boss":
+		var crown := TorusMesh.new()
+		crown.inner_radius = 0.1
+		crown.outer_radius = 0.17
+		add_mesh(e.node, crown, gold_mat, Vector3(0, r * 0.95, 0))
+	e.bob = randf() * TAU
 	enemies.append(e)
 
 
@@ -265,7 +552,8 @@ func _process(delta: float) -> void:
 				state = "won"
 			else:
 				flash("Wave %d cleared! +%d gold" % [wave, bonus])
-	queue_redraw()
+	update_visuals(delta)
+	hud.queue_redraw()
 
 
 func update_spawning(dt: float) -> void:
@@ -327,6 +615,12 @@ func update_towers(dt: float) -> void:
 			s.level = t.level
 			if t.type == "cannon":
 				s.speed = 300.0
+			if not shot_mats.has(t.type):
+				shot_mats[t.type] = mat(data["color"], 2.0)
+			var ball := SphereMesh.new()
+			ball.radius = 0.12 if t.type == "cannon" else 0.07
+			ball.height = ball.radius * 2.0
+			s.node = add_mesh(self, ball, shot_mats[t.type], to3d(s.pos, 0.6))
 			shots.append(s)
 
 
@@ -344,7 +638,7 @@ func fire_lightning(t: Tower, first: Enemy) -> void:
 	var data: Dictionary = TOWERS["spark"]
 	var dmg: float = data["damage"][t.level]
 	var hit: Array[Enemy] = [first]
-	var points := PackedVector2Array([t.pos, first.pos])
+	var points := PackedVector3Array([t.node.position + t.head.position + Vector3(0, 0.1, 0), first.node.position])
 	damage_enemy(first, dmg)
 	var current := first
 	for i in range(data["chain"][t.level] - 1):
@@ -361,7 +655,7 @@ func fire_lightning(t: Tower, first: Enemy) -> void:
 		if next == null:
 			break
 		hit.append(next)
-		points.append(next.pos)
+		points.append(next.node.position)
 		damage_enemy(next, dmg)
 		current = next
 	effects.append({"kind": "bolt", "points": points, "time": 0.15, "max": 0.15})
@@ -381,6 +675,7 @@ func update_shots(dt: float) -> void:
 			s.pos += to.normalized() * step
 	for i in range(shots.size() - 1, -1, -1):
 		if shots[i].done:
+			shots[i].node.queue_free()
 			shots.remove_at(i)
 
 
@@ -394,7 +689,11 @@ func shot_hit(s: Shot) -> void:
 			for e in enemies:
 				if not e.dead and e.pos.distance_to(s.pos) <= r:
 					damage_enemy(e, dmg)
-			effects.append({"kind": "boom", "pos": s.pos, "radius": r, "time": 0.25, "max": 0.25})
+			var m := mat(Color(1.0, 0.55, 0.15), 1.5, 0.5)
+			var node := add_mesh(self, boom_mesh, m, to3d(s.pos, 0.2))
+			node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			node.scale = Vector3.ZERO
+			effects.append({"kind": "boom", "node": node, "mat": m, "radius": r, "time": 0.3, "max": 0.3})
 		"frost":
 			if alive:
 				var slow: float = data["slow"][s.level]
@@ -419,13 +718,25 @@ func damage_enemy(e: Enemy, amount: float) -> void:
 func remove_dead() -> void:
 	for i in range(enemies.size() - 1, -1, -1):
 		if enemies[i].dead:
+			enemies[i].node.queue_free()
 			enemies.remove_at(i)
 
 
 func update_effects(delta: float) -> void:
-	for fx in effects:
+	for i in range(effects.size() - 1, -1, -1):
+		var fx: Dictionary = effects[i]
 		fx["time"] -= delta
-	effects = effects.filter(func(fx): return fx["time"] > 0.0)
+		if fx["time"] <= 0.0:
+			if fx.has("node"):
+				fx["node"].queue_free()
+			effects.remove_at(i)
+		elif fx["kind"] == "boom":
+			var a: float = fx["time"] / fx["max"]
+			var size: float = fx["radius"] / CELL * (1.2 - a * 0.4)
+			var node: MeshInstance3D = fx["node"]
+			var m: StandardMaterial3D = fx["mat"]
+			node.scale = Vector3(size, size * 0.6, size)
+			m.albedo_color = Color(m.albedo_color, a * 0.5)
 
 
 # ---------------------------------------------------------------- input
@@ -436,7 +747,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			build_type = ""
 			selected = null
 		elif event.button_index == MOUSE_BUTTON_LEFT:
-			on_click(get_global_mouse_position())
+			on_click(get_viewport().get_mouse_position())
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_1, KEY_2, KEY_3, KEY_4:
@@ -460,7 +771,7 @@ func _unhandled_input(event: InputEvent) -> void:
 func on_click(p: Vector2) -> void:
 	if state != "playing":
 		return
-	if p.x >= MAP_W:
+	if p.x >= PANEL_LEFT:
 		for i in TOWER_TYPES.size():
 			if tower_button_rect(i).has_point(p):
 				choose_build(TOWER_TYPES[i])
@@ -502,6 +813,7 @@ func try_build(c: Vector2i) -> void:
 	t.spent = cost
 	gold -= cost
 	towers[c] = t
+	build_tower_node(t)
 
 
 func upgrade_selected() -> void:
@@ -517,12 +829,14 @@ func upgrade_selected() -> void:
 	gold -= cost
 	selected.spent += cost
 	selected.level += 1
+	build_tower_node(selected)
 
 
 func sell_selected() -> void:
 	if selected == null:
 		return
 	gold += int(selected.spent * 0.7)
+	selected.node.queue_free()
 	towers.erase(selected.cell)
 	selected = null
 
@@ -531,92 +845,35 @@ func toggle_speed() -> void:
 	game_speed = game_speed % 3 + 1
 
 
-# ---------------------------------------------------------------- drawing
+# ---------------------------------------------------------------- 2D overlay
 
-func _draw() -> void:
-	draw_map()
-	draw_towers()
-	draw_enemies()
-	for s in shots:
-		draw_circle(s.pos, 5.0 if s.type == "cannon" else 3.5, TOWERS[s.type]["color"])
-	draw_effects()
-	draw_build_preview()
+func draw_hud() -> void:
+	draw_health_bars()
+	for fx in effects:
+		if fx["kind"] == "bolt":
+			var pts := PackedVector2Array()
+			for p in fx["points"]:
+				pts.append(camera.unproject_position(p))
+			var a: float = fx["time"] / fx["max"]
+			hud.draw_polyline(pts, Color(0.75, 0.5, 1.0, a * 0.5), 7.0)
+			hud.draw_polyline(pts, Color(0.95, 0.9, 1.0, a), 2.5)
 	draw_panel()
 	if state != "playing":
 		draw_end_screen()
 
 
-func draw_map() -> void:
-	for x in COLS:
-		for y in ROWS:
-			var c := Vector2i(x, y)
-			var col: Color
-			if path_cells.has(c):
-				col = Color(0.42, 0.33, 0.22)
-			elif (x + y) % 2 == 0:
-				col = Color(0.13, 0.22, 0.13)
-			else:
-				col = Color(0.15, 0.25, 0.15)
-			draw_rect(Rect2(x * CELL, y * CELL, CELL, CELL), col)
-	# Portal at the end of the path
-	var portal := path_points[path_points.size() - 1]
-	var pulse := 0.5 + 0.5 * sin(Time.get_ticks_msec() / 200.0)
-	draw_circle(portal, 17.0, Color(0.25, 0.05, 0.35))
-	draw_arc(portal, 15.0 + pulse * 3.0, 0, TAU, 32, Color(0.8, 0.4, 1.0), 3.0)
-
-
-func draw_towers() -> void:
-	if selected != null:
-		var rng: float = TOWERS[selected.type]["range"][selected.level]
-		draw_circle(selected.pos, rng, Color(1, 1, 1, 0.08))
-		draw_arc(selected.pos, rng, 0, TAU, 64, Color(1, 1, 1, 0.5), 1.5)
-	for t: Tower in towers.values():
-		var col: Color = TOWERS[t.type]["color"]
-		var base := Rect2(t.pos - Vector2(16, 16), Vector2(32, 32))
-		draw_rect(base, Color(0.2, 0.2, 0.24))
-		if t == selected:
-			draw_rect(base, Color.WHITE, false, 2.0)
-		draw_line(t.pos, t.pos + t.aim * 15.0, col.darkened(0.3), 5.0)
-		draw_circle(t.pos, 9.0 + t.level * 1.5, col)
-		for i in t.level + 1:
-			draw_circle(t.pos + Vector2(-9 + i * 6, 13), 2.0, Color(1, 0.9, 0.3))
-
-
-func draw_enemies() -> void:
+func draw_health_bars() -> void:
 	for e in enemies:
-		draw_circle(e.pos, e.radius, e.color)
-		if e.armor > 0.0:
-			draw_arc(e.pos, e.radius, 0, TAU, 24, Color(0.3, 0.3, 0.35), 2.0)
-		if e.slow_time > 0.0:
-			draw_arc(e.pos, e.radius + 2.0, 0, TAU, 24, Color(0.4, 0.85, 1.0), 2.0)
-		var w := e.radius * 2.0 + 4.0
-		var bar := Vector2(e.pos.x - w / 2.0, e.pos.y - e.radius - 8.0)
-		draw_rect(Rect2(bar, Vector2(w, 4)), Color(0.3, 0, 0))
-		draw_rect(Rect2(bar, Vector2(w * e.hp / e.max_hp, 4)), Color(0.2, 0.9, 0.2))
-
-
-func draw_effects() -> void:
-	for fx in effects:
-		var a: float = fx["time"] / fx["max"]
-		if fx["kind"] == "bolt":
-			draw_polyline(fx["points"], Color(0.85, 0.7, 1.0, a), 3.0)
-		else:
-			draw_circle(fx["pos"], fx["radius"] * (1.2 - a * 0.4), Color(1.0, 0.55, 0.15, a * 0.45))
-
-
-func draw_build_preview() -> void:
-	if build_type == "" or get_global_mouse_position().x >= MAP_W:
-		return
-	var c := mouse_cell()
-	var ok := can_build(c)
-	var col := Color(0.3, 1, 0.3, 0.35) if ok else Color(1, 0.2, 0.2, 0.35)
-	draw_rect(Rect2(c * CELL, Vector2(CELL, CELL)), col)
-	var rng: float = TOWERS[build_type]["range"][0]
-	draw_arc(cell_center(c), rng, 0, TAU, 64, Color(1, 1, 1, 0.4), 1.5)
+		var r := e.radius / CELL
+		var p := camera.unproject_position(e.node.position + Vector3(0, r + 0.25, 0))
+		var w := e.radius * 2.4
+		var bar := Vector2(p.x - w / 2.0, p.y)
+		hud.draw_rect(Rect2(bar, Vector2(w, 4)), Color(0.3, 0, 0))
+		hud.draw_rect(Rect2(bar, Vector2(w * e.hp / e.max_hp, 4)), Color(0.2, 0.9, 0.2))
 
 
 func text(pos: Vector2, s: String, size := 16, col := Color.WHITE) -> void:
-	draw_string(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
+	hud.draw_string(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
 
 
 func button(r: Rect2, label: String, enabled := true, active := false) -> void:
@@ -625,15 +882,15 @@ func button(r: Rect2, label: String, enabled := true, active := false) -> void:
 		bg = Color(0.3, 0.4, 0.55)
 	elif not enabled:
 		bg = Color(0.15, 0.15, 0.18)
-	draw_rect(r, bg)
-	draw_rect(r, Color(0.45, 0.48, 0.55), false, 1.0)
+	hud.draw_rect(r, bg)
+	hud.draw_rect(r, Color(0.45, 0.48, 0.55), false, 1.0)
 	var size := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 16)
 	var col := Color.WHITE if enabled else Color(0.5, 0.5, 0.5)
 	text(r.position + Vector2((r.size.x - size.x) / 2.0, r.size.y / 2.0 + 6.0), label, 16, col)
 
 
 func draw_panel() -> void:
-	draw_rect(Rect2(MAP_W, 0, 1280 - MAP_W, MAP_H), Color(0.09, 0.09, 0.12))
+	hud.draw_rect(Rect2(PANEL_LEFT, 0, SCREEN_W - PANEL_LEFT, SCREEN_H), Color(0.09, 0.09, 0.12))
 	text(Vector2(PANEL_X, 36), "WAVE %d / %d" % [wave, MAX_WAVE], 26)
 	text(Vector2(PANEL_X, 70), "Lives: %d" % lives, 20, Color(1, 0.45, 0.45))
 	text(Vector2(PANEL_X + 150, 70), "Gold: %d" % gold, 20, Color(1, 0.85, 0.3))
@@ -646,9 +903,9 @@ func draw_panel() -> void:
 		var data: Dictionary = TOWERS[type]
 		var r := tower_button_rect(i)
 		var affordable: bool = gold >= data["cost"][0]
-		draw_rect(r, Color(0.3, 0.4, 0.55) if build_type == type else Color(0.17, 0.18, 0.23))
-		draw_rect(r, Color(0.45, 0.48, 0.55), false, 1.0)
-		draw_circle(r.position + Vector2(28, 28), 13.0, data["color"])
+		hud.draw_rect(r, Color(0.3, 0.4, 0.55) if build_type == type else Color(0.17, 0.18, 0.23))
+		hud.draw_rect(r, Color(0.45, 0.48, 0.55), false, 1.0)
+		hud.draw_circle(r.position + Vector2(28, 28), 13.0, data["color"])
 		var name_col := Color.WHITE if affordable else Color(0.55, 0.55, 0.55)
 		text(r.position + Vector2(52, 24), "%d. %s" % [i + 1, data["name"]], 18, name_col)
 		text(r.position + Vector2(220, 24), "%dg" % data["cost"][0], 18, Color(1, 0.85, 0.3) if affordable else Color(0.6, 0.4, 0.3))
@@ -679,12 +936,12 @@ func draw_panel() -> void:
 
 
 func draw_end_screen() -> void:
-	draw_rect(Rect2(0, 0, MAP_W, MAP_H), Color(0, 0, 0, 0.6))
+	hud.draw_rect(Rect2(0, 0, PANEL_LEFT, SCREEN_H), Color(0, 0, 0, 0.6))
 	var title := "VICTORY!" if state == "won" else "GAME OVER"
 	var sub := "You survived all %d waves." % MAX_WAVE if state == "won" else "You reached wave %d." % wave
 	var size := font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 64)
-	text(Vector2((MAP_W - size.x) / 2.0, 320), title, 64, Color(1, 0.85, 0.3) if state == "won" else Color(1, 0.35, 0.35))
+	text(Vector2((PANEL_LEFT - size.x) / 2.0, 320), title, 64, Color(1, 0.85, 0.3) if state == "won" else Color(1, 0.35, 0.35))
 	size = font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 22)
-	text(Vector2((MAP_W - size.x) / 2.0, 370), sub, 22)
+	text(Vector2((PANEL_LEFT - size.x) / 2.0, 370), sub, 22)
 	size = font.get_string_size("Press R to play again", HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
-	text(Vector2((MAP_W - size.x) / 2.0, 410), "Press R to play again", 18, Color(0.8, 0.8, 0.8))
+	text(Vector2((PANEL_LEFT - size.x) / 2.0, 410), "Press R to play again", 18, Color(0.8, 0.8, 0.8))
