@@ -2,6 +2,8 @@
 
 A small tower defense game made with [Godot 4](https://godotengine.org/), inspired by the classic Warcraft III custom tower defense maps.
 
+![Screenshot of the game](screenshot.png)
+
 Enemies walk a spiral path toward a portal in the middle of the map. Build towers on the grass beside the path, upgrade them, and stop the enemies before they get through. Survive all 30 waves to win.
 
 Everything is drawn with simple shapes in code, so the game has no image or sound files.
