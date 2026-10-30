@@ -13,6 +13,10 @@ const SCREEN_H := 720
 const PANEL_LEFT := 960
 const CAMERA_SPEED := 12.0  # tiles per second
 const CAMERA_LIMIT := Vector2(9.0, 7.0)  # how far the camera can move from its start
+const CAMERA_H_OFFSET := 4.4  # shifts the view so the map is centered left of the side panel
+const ZOOM_MIN := 0.35  # closest zoom (fraction of the starting distance)
+const ZOOM_MAX := 1.3   # furthest zoom
+const ZOOM_STEP := 0.1  # how much one scroll-wheel notch zooms
 const MAX_WAVE := 30
 const START_GOLD := 150
 const MAX_ALIVE := 50  # you lose when this many monsters are alive at once (a boss counts as 5)
@@ -159,6 +163,10 @@ var update_http: HTTPRequest
 # 3D scene pieces
 var camera: Camera3D
 var camera_home: Vector3
+var camera_focus: Vector3       # the ground point the camera looks at when not moved
+var camera_pan := Vector2.ZERO  # how far WASD has moved the camera
+var zoom := 1.0
+var target_zoom := 1.0
 var hud: Node2D
 var portal: Node3D
 var range_disc: MeshInstance3D
@@ -482,9 +490,9 @@ func build_world() -> void:
 	camera.fov = 40.0
 	camera.position = Vector3(COLS / 2.0, 27.0, ROWS / 2.0 + 14.0)
 	add_child(camera)
-	camera.look_at(Vector3(COLS / 2.0, 0.0, ROWS / 2.0 + 0.3))
-	# Shift the view so the map is centered in the area left of the side panel
-	camera.h_offset = 4.4
+	camera_focus = Vector3(COLS / 2.0, 0.0, ROWS / 2.0 + 0.3)
+	camera.look_at(camera_focus)
+	camera.h_offset = CAMERA_H_OFFSET
 	camera_home = camera.position
 
 	# Ground: grass tiles, with the path sunk a little lower.
@@ -507,25 +515,52 @@ func build_world() -> void:
 	base.size = Vector3(COLS + 0.6, 1.0, ROWS + 0.6)
 	add_mesh(self, base, mat(Color(0.16, 0.12, 0.09)), Vector3(COLS / 2.0, -0.85, ROWS / 2.0))
 
-	# Portal at the end of the path
+	# Stone gate with a green portal where the monsters come out.
+	# It faces along the first stretch of path, so monsters walk straight out of it.
+	var gate := Node3D.new()
+	gate.position = to3d(path_points[0])
+	var out_dir: Vector2i = SPAWN_PATH[1] - SPAWN_PATH[0]
+	gate.rotation.y = atan2(out_dir.x, out_dir.y)
+	add_child(gate)
+	var stone := mat(Color(0.42, 0.42, 0.46))
+	var pillar := BoxMesh.new()
+	pillar.size = Vector3(0.22, 1.3, 0.3)
+	add_mesh(gate, pillar, stone, Vector3(-0.5, 0.57, 0))
+	add_mesh(gate, pillar, stone, Vector3(0.5, 0.57, 0))
+	var lintel := BoxMesh.new()
+	lintel.size = Vector3(1.34, 0.26, 0.38)
+	add_mesh(gate, lintel, stone, Vector3(0, 1.3, 0))
+	var cap := BoxMesh.new()
+	cap.size = Vector3(0.3, 0.1, 0.4)
+	add_mesh(gate, cap, stone, Vector3(-0.5, -0.03, 0))
+	add_mesh(gate, cap, stone, Vector3(0.5, -0.03, 0))
+
+	# The portal surface filling the arch, visible from both sides
+	var green := Color(0.25, 1.0, 0.4)
+	var surface := QuadMesh.new()
+	surface.size = Vector2(0.78, 1.12)
+	var surface_mat := mat(green, 1.6, 0.7)
+	surface_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	add_mesh(gate, surface, surface_mat, Vector3(0, 0.6, 0)).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	# Glowing sparks that swirl inside the portal
 	portal = Node3D.new()
-	portal.position = to3d(path_points[0])
-	add_child(portal)
-	var ring := TorusMesh.new()
-	ring.inner_radius = 0.28
-	ring.outer_radius = 0.42
-	var ring_node := add_mesh(portal, ring, mat(Color(0.75, 0.35, 1.0), 2.5), Vector3(0, 0.5, 0))
-	ring_node.rotation_degrees.x = 90
-	var core := SphereMesh.new()
-	core.radius = 0.22
-	core.height = 0.44
-	add_mesh(portal, core, mat(Color(0.35, 0.1, 0.55), 1.5), Vector3(0, 0.5, 0))
+	portal.position = Vector3(0, 0.6, 0.02)
+	gate.add_child(portal)
+	var spark := SphereMesh.new()
+	spark.radius = 0.05
+	spark.height = 0.1
+	var spark_mat := mat(Color(0.75, 1.0, 0.8), 3.0)
+	for i in 6:
+		var a := TAU * i / 6.0
+		add_mesh(portal, spark, spark_mat, Vector3(cos(a), sin(a), 0) * 0.28)
+
 	var portal_light := OmniLight3D.new()
-	portal_light.light_color = Color(0.7, 0.35, 1.0)
+	portal_light.light_color = green
 	portal_light.omni_range = 3.0
-	portal_light.light_energy = 1.5
-	portal_light.position = Vector3(0, 0.8, 0)
-	portal.add_child(portal_light)
+	portal_light.light_energy = 1.8
+	portal_light.position = Vector3(0, 0.7, 0.4)
+	gate.add_child(portal_light)
 
 	# Range circle and build preview
 	var disc := CylinderMesh.new()
@@ -627,7 +662,7 @@ func build_tower_node(t: Tower) -> void:
 
 func update_visuals(delta: float) -> void:
 	time += delta
-	portal.rotation.y += delta * 1.5
+	portal.rotation.z += delta * 2.0
 	for e in enemies:
 		var r := e.radius / CELL
 		e.node.position = to3d(e.pos, -0.08 + r + absf(sin(time * 8.0 + e.bob)) * 0.06)
@@ -777,7 +812,8 @@ func _process(delta: float) -> void:
 	hud.queue_redraw()
 
 
-# Moves the camera with WASD (by key position, so it works on any keyboard layout).
+# Moves the camera with WASD (by key position, so it works on any keyboard layout)
+# and glides it toward the zoom level set with the scroll wheel.
 func update_camera(delta: float) -> void:
 	var dir := Vector2.ZERO
 	if Input.is_physical_key_pressed(KEY_W):
@@ -788,11 +824,19 @@ func update_camera(delta: float) -> void:
 		dir.x -= 1
 	if Input.is_physical_key_pressed(KEY_D):
 		dir.x += 1
-	if dir == Vector2.ZERO:
-		return
-	var move := dir.normalized() * CAMERA_SPEED * delta
-	camera.position.x = clampf(camera.position.x + move.x, camera_home.x - CAMERA_LIMIT.x, camera_home.x + CAMERA_LIMIT.x)
-	camera.position.z = clampf(camera.position.z + move.y, camera_home.z - CAMERA_LIMIT.y, camera_home.z + CAMERA_LIMIT.y)
+	if dir != Vector2.ZERO:
+		# Move slower when zoomed in, so it doesn't feel too fast up close
+		camera_pan += dir.normalized() * CAMERA_SPEED * zoom * delta
+		camera_pan = camera_pan.clamp(-CAMERA_LIMIT, CAMERA_LIMIT)
+	zoom = lerpf(zoom, target_zoom, 1.0 - exp(-12.0 * delta))
+	# Zooming slides the camera along the line it looks down, so the angle stays the same
+	var pan := Vector3(camera_pan.x, 0.0, camera_pan.y)
+	camera.position = camera_focus + pan + (camera_home - camera_focus) * zoom
+	camera.h_offset = CAMERA_H_OFFSET * zoom
+
+
+func zoom_camera(steps: float) -> void:
+	target_zoom = clampf(target_zoom + steps * ZOOM_STEP, ZOOM_MIN, ZOOM_MAX)
 
 
 func alive_count() -> int:
@@ -1002,6 +1046,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			selected = null
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			on_click(get_viewport().get_mouse_position())
+		elif event.button_index == MOUSE_BUTTON_WHEEL_UP and not mouse_over_panel():
+			zoom_camera(-1.0)
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and not mouse_over_panel():
+			zoom_camera(1.0)
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_1, KEY_2, KEY_3, KEY_4:
@@ -1271,7 +1319,7 @@ func draw_panel() -> void:
 		wave_label = "No more waves"
 	button(WAVE_RECT, wave_label, wave < MAX_WAVE and state == "playing" and spawn_queue.is_empty())
 	button(SPEED_RECT, "x%d (F)" % game_speed, true, game_speed > 1)
-	text(Vector2(PANEL_X, 676), "WASD: move camera", 13, Color(0.55, 0.55, 0.6))
+	text(Vector2(PANEL_X, 676), "WASD: move camera   Scroll: zoom", 13, Color(0.55, 0.55, 0.6))
 	text(Vector2(PANEL_X, 696), "Right-click: cancel   Esc: pause", 13, Color(0.55, 0.55, 0.6))
 
 
