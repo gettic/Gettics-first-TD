@@ -39,7 +39,7 @@ const NET_PORT := 24750
 const SEARCH_PORT := 24751  # the host listens here for players on its network looking for its code
 const SNAPSHOT_RATE := 15.0  # monster updates per second sent to the other players
 const CODE_LETTERS := "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # for invite codes (no I, L, O or U)
-# The game server (relay/worker.js) that lists public games and passes messages
+# The game server (a Cloudflare Worker) that lists public games and passes messages
 # along, so no router ports are needed. Empty: only games on the local network.
 # Start the game with "-- --relay=http://127.0.0.1:8787" to use a test server.
 const RELAY_URL := "https://gtd-relay.gtd-relay.workers.dev"
@@ -118,6 +118,11 @@ const ASK_NO_RECT := Rect2(490, 64, 230, 38)
 # Checked at startup to see if a newer release is on GitHub
 const RELEASES_API := "https://api.github.com/repos/gettic/Gettics-first-TD/releases/latest"
 
+# Where the downloaded .exe unpacks itself (see "unpacking")
+const GAME_FOLDER := "Gettic's first TD"
+const GAME_EXE := "Gettic's first TD.exe"
+const GAME_PCK := "Gettic's first TD.pck"
+
 
 class Enemy:
 	var id := 0  # the same on every player's computer
@@ -175,7 +180,7 @@ class Player:
 	var gold := 0
 
 
-# A network connection that goes through the game server (relay/worker.js)
+# A network connection that goes through the game server (see RELAY_URL)
 # instead of straight to the host, so nobody has to open router ports.
 # Godot's multiplayer uses it just like a direct connection.
 class RelayPeer extends MultiplayerPeerExtension:
@@ -382,7 +387,9 @@ var time := 0.0
 var version := ""
 var update_version := ""  # set when GitHub has a newer release
 var update_url := ""  # release page
-var update_zip_url := ""  # the Windows .zip in the release
+var update_zip_url := ""  # the Windows .zip in the release (how versions before 1.15 update)
+var update_exe_url := ""  # the packed .exe in the release
+var update_pck_url := ""  # just the game, if the release has one for our engine version
 var update_notes := ""  # "What's new" from the release notes
 var update_dialog := ""  # "", "ask", "downloading" or "failed"
 var update_error := ""
@@ -448,12 +455,16 @@ func mark_path(a: Vector2i, b: Vector2i) -> void:
 
 func check_for_update() -> void:
 	version = str(ProjectSettings.get_setting("application/config/version", "0"))
-	# Clean up the old game file left behind by the last update.
+	# Clean up the old game files left behind by the last update.
 	if OS.has_feature("template"):
 		DirAccess.remove_absolute(game_exe_path() + ".old")
+		DirAccess.remove_absolute(game_pck_path() + ".old")
 		for arg in OS.get_cmdline_user_args():
 			if arg.begins_with("--remove-old="):
 				remove_old_exe(arg.trim_prefix("--remove-old="))
+		# A fresh download: warn that it will unpack itself
+		if is_packed():
+			update_dialog = "unpack"
 	var http := HTTPRequest.new()
 	http.timeout = 10.0
 	add_child(http)
@@ -479,8 +490,16 @@ func _on_update_checked(result: int, code: int, _headers: PackedStringArray, bod
 		var assets = data.get("assets")
 		if assets is Array:
 			for asset in assets:
-				if asset is Dictionary and str(asset.get("name", "")).ends_with("-windows.zip"):
-					update_zip_url = str(asset.get("browser_download_url", ""))
+				if not asset is Dictionary:
+					continue
+				var name := str(asset.get("name", ""))
+				var url := str(asset.get("browser_download_url", ""))
+				if name.ends_with("-windows.zip"):
+					update_zip_url = url
+				elif name.ends_with(".exe"):
+					update_exe_url = url
+				elif name.ends_with("-godot-%s.pck" % engine_tag()):
+					update_pck_url = url  # just the game, for this same engine
 
 
 # Keeps only the "What's new" part of the release notes and removes Markdown symbols.
@@ -503,73 +522,159 @@ func game_exe_path() -> String:
 	return OS.get_executable_path()
 
 
+func game_pck_path() -> String:
+	return game_exe_path().get_basename() + ".pck"
+
+
+# ---------------------------------------------------------------- unpacking
+#
+# The download is one .exe: the Godot engine with the game packed inside it.
+# The first time it runs it unpacks itself into a folder next to the download:
+# the engine (GAME_EXE) and the game (GAME_PCK) as separate files. Updates then
+# only need the small game file, unless the engine itself changed.
+
+# True when the game is still packed inside the .exe (a fresh download).
+func is_packed() -> bool:
+	var f := FileAccess.open(game_exe_path(), FileAccess.READ)
+	if f == null or f.get_length() < 4:
+		return false
+	f.seek(f.get_length() - 4)
+	return f.get_buffer(4).get_string_from_ascii() == "GDPC"
+
+
+# The engine version, which must match for a game file to work with an engine.
+func engine_tag() -> String:
+	var v := Engine.get_version_info()
+	return "%d.%d.%d.%s" % [v.major, v.minor, v.patch, v.status]
+
+
+func unpack_folder() -> String:
+	return game_exe_path().get_base_dir().path_join(GAME_FOLDER)
+
+
+# Splits a packed .exe into [engine, game]. Godot keeps the game in a section
+# called "pck" at the end of the .exe, so the engine is everything before it,
+# with that section taken out of the .exe's header. Returns [] if it isn't one.
+func split_packed(data: PackedByteArray) -> Array:
+	var n := data.size()
+	if n < 4096 or data.slice(n - 4).get_string_from_ascii() != "GDPC":
+		return []
+	var pck_size := data.decode_s64(n - 12)
+	var pe := data.decode_u32(0x3C)
+	var count := data.decode_u16(pe + 6)
+	var optional := pe + 24
+	var table := optional + data.decode_u16(pe + 20)
+	var last := table + (count - 1) * 40
+	if count < 2 or data.slice(last, last + 8).get_string_from_ascii() != "pck":
+		return []
+	var start := data.decode_u32(last + 20)
+	if start + pck_size + 12 != n:
+		return []
+	var engine := data.slice(0, start)
+	engine.encode_u16(pe + 6, count - 1)
+	for i in 40:
+		engine[last + i] = 0
+	# The program's size in memory now ends with the section before it
+	var before := last - 40
+	var align := data.decode_u32(optional + 32)
+	var end := data.decode_u32(before + 12) + data.decode_u32(before + 8)
+	engine.encode_u32(optional + 56, ceili(float(end) / align) * align)
+	engine.encode_u32(optional + 64, 0)  # checksum, not needed for programs
+	return [engine, data.slice(start, start + pck_size)]
+
+
+# Writes a packed .exe's engine and game into a folder. Returns the engine's
+# path, or an error message.
+func unpack_to(data: PackedByteArray, folder: String) -> String:
+	var parts := split_packed(data)
+	if parts.is_empty():
+		return "The game file is damaged."
+	DirAccess.make_dir_recursive_absolute(folder)
+	var exe := folder.path_join(GAME_EXE)
+	var error := replace_file(exe, parts[0])
+	if error == "":
+		error = replace_file(folder.path_join(GAME_PCK), parts[1])
+	return error if error != "" else exe
+
+
+# Writes a file. Windows won't let a running game's files be overwritten, but
+# they can be renamed, so an existing file is moved to .old first (deleted on
+# the next start). Returns an error message, or "".
+func replace_file(path: String, data: PackedByteArray) -> String:
+	var old := path + ".old"
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(old)
+		if DirAccess.rename_absolute(path, old) != OK:
+			return "Could not replace %s." % path.get_file()
+	var f := FileAccess.open(path, FileAccess.WRITE)
+	if f == null:
+		if FileAccess.file_exists(old):
+			DirAccess.rename_absolute(old, path)
+		return "Could not write %s." % path.get_file()
+	f.store_buffer(data)
+	f.close()
+	return ""
+
+
+# The player said yes to the first-run warning.
+func unpack_self() -> void:
+	var data := FileAccess.get_file_as_bytes(game_exe_path())
+	var result := unpack_to(data, unpack_folder())
+	if not result.ends_with(".exe"):
+		update_error = result
+		update_dialog = "unpack_failed"
+		return
+	restart_game(result, game_exe_path())
+
+
 func start_update() -> void:
-	# Running from the Godot editor (or no .zip in the release): open the download page instead.
-	if not OS.has_feature("template") or update_zip_url == "":
+	# Running from the Godot editor (or no .exe in the release): open the download page instead.
+	if not OS.has_feature("template") or update_exe_url == "":
 		OS.shell_open(update_url)
 		update_dialog = ""
 		return
-	download_update()
+	# Unpacked with the same engine: only the small game file is needed
+	if update_pck_url != "" and not is_packed():
+		download_update(update_pck_url, "update.pck")
+	else:
+		download_update(update_exe_url, "update.exe")
 
 
-func download_update() -> void:
+func download_update(url: String, file_name: String) -> void:
 	update_dialog = "downloading"
-	var zip_path := OS.get_user_data_dir().path_join("update.zip")
+	var path := OS.get_user_data_dir().path_join(file_name)
 	update_http = HTTPRequest.new()
-	update_http.download_file = zip_path
+	update_http.download_file = path
 	add_child(update_http)
-	update_http.request_completed.connect(_on_update_downloaded.bind(zip_path))
-	if update_http.request(update_zip_url, ["User-Agent: GetticsFirstTD"]) != OK:
+	update_http.request_completed.connect(_on_update_downloaded.bind(path))
+	if update_http.request(url, ["User-Agent: GetticsFirstTD"]) != OK:
 		update_failed("Could not start the download.")
 
 
-func _on_update_downloaded(result: int, code: int, _headers: PackedStringArray, _body: PackedByteArray, zip_path: String) -> void:
+func _on_update_downloaded(result: int, code: int, _headers: PackedStringArray, _body: PackedByteArray, path: String) -> void:
 	update_http.queue_free()
 	update_http = null
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
 		update_failed("The download failed. Check your internet connection.")
 		return
+	var data := FileAccess.get_file_as_bytes(path)
+	DirAccess.remove_absolute(path)
 	var exe := game_exe_path()
-	var result_text := install_update(zip_path, exe)
-	DirAccess.remove_absolute(zip_path)
-	if not result_text.ends_with(".exe"):
-		update_failed(result_text)
+	if path.ends_with(".pck"):
+		# Just the game: swap it in and start again
+		var error := replace_file(game_pck_path(), data)
+		if error != "":
+			update_failed(error)
+			return
+		restart_game(exe, exe)
 		return
-	restart_game(result_text, exe)
-
-
-# Puts the new game file next to the old one, using the name from the download
-# (like "Gettic's first TD v1.6.exe"). Returns the new file's path, or an error message.
-func install_update(zip_path: String, exe: String) -> String:
-	var zip := ZIPReader.new()
-	if zip.open(zip_path) != OK:
-		return "The downloaded file is damaged."
-	var new_exe := PackedByteArray()
-	var new_name := ""
-	for file in zip.get_files():
-		if file.to_lower().ends_with(".exe"):
-			new_exe = zip.read_file(file)
-			new_name = file.get_file()
-			break
-	zip.close()
-	if new_exe.is_empty():
-		return "The download doesn't contain the game."
-	var target := exe.get_base_dir().path_join(new_name)
-	if target.to_lower() == exe.to_lower():
-		# Same name as the running game. Windows won't let a running program be
-		# overwritten, but it can be renamed, so move it to .old first.
-		var old := exe + ".old"
-		DirAccess.remove_absolute(old)
-		if DirAccess.rename_absolute(exe, old) != OK:
-			return "Could not replace the game file."
-	var f := FileAccess.open(target, FileAccess.WRITE)
-	if f == null:
-		if FileAccess.file_exists(exe + ".old") and not FileAccess.file_exists(exe):
-			DirAccess.rename_absolute(exe + ".old", exe)
-		return "Could not write the new game file."
-	f.store_buffer(new_exe)
-	f.close()
-	return target
+	# The whole game: unpack it here (or into the game folder, if this is a download)
+	var folder := exe.get_base_dir() if not is_packed() else unpack_folder()
+	var new_exe := unpack_to(data, folder)
+	if not new_exe.ends_with(".exe"):
+		update_failed(new_exe)
+		return
+	restart_game(new_exe, exe)
 
 
 # Starts the new version and closes this one. The new version deletes this
@@ -582,12 +687,16 @@ func restart_game(new_exe: String, old_exe: String) -> void:
 	get_tree().quit()
 
 
-# Deletes the previous version's game file after an update. Only files next to
-# this game whose name starts like the game's own are ever deleted.
+# Deletes the previous version's game file after an update, or the downloaded
+# file after unpacking. Only files next to this game or in the folder above it
+# (where the download was) whose name starts like the game's own are deleted.
 func remove_old_exe(path: String, tries := 10) -> void:
+	path = path.replace("\\", "/")
 	var exe := game_exe_path()
 	var name := path.get_file().to_lower()
-	if path.get_base_dir() != exe.get_base_dir() or path.to_lower() == exe.to_lower() \
+	var dir := path.get_base_dir()
+	var near := dir == exe.get_base_dir() or dir == exe.get_base_dir().get_base_dir()
+	if not near or path.to_lower() == exe.to_lower() \
 			or not name.ends_with(".exe") or not (name.begins_with("gettic's first td") or name.begins_with("getticsfirsttd")):
 		return
 	if not FileAccess.file_exists(path):
@@ -1544,8 +1653,13 @@ func dialog_input(event: InputEvent) -> void:
 		update_dialog = ""
 	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 		var p := get_viewport().get_mouse_position()
-		if DIALOG_YES_RECT.has_point(p):
-			if update_dialog == "ask":
+		if update_dialog == "unpack_failed":
+			if DIALOG_NO_RECT.has_point(p):
+				update_dialog = ""
+		elif DIALOG_YES_RECT.has_point(p):
+			if update_dialog == "unpack":
+				unpack_self()
+			elif update_dialog == "ask":
 				start_update()
 			else:
 				OS.shell_open(update_url)
@@ -2383,6 +2497,9 @@ func draw_update_dialog() -> void:
 	hud.draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(0, 0, 0, 0.6))
 	hud.draw_rect(d, Color(0.12, 0.13, 0.17))
 	hud.draw_rect(d, Color(0.45, 0.48, 0.55), false, 2.0)
+	if update_dialog.begins_with("unpack"):
+		draw_unpack_dialog()
+		return
 	text(Vector2(left, d.position.y + 50), "New version %s is out!" % update_version, 28, Color(1, 0.85, 0.3))
 	text(Vector2(left, d.position.y + 76), "You have v%s" % version, 15, Color(0.6, 0.6, 0.65))
 	match update_dialog:
@@ -2408,6 +2525,26 @@ func draw_update_dialog() -> void:
 			text(Vector2(left, d.position.y + 260), "You can download it from GitHub instead.", 16, Color(0.7, 0.7, 0.75))
 			button(DIALOG_YES_RECT, "Open download page", true, true)
 			button(DIALOG_NO_RECT, "Close")
+
+
+# First run of a fresh download: the game is about to unpack itself.
+func draw_unpack_dialog() -> void:
+	var d := DIALOG_RECT
+	var left := d.position.x + 30
+	var width := d.size.x - 60
+	text(Vector2(left, d.position.y + 50), "Heads up: the game will unpack itself", 26, Color(1, 0.85, 0.3))
+	if update_dialog == "unpack_failed":
+		text(Vector2(left, d.position.y + 110), "Unpacking didn't work.", 20, Color(1, 0.45, 0.45))
+		hud.draw_multiline_string(font, Vector2(left, d.position.y + 145), update_error + "\n\nYou can still play from this file.", HORIZONTAL_ALIGNMENT_LEFT, width, 16, 5, Color(0.85, 0.85, 0.9))
+		button(DIALOG_NO_RECT, "Play anyway")
+		return
+	var info := "This is the first time the game runs from this download. It will now unpack itself into a new folder next to this file:"
+	hud.draw_multiline_string(font, Vector2(left, d.position.y + 100), info, HORIZONTAL_ALIGNMENT_LEFT, width, 17, 3, Color(0.85, 0.85, 0.9))
+	hud.draw_multiline_string(font, Vector2(left, d.position.y + 180), unpack_folder().replace("/", "\\"), HORIZONTAL_ALIGNMENT_LEFT, width, 16, 3, Color(0.6, 0.85, 1.0))
+	var after := "The folder gets the game engine (%s) and the game itself (%s). After that, start the game from that folder. This downloaded file is deleted when it's done." % [GAME_EXE, GAME_PCK]
+	hud.draw_multiline_string(font, Vector2(left, d.position.y + 250), after, HORIZONTAL_ALIGNMENT_LEFT, width, 16, 5, Color(0.7, 0.7, 0.75))
+	button(DIALOG_YES_RECT, "OK, unpack", true, true)
+	button(DIALOG_NO_RECT, "Not now")
 
 
 func draw_health_bars() -> void:
