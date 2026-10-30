@@ -589,10 +589,9 @@ func choose_unpack_folder() -> void:
 	folder_picker.popup_centered(Vector2i(800, 500))
 
 
-# The game gets its own folder inside the chosen one, unless that already is it.
+# The game goes straight into the folder the player chose.
 func _on_unpack_folder_chosen(dir: String) -> void:
-	dir = dir.replace("\\", "/")
-	unpack_chosen = dir if dir.get_file() == GAME_FOLDER else dir.path_join(GAME_FOLDER)
+	unpack_chosen = dir.replace("\\", "/")
 
 
 # Splits a packed .exe into [engine, game]. Godot keeps the game in a section
