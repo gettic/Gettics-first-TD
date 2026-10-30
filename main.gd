@@ -139,6 +139,7 @@ var build_type := ""
 var selected: Tower = null
 var game_speed := 1
 var state := "playing"  # "playing", "won" or "lost"
+var paused := false
 var message := ""
 var message_time := 0.0
 var font: Font
@@ -244,6 +245,7 @@ func new_game() -> void:
 	selected = null
 	game_speed = 1
 	state = "playing"
+	paused = false
 	flash("Build towers, then press SPACE")
 
 
@@ -589,6 +591,10 @@ func spawn_enemy(kind: String) -> void:
 # ---------------------------------------------------------------- update
 
 func _process(delta: float) -> void:
+	if paused:
+		update_visuals(0.0)
+		hud.queue_redraw()
+		return
 	message_time = maxf(message_time - delta, 0.0)
 	update_effects(delta)
 	if state == "playing":
@@ -818,6 +824,11 @@ func update_effects(delta: float) -> void:
 # ---------------------------------------------------------------- input
 
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		toggle_pause()
+		return
+	if paused:
+		return
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			build_type = ""
@@ -836,9 +847,6 @@ func _unhandled_input(event: InputEvent) -> void:
 				sell_selected()
 			KEY_F:
 				toggle_speed()
-			KEY_ESCAPE:
-				build_type = ""
-				selected = null
 			KEY_R:
 				if state != "playing":
 					new_game()
@@ -923,6 +931,13 @@ func toggle_speed() -> void:
 	game_speed = game_speed % 3 + 1
 
 
+func toggle_pause() -> void:
+	if state != "playing":
+		return
+	paused = not paused
+	build_type = ""
+
+
 # ---------------------------------------------------------------- 2D overlay
 
 func draw_hud() -> void:
@@ -938,6 +953,8 @@ func draw_hud() -> void:
 	draw_panel()
 	if state != "playing":
 		draw_end_screen()
+	elif paused:
+		draw_pause_screen()
 
 
 func draw_health_bars() -> void:
@@ -1015,7 +1032,15 @@ func draw_panel() -> void:
 	button(WAVE_RECT, wave_label, not wave_running and state == "playing")
 	button(SPEED_RECT, "x%d (F)" % game_speed, true, game_speed > 1)
 	text(Vector2(PANEL_X, 676), "WASD: move camera", 13, Color(0.55, 0.55, 0.6))
-	text(Vector2(PANEL_X, 696), "Right-click / Esc: cancel", 13, Color(0.55, 0.55, 0.6))
+	text(Vector2(PANEL_X, 696), "Right-click: cancel   Esc: pause", 13, Color(0.55, 0.55, 0.6))
+
+
+func draw_pause_screen() -> void:
+	hud.draw_rect(Rect2(0, 0, PANEL_LEFT, SCREEN_H), Color(0, 0, 0, 0.5))
+	var size := font.get_string_size("PAUSED", HORIZONTAL_ALIGNMENT_LEFT, -1, 64)
+	text(Vector2((PANEL_LEFT - size.x) / 2.0, 340), "PAUSED", 64)
+	size = font.get_string_size("Press Esc to continue", HORIZONTAL_ALIGNMENT_LEFT, -1, 20)
+	text(Vector2((PANEL_LEFT - size.x) / 2.0, 385), "Press Esc to continue", 20, Color(0.8, 0.8, 0.8))
 
 
 func draw_end_screen() -> void:

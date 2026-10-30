@@ -38,7 +38,8 @@ godot --path path/to/this/folder
 | **W A S D** | Move the camera |
 | **Space** | Start the next wave |
 | **F** | Change game speed (1×, 2×, 3×) |
-| **Right-click** / **Esc** | Cancel |
+| **Right-click** | Cancel |
+| **Esc** | Pause / continue |
 | **R** | Restart after winning or losing |
 
 ## Towers
