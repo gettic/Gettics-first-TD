@@ -18,7 +18,7 @@ The 3D world is built from simple shapes in code, so the game has no image, mode
 
 **Windows:** download the latest `.exe` from the [Releases page](https://github.com/gettic/Gettics-first-TD/releases/latest) (for example `GetticsFirstTD-v1.15.exe`) and run it. No install needed.
 
-The first time it runs, the game warns you and then unpacks itself into a new **Gettic's first TD** folder next to the download, with two files: `Gettic's first TD.exe` (the Godot engine) and `Gettic's first TD.pck` (the game itself). The downloaded file is deleted afterwards. From then on, start the game from that folder.
+The first time it runs, the game warns you and then unpacks itself into a new **Gettic's first TD** folder next to the download (or click **Choose another folder...** to put it somewhere else), with two files named with the version, for example `Gettic's first TD v1.16.exe` (the Godot engine) and `Gettic's first TD v1.16.pck` (the game itself). The downloaded file is deleted afterwards. From then on, start the game from that folder. When the game updates, both files are renamed to the new version.
 
 When the game starts, it checks GitHub for a newer version. If one is out, a **New version – Update** button appears in the side panel. Click it to see what's new and update with one click: the game downloads the new version and restarts by itself. Usually only the small game file needs to be downloaded; the engine is only downloaded again when it changed.
 
@@ -114,5 +114,5 @@ All the game code is in `main.gd`. Good places to start:
 - `build_world()` sets up the 3D scene: camera angle, lighting and map colors. `build_gate()` builds the gates.
 - `build_tower_node()` builds each tower's 3D model.
 - The **multiplayer** section of `main.gd` has the networking: `RELAY_URL` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used for games on your own network.
-- The **unpacking** section of `main.gd` splits the downloaded `.exe` into the engine and the game the first time it runs; `GAME_FOLDER`, `GAME_EXE` and `GAME_PCK` set the names.
+- The **unpacking** section of `main.gd` splits the downloaded `.exe` into the engine and the game the first time it runs; `GAME_FOLDER` and `GAME_NAME` set the folder's and files' names.
 - The game server is a small Cloudflare Worker, kept outside this repository.

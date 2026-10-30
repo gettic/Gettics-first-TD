@@ -109,6 +109,7 @@ const GAME_ROWS := 4  # public games shown in the menu
 const DIALOG_RECT := Rect2(340, 140, 600, 440)
 const DIALOG_YES_RECT := Rect2(380, 506, 250, 44)
 const DIALOG_NO_RECT := Rect2(650, 506, 250, 44)
+const CHOOSE_FOLDER_RECT := Rect2(370, 368, 250, 36)  # in the unpack warning
 
 # Box asking whether another player may build in your area (screen pixels)
 const ASK_RECT := Rect2(220, 16, 520, 100)
@@ -120,8 +121,7 @@ const RELEASES_API := "https://api.github.com/repos/gettic/Gettics-first-TD/rele
 
 # Where the downloaded .exe unpacks itself (see "unpacking")
 const GAME_FOLDER := "Gettic's first TD"
-const GAME_EXE := "Gettic's first TD.exe"
-const GAME_PCK := "Gettic's first TD.pck"
+const GAME_NAME := "Gettic's first TD"  # the files are named like "Gettic's first TD v1.16.exe"
 
 
 class Enemy:
@@ -394,6 +394,8 @@ var update_notes := ""  # "What's new" from the release notes
 var update_dialog := ""  # "", "ask", "downloading" or "failed"
 var update_error := ""
 var update_http: HTTPRequest
+var unpack_chosen := ""  # a folder the player picked to unpack to, instead of next to the download
+var folder_picker: FileDialog
 
 # 3D scene pieces
 var camera: Camera3D
@@ -457,14 +459,21 @@ func check_for_update() -> void:
 	version = str(ProjectSettings.get_setting("application/config/version", "0"))
 	# Clean up the old game files left behind by the last update.
 	if OS.has_feature("template"):
-		DirAccess.remove_absolute(game_exe_path() + ".old")
-		DirAccess.remove_absolute(game_pck_path() + ".old")
 		for arg in OS.get_cmdline_user_args():
 			if arg.begins_with("--remove-old="):
 				remove_old_exe(arg.trim_prefix("--remove-old="))
 		# A fresh download: warn that it will unpack itself
 		if is_packed():
 			update_dialog = "unpack"
+		else:
+			# Unpacked: the files should be named with this version
+			var wanted := game_file_name(version) + ".exe"
+			var mine := game_exe_path().get_file()
+			if mine != wanted and mine.to_lower().begins_with(GAME_NAME.to_lower()) \
+					and rename_game(wanted.get_basename()) == "":
+				restart_game(game_exe_path().get_base_dir().path_join(wanted), game_exe_path())
+				return
+			remove_other_versions()
 	var http := HTTPRequest.new()
 	http.timeout = 10.0
 	add_child(http)
@@ -529,13 +538,22 @@ func game_pck_path() -> String:
 # ---------------------------------------------------------------- unpacking
 #
 # The download is one .exe: the Godot engine with the game packed inside it.
-# The first time it runs it unpacks itself into a folder next to the download:
-# the engine (GAME_EXE) and the game (GAME_PCK) as separate files. Updates then
-# only need the small game file, unless the engine itself changed.
+# The first time it runs it unpacks itself into GAME_FOLDER next to the download:
+# the engine ("Gettic's first TD v1.16.exe") and the game ("... v1.16.pck",
+# which Godot finds by having the same name). Updates then only need the small
+# game file, unless the engine itself changed, and rename both to the new version.
+
+# "Gettic's first TD v1.16" for version "1.16" or "v1.16".
+func game_file_name(ver: String) -> String:
+	return "%s v%s" % [GAME_NAME, ver.trim_prefix("v")]
 
 # True when the game is still packed inside the .exe (a fresh download).
 func is_packed() -> bool:
-	var f := FileAccess.open(game_exe_path(), FileAccess.READ)
+	return is_packed_file(game_exe_path())
+
+
+func is_packed_file(path: String) -> bool:
+	var f := FileAccess.open(path, FileAccess.READ)
 	if f == null or f.get_length() < 4:
 		return false
 	f.seek(f.get_length() - 4)
@@ -550,6 +568,31 @@ func engine_tag() -> String:
 
 func unpack_folder() -> String:
 	return game_exe_path().get_base_dir().path_join(GAME_FOLDER)
+
+
+# Where the first run unpacks to: next to the download, or where the player chose.
+func unpack_destination() -> String:
+	return unpack_chosen if unpack_chosen != "" else unpack_folder()
+
+
+# Lets the player pick another place to unpack to (Windows' own folder picker).
+func choose_unpack_folder() -> void:
+	if folder_picker == null:
+		folder_picker = FileDialog.new()
+		folder_picker.file_mode = FileDialog.FILE_MODE_OPEN_DIR
+		folder_picker.access = FileDialog.ACCESS_FILESYSTEM
+		folder_picker.use_native_dialog = true
+		folder_picker.title = "Choose where to unpack the game"
+		folder_picker.dir_selected.connect(_on_unpack_folder_chosen)
+		add_child(folder_picker)
+	folder_picker.current_dir = unpack_destination().get_base_dir()
+	folder_picker.popup_centered(Vector2i(800, 500))
+
+
+# The game gets its own folder inside the chosen one, unless that already is it.
+func _on_unpack_folder_chosen(dir: String) -> void:
+	dir = dir.replace("\\", "/")
+	unpack_chosen = dir if dir.get_file() == GAME_FOLDER else dir.path_join(GAME_FOLDER)
 
 
 # Splits a packed .exe into [engine, game]. Godot keeps the game in a section
@@ -583,18 +626,47 @@ func split_packed(data: PackedByteArray) -> Array:
 	return [engine, data.slice(start, start + pck_size)]
 
 
-# Writes a packed .exe's engine and game into a folder. Returns the engine's
-# path, or an error message.
-func unpack_to(data: PackedByteArray, folder: String) -> String:
+# Writes a packed .exe's engine and game into a folder, named for its version.
+# Returns the engine's path, or an error message.
+func unpack_to(data: PackedByteArray, folder: String, ver: String) -> String:
 	var parts := split_packed(data)
 	if parts.is_empty():
 		return "The game file is damaged."
 	DirAccess.make_dir_recursive_absolute(folder)
-	var exe := folder.path_join(GAME_EXE)
+	var exe := folder.path_join(game_file_name(ver) + ".exe")
 	var error := replace_file(exe, parts[0])
 	if error == "":
-		error = replace_file(folder.path_join(GAME_PCK), parts[1])
+		error = replace_file(exe.get_basename() + ".pck", parts[1])
 	return error if error != "" else exe
+
+
+# Renames this game's .exe and .pck (Windows lets a running program be renamed).
+# Returns an error message, or "".
+func rename_game(new_name: String) -> String:
+	var dir := game_exe_path().get_base_dir()
+	if DirAccess.rename_absolute(game_pck_path(), dir.path_join(new_name + ".pck")) != OK:
+		return "Could not rename the game file."
+	if DirAccess.rename_absolute(game_exe_path(), dir.path_join(new_name + ".exe")) != OK:
+		DirAccess.rename_absolute(dir.path_join(new_name + ".pck"), game_pck_path())
+		return "Could not rename the game file."
+	return ""
+
+
+# Deletes other versions' files (and .old files) from the game folder, for
+# example when a newer download was unpacked next to an older one.
+func remove_other_versions(tries := 10) -> void:
+	var dir := game_exe_path().get_base_dir()
+	var mine := [game_exe_path().get_file().to_lower(), game_pck_path().get_file().to_lower()]
+	var left := false
+	for file in DirAccess.get_files_at(dir):
+		var lower := file.to_lower()
+		var ours := lower.begins_with(GAME_NAME.to_lower()) and (lower.ends_with(".exe") or lower.ends_with(".pck") or lower.ends_with(".old"))
+		if ours and not mine.has(lower) and DirAccess.remove_absolute(dir.path_join(file)) != OK:
+			left = true
+	# The old version may still be closing, so try again a few times.
+	if left and tries > 1:
+		await get_tree().create_timer(0.5).timeout
+		remove_other_versions(tries - 1)
 
 
 # Writes a file. Windows won't let a running game's files be overwritten, but
@@ -619,7 +691,7 @@ func replace_file(path: String, data: PackedByteArray) -> String:
 # The player said yes to the first-run warning.
 func unpack_self() -> void:
 	var data := FileAccess.get_file_as_bytes(game_exe_path())
-	var result := unpack_to(data, unpack_folder())
+	var result := unpack_to(data, unpack_destination(), version)
 	if not result.ends_with(".exe"):
 		update_error = result
 		update_dialog = "unpack_failed"
@@ -661,16 +733,20 @@ func _on_update_downloaded(result: int, code: int, _headers: PackedStringArray, 
 	DirAccess.remove_absolute(path)
 	var exe := game_exe_path()
 	if path.ends_with(".pck"):
-		# Just the game: swap it in and start again
-		var error := replace_file(game_pck_path(), data)
+		# Just the game: write it under the new version's name, rename the
+		# engine to match, and start again (the new version deletes the old game file)
+		var new_exe := exe.get_base_dir().path_join(game_file_name(update_version) + ".exe")
+		var error := replace_file(new_exe.get_basename() + ".pck", data)
+		if error == "" and new_exe != exe and DirAccess.rename_absolute(exe, new_exe) != OK:
+			error = "Could not rename the game file."
 		if error != "":
 			update_failed(error)
 			return
-		restart_game(exe, exe)
+		restart_game(new_exe, exe)
 		return
 	# The whole game: unpack it here (or into the game folder, if this is a download)
 	var folder := exe.get_base_dir() if not is_packed() else unpack_folder()
-	var new_exe := unpack_to(data, folder)
+	var new_exe := unpack_to(data, folder, update_version)
 	if not new_exe.ends_with(".exe"):
 		update_failed(new_exe)
 		return
@@ -688,14 +764,15 @@ func restart_game(new_exe: String, old_exe: String) -> void:
 
 
 # Deletes the previous version's game file after an update, or the downloaded
-# file after unpacking. Only files next to this game or in the folder above it
-# (where the download was) whose name starts like the game's own are deleted.
+# file after unpacking. Only files whose name starts like the game's own are
+# deleted, and only next to this game, in the folder above it, or anywhere if
+# it is a packed download of the game (the player chose where to unpack).
 func remove_old_exe(path: String, tries := 10) -> void:
 	path = path.replace("\\", "/")
 	var exe := game_exe_path()
 	var name := path.get_file().to_lower()
 	var dir := path.get_base_dir()
-	var near := dir == exe.get_base_dir() or dir == exe.get_base_dir().get_base_dir()
+	var near := dir == exe.get_base_dir() or dir == exe.get_base_dir().get_base_dir() or is_packed_file(path)
 	if not near or path.to_lower() == exe.to_lower() \
 			or not name.ends_with(".exe") or not (name.begins_with("gettic's first td") or name.begins_with("getticsfirsttd")):
 		return
@@ -1656,6 +1733,8 @@ func dialog_input(event: InputEvent) -> void:
 		if update_dialog == "unpack_failed":
 			if DIALOG_NO_RECT.has_point(p):
 				update_dialog = ""
+		elif update_dialog == "unpack" and CHOOSE_FOLDER_RECT.has_point(p):
+			choose_unpack_folder()
 		elif DIALOG_YES_RECT.has_point(p):
 			if update_dialog == "unpack":
 				unpack_self()
@@ -2538,13 +2617,31 @@ func draw_unpack_dialog() -> void:
 		hud.draw_multiline_string(font, Vector2(left, d.position.y + 145), update_error + "\n\nYou can still play from this file.", HORIZONTAL_ALIGNMENT_LEFT, width, 16, 5, Color(0.85, 0.85, 0.9))
 		button(DIALOG_NO_RECT, "Play anyway")
 		return
-	var info := "This is the first time the game runs from this download. It will now unpack itself into a new folder next to this file:"
-	hud.draw_multiline_string(font, Vector2(left, d.position.y + 100), info, HORIZONTAL_ALIGNMENT_LEFT, width, 17, 3, Color(0.85, 0.85, 0.9))
-	hud.draw_multiline_string(font, Vector2(left, d.position.y + 180), unpack_folder().replace("/", "\\"), HORIZONTAL_ALIGNMENT_LEFT, width, 16, 3, Color(0.6, 0.85, 1.0))
-	var after := "The folder gets the game engine (%s) and the game itself (%s). After that, start the game from that folder. This downloaded file is deleted when it's done." % [GAME_EXE, GAME_PCK]
-	hud.draw_multiline_string(font, Vector2(left, d.position.y + 250), after, HORIZONTAL_ALIGNMENT_LEFT, width, 16, 5, Color(0.7, 0.7, 0.75))
+	var info := "This is the first time the game runs from this download. It will now unpack itself into this folder:"
+	hud.draw_multiline_string(font, Vector2(left, d.position.y + 100), info, HORIZONTAL_ALIGNMENT_LEFT, width, 17, 2, Color(0.85, 0.85, 0.9))
+	text(Vector2(left, d.position.y + 175), fit_path(unpack_destination(), width, 16), 16, Color(0.6, 0.85, 1.0))
+	button(CHOOSE_FOLDER_RECT, "Choose another folder...")
+	var files := game_file_name(version)
+	var after := "It gets the game engine (%s.exe) and the game itself (%s.pck). Start the game from there afterwards. This downloaded file is deleted when it's done." % [files, files]
+	hud.draw_multiline_string(font, Vector2(left, d.position.y + 296), after, HORIZONTAL_ALIGNMENT_LEFT, width, 15, 3, Color(0.7, 0.7, 0.75))
 	button(DIALOG_YES_RECT, "OK, unpack", true, true)
 	button(DIALOG_NO_RECT, "Not now")
+
+
+# A folder path that fits on one line: "C:\…\Downloads\Gettic's first TD", keeping
+# as many of the last folders as fit.
+func fit_path(path: String, width: float, size: int) -> String:
+	var parts := path.replace("/", "\\").split("\\")
+	var fits := func(s: String) -> bool: return font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= width
+	if fits.call("\\".join(parts)) or parts.size() < 3:
+		return "\\".join(parts)
+	var tail: String = parts[parts.size() - 1]
+	for i in range(parts.size() - 2, 0, -1):
+		var longer: String = parts[i] + "\\" + tail
+		if not fits.call(parts[0] + "\\…\\" + longer):
+			break
+		tail = longer
+	return parts[0] + "\\…\\" + tail
 
 
 func draw_health_bars() -> void:
