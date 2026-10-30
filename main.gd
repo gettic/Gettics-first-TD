@@ -72,6 +72,10 @@ const UPGRADE_RECT := Rect2(PANEL_X, 480, 140, 40)
 const SELL_RECT := Rect2(PANEL_X + 148, 480, 140, 40)
 const WAVE_RECT := Rect2(PANEL_X, 610, 200, 44)
 const SPEED_RECT := Rect2(PANEL_X + 208, 610, 80, 44)
+const UPDATE_RECT := Rect2(PANEL_X, 532, 288, 36)
+
+# Checked at startup to see if a newer release is on GitHub
+const RELEASES_API := "https://api.github.com/repos/gettic/Gettics-first-TD/releases/latest"
 
 
 class Enemy:
@@ -139,6 +143,9 @@ var message := ""
 var message_time := 0.0
 var font: Font
 var time := 0.0
+var version := ""
+var update_version := ""  # set when GitHub has a newer release
+var update_url := ""
 
 # 3D scene pieces
 var camera: Camera3D
@@ -173,6 +180,45 @@ func _ready() -> void:
 		path_points.append(cell_center(w))
 	build_world()
 	new_game()
+	check_for_update()
+
+
+# ---------------------------------------------------------------- updates
+
+func check_for_update() -> void:
+	version = str(ProjectSettings.get_setting("application/config/version", "0"))
+	var http := HTTPRequest.new()
+	http.timeout = 10.0
+	add_child(http)
+	http.request_completed.connect(_on_update_checked.bind(http))
+	if http.request(RELEASES_API, ["User-Agent: GetticsFirstTD", "Accept: application/vnd.github+json"]) != OK:
+		http.queue_free()
+
+
+func _on_update_checked(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray, http: HTTPRequest) -> void:
+	http.queue_free()
+	# No internet or GitHub not answering: just play without the update check.
+	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
+		return
+	var data = JSON.parse_string(body.get_string_from_utf8())
+	if not data is Dictionary:
+		return
+	var tag := str(data.get("tag_name", ""))
+	if is_newer(tag, version):
+		update_version = tag
+		update_url = str(data.get("html_url", ""))
+
+
+# Compares versions like "v1.10" and "1.2" number by number.
+func is_newer(a: String, b: String) -> bool:
+	var pa := a.trim_prefix("v").split(".")
+	var pb := b.trim_prefix("v").split(".")
+	for i in maxi(pa.size(), pb.size()):
+		var x := pa[i].to_int() if i < pa.size() else 0
+		var y := pb[i].to_int() if i < pb.size() else 0
+		if x != y:
+			return x > y
+	return false
 
 
 func new_game() -> void:
@@ -813,6 +859,8 @@ func on_click(p: Vector2) -> void:
 			start_wave()
 		if SPEED_RECT.has_point(p):
 			toggle_speed()
+		if update_version != "" and UPDATE_RECT.has_point(p):
+			OS.shell_open(update_url)
 		return
 	var c := mouse_cell()
 	if towers.has(c):
@@ -922,6 +970,7 @@ func button(r: Rect2, label: String, enabled := true, active := false) -> void:
 func draw_panel() -> void:
 	hud.draw_rect(Rect2(PANEL_LEFT, 0, SCREEN_W - PANEL_LEFT, SCREEN_H), Color(0.09, 0.09, 0.12))
 	text(Vector2(PANEL_X, 36), "WAVE %d / %d" % [wave, MAX_WAVE], 26)
+	text(Vector2(PANEL_X + 250, 34), "v" + version, 13, Color(0.5, 0.5, 0.55))
 	text(Vector2(PANEL_X, 70), "Lives: %d" % lives, 20, Color(1, 0.45, 0.45))
 	text(Vector2(PANEL_X + 150, 70), "Gold: %d" % gold, 20, Color(1, 0.85, 0.3))
 	if wave < MAX_WAVE:
@@ -955,6 +1004,9 @@ func draw_panel() -> void:
 		button(SELL_RECT, "Sell %dg (X)" % int(selected.spent * 0.7))
 	else:
 		text(Vector2(PANEL_X, 430), "Click a tower to upgrade or sell it.", 14, Color(0.6, 0.6, 0.65))
+
+	if update_version != "":
+		button(UPDATE_RECT, "New version %s - Download" % update_version, true, true)
 
 	if message_time > 0.0:
 		text(Vector2(PANEL_X, 590), message, 16, Color(1, 1, 0.6, minf(message_time, 1.0)))

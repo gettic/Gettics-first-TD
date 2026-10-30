@@ -12,6 +12,8 @@ The 3D world is built from simple shapes in code, so the game has no image, mode
 
 **Windows:** download the latest `.zip` from the [Releases page](https://github.com/gettic/Gettics-first-TD/releases/latest), unzip it, and run `GetticsFirstTD.exe`. No install needed.
 
+When the game starts, it checks GitHub for a newer version. If one is out, a **New version – Download** button appears in the side panel.
+
 ## Run from source
 
 1. Install [Godot 4.7](https://godotengine.org/download) (the standard version, not .NET).
