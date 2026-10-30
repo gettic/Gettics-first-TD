@@ -36,7 +36,7 @@ const ENEMY_KINDS := ["normal", "fast", "armored", "boss"]
 
 # Multiplayer: the host's game runs everything, the others send it their actions
 const NET_PORT := 24750
-const SEARCH_PORT := 24751  # the host listens here for players looking for its short code
+const SEARCH_PORT := 24751  # the host listens here for players on its network looking for its code
 const SNAPSHOT_RATE := 15.0  # monster updates per second sent to the other players
 const CODE_LETTERS := "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # for invite codes (no I, L, O or U)
 
@@ -95,7 +95,6 @@ const HOST_RECT := Rect2(270, 198, 420, 44)
 const JOIN_INPUT_RECT := Rect2(270, 292, 290, 40)
 const JOIN_BUTTON_RECT := Rect2(570, 292, 120, 40)
 const COPY_RECT := Rect2(570, 226, 120, 40)
-const COPY_LONG_RECT := Rect2(570, 330, 120, 32)
 const STOP_RECT := Rect2(270, 560, 420, 40)
 const RESUME_RECT := Rect2(270, 616, 420, 44)
 
@@ -199,8 +198,7 @@ var net_mode := ""  # "" alone, "host", "searching", "connecting" or "client"
 var net_addresses: Array = []  # client: the host's addresses, tried in order
 var net_connect_time := 0.0
 var net_status := ""  # shown in the menu
-var short_code := ""  # host: 5 letters, found by searching the local network
-var invite_code := ""  # host: long code with the internet address, if the router allowed it
+var invite_code := ""  # host: 7 letters and digits (see make_invite_code)
 var search_peer: PacketPeerUDP  # host: answers searches; player: sends them
 var search_time := 0.0
 var search_send_timer := 0.0
@@ -1469,9 +1467,6 @@ func remove_tower(c: Vector2i) -> void:
 # change, every monster's position many times a second (net_snapshot), and
 # shots and explosions as they happen.
 
-var net_port := NET_PORT
-
-
 # Host: sends a message to every player who has joined.
 func send_all(method: StringName, args: Array) -> void:
 	if net_mode != "host":
@@ -1489,28 +1484,24 @@ func host_game() -> void:
 	multiplayer.multiplayer_peer = peer
 	net_mode = "host"
 	players[local_slot].peer = 1
-	# The short code: players on the same network find this game by asking for it
+	# Players on the same network find this game by asking for its code
 	search_peer = PacketPeerUDP.new()
-	if search_peer.bind(SEARCH_PORT) == OK:
-		short_code = ""
-		for i in 5:
-			short_code += CODE_LETTERS[randi() % CODE_LETTERS.length()]
-	else:
+	if search_peer.bind(SEARCH_PORT) != OK:
 		search_peer = null
-		short_code = ""
+	# The code is made once we know whether the router lets the internet in
 	invite_code = ""
-	net_status = "Asking your router to let players from the internet in..."
+	net_status = ""
 	upnp_thread = Thread.new()
 	upnp_thread.start(open_router_port)
 
 
-# Host: answers players on the local network who are looking for our short code.
+# Host: answers players on the local network who are looking for our code.
 func answer_searches() -> void:
 	while search_peer.get_available_packet_count() > 0:
 		var message := search_peer.get_packet().get_string_from_utf8()
-		if message == "GTD?" + short_code:
+		if invite_code != "" and message == "GTD?" + invite_code:
 			search_peer.set_dest_address(search_peer.get_packet_ip(), search_peer.get_packet_port())
-			search_peer.put_packet(("GTD!%s:%d" % [short_code, NET_PORT]).to_utf8_buffer())
+			search_peer.put_packet(("GTD!" + invite_code).to_utf8_buffer())
 
 
 # Runs in the background, since talking to the router takes a few seconds.
@@ -1533,10 +1524,13 @@ func _on_router_port_done(u: UPNP, public_ip: String) -> void:
 		return
 	if opened:
 		upnp = u
-		invite_code = make_invite_code([public_ip])
-		net_status = ""
+		invite_code = make_invite_code(public_ip)
+		net_status = "Works for friends on your Wi-Fi and over the internet."
 	else:
-		net_status = "Your router didn't let players from the internet in. Friends far away can still join if you both use a VPN like Radmin VPN, with the short code."
+		invite_code = make_invite_code("")
+		net_status = "Works for friends on your Wi-Fi. Your router didn't let players from the internet in, so friends far away need a VPN like Radmin VPN."
+	if search_peer == null:
+		net_status = "Another game on this PC is already hosting, so players on your network can't find this one."
 
 
 func close_router_port() -> void:
@@ -1567,81 +1561,55 @@ func search_targets() -> Array:
 	return targets
 
 
-# The long invite code holds the host's internet address and port, written with
-# letters and digits that are hard to mix up.
-func make_invite_code(ips: Array) -> String:
-	var bytes := PackedByteArray([ips.size()])
-	for ip: String in ips:
-		for part in ip.split("."):
-			bytes.append(part.to_int())
-	bytes.append(NET_PORT >> 8)
-	bytes.append(NET_PORT & 255)
+# The invite code is 7 letters and digits (35 bits). If the host's router lets
+# the internet in, the first bit is 1, then 2 random bits (so two hosts in the
+# same house get different codes), then the host's internet address. Otherwise
+# the first bit is 0 and the rest is random, and only the local network works.
+# A joining game always looks for the code on its own network first, so the
+# same code works at home and over the internet.
+func make_invite_code(public_ip: String) -> String:
+	var value := ((randi() % 4) << 32) | randi()
+	if public_ip != "":
+		var ip := 0
+		for part in public_ip.split("."):
+			ip = (ip << 8) | part.to_int()
+		value = (1 << 34) | ((randi() % 4) << 32) | ip
 	var code := ""
-	var buffer := 0
-	var bits := 0
-	for b in bytes:
-		buffer = (buffer << 8) | b
-		bits += 8
-		while bits >= 5:
-			bits -= 5
-			code += CODE_LETTERS[(buffer >> bits) & 31]
-		buffer &= (1 << bits) - 1
-	if bits > 0:
-		code += CODE_LETTERS[(buffer << (5 - bits)) & 31]
-	var groups := PackedStringArray()
-	for i in range(0, code.length(), 4):
-		groups.append(code.substr(i, 4))
-	return "-".join(groups)
+	for i in 7:
+		code += CODE_LETTERS[(value >> (30 - i * 5)) & 31]
+	return code
 
 
-# Returns [addresses, port], or [] if the code isn't valid.
-func read_invite_code(code: String) -> Array:
-	code = code.to_upper().replace("O", "0").replace("I", "1").replace("L", "1")
-	var bytes := PackedByteArray()
-	var buffer := 0
-	var bits := 0
+# Cleans up what a player typed: capitals, no spaces or dashes, and letters that
+# look alike (O and 0, I and L and 1) read as the ones codes use.
+func clean_code(typed: String) -> String:
+	var code := ""
+	for ch in typed.to_upper().replace("O", "0").replace("I", "1").replace("L", "1"):
+		if CODE_LETTERS.contains(ch):
+			code += ch
+	return code
+
+
+# The host's internet address in a code, or "" if it has none.
+func code_internet_address(code: String) -> String:
+	var value := 0
 	for ch in code:
-		var v := CODE_LETTERS.find(ch)
-		if v < 0:
-			continue  # dashes and spaces
-		buffer = (buffer << 5) | v
-		bits += 5
-		if bits >= 8:
-			bits -= 8
-			bytes.append((buffer >> bits) & 255)
-			buffer &= (1 << bits) - 1
-	if bytes.is_empty():
-		return []
-	var count := bytes[0]
-	if count < 1 or count > 2 or bytes.size() < 3 + count * 4:
-		return []
-	var ips := []
-	for i in count:
-		var o := 1 + i * 4
-		ips.append("%d.%d.%d.%d" % [bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
-	return [ips, (bytes[1 + count * 4] << 8) | bytes[2 + count * 4]]
+		value = (value << 5) | CODE_LETTERS.find(ch)
+	if ((value >> 34) & 1) == 0:
+		return ""
+	return "%d.%d.%d.%d" % [(value >> 24) & 255, (value >> 16) & 255, (value >> 8) & 255, value & 255]
 
 
 func join_game() -> void:
 	code_input.release_focus()
-	var letters := ""
-	for ch in code_input.text.to_upper().replace("O", "0").replace("I", "1").replace("L", "1"):
-		if CODE_LETTERS.contains(ch):
-			letters += ch
-	if letters.length() == 5:
-		start_search(letters)
+	var code := clean_code(code_input.text)
+	if code.length() != 7:
+		net_status = "That invite code doesn't look right. It has 7 letters and digits."
 		return
-	var parsed := read_invite_code(code_input.text)
-	if parsed.is_empty():
-		net_status = "That invite code doesn't look right."
-		return
-	net_addresses = parsed[0]
-	net_port = parsed[1]
-	net_mode = "connecting"
-	try_next_address()
+	start_search(code)
 
 
-# Short code: ask everyone on the local network which game has it.
+# First ask everyone on the local network which game has the code.
 func start_search(code: String) -> void:
 	search_peer = PacketPeerUDP.new()
 	search_peer.set_broadcast_enabled(true)
@@ -1654,7 +1622,7 @@ func start_search(code: String) -> void:
 	search_send_timer = 0.0
 	search_found.clear()
 	net_mode = "searching"
-	net_status = "Looking for game %s on your network..." % code
+	net_status = "Looking for game %s..." % code
 
 
 func update_search(delta: float) -> void:
@@ -1668,23 +1636,29 @@ func update_search(delta: float) -> void:
 	while search_peer.get_available_packet_count() > 0:
 		var reply := search_peer.get_packet().get_string_from_utf8()
 		var ip := search_peer.get_packet_ip()
-		if reply.begins_with("GTD!%s:" % search_code) and not search_found.has(ip):
-			net_port = reply.get_slice(":", 1).to_int()
+		if reply == "GTD!" + search_code and not search_found.has(ip):
 			# The same computer is the surest way in, so try that first
 			if ip == "127.0.0.1":
 				search_found.push_front(ip)
 			else:
 				search_found.append(ip)
 	# Once someone answered, wait a moment for answers from other networks, then connect
+	var internet := code_internet_address(search_code)
 	if not search_found.is_empty() and search_send_timer < 0.2:
 		close_search()
 		net_addresses = search_found.duplicate()
 		net_mode = "connecting"
 		try_next_address()
-	elif search_time > 4.0:
+	elif internet != "" and search_time > 1.5:
+		# Not on this network: try the host's internet address from the code
+		close_search()
+		net_addresses = [internet]
+		net_mode = "connecting"
+		try_next_address()
+	elif search_time > 3.0:
 		close_search()
 		net_mode = ""
-		net_status = "Couldn't find game %s on your network. If your friend is far away, use their long code, or both use a VPN like Radmin VPN." % search_code
+		net_status = "Couldn't find game %s. Check the code. If your friend is far away and their router doesn't let the internet in, you both need a VPN like Radmin VPN." % search_code
 
 
 func close_search() -> void:
@@ -1698,11 +1672,11 @@ func try_next_address() -> void:
 	close_connection()
 	if net_addresses.is_empty():
 		net_mode = ""
-		net_status = "Couldn't reach the host. Check the code, and that the host is still hosting. On the same Wi-Fi as the host? Use the 5-character code instead. Otherwise the host may need to allow the game through the Windows firewall."
+		net_status = "Couldn't reach the host. Check the code, and that the host is still hosting. The host may need to allow the game through the Windows firewall."
 		return
 	var address: String = net_addresses.pop_front()
 	var peer := ENetMultiplayerPeer.new()
-	if peer.create_client(address, net_port) != OK:
+	if peer.create_client(address, NET_PORT) != OK:
 		try_next_address()
 		return
 	multiplayer.multiplayer_peer = peer
@@ -1722,7 +1696,6 @@ func stop_hosting() -> void:
 	close_search()
 	net_mode = ""
 	invite_code = ""
-	short_code = ""
 	net_status = ""
 	for slot in MAX_PLAYERS:
 		if slot != local_slot:
@@ -2167,22 +2140,14 @@ func draw_menu() -> void:
 			button(HOST_RECT, "Cancel")
 			hud.draw_multiline_string(font, Vector2(left, 270), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 16, 3, grey)
 		"host":
-			if short_code != "":
-				text(Vector2(left, 218), "Invite code:", 15, grey)
-				text(Vector2(left, 262), short_code, 40, gold_col)
-				button(COPY_RECT, "Copy")
-				text(Vector2(left, 290), "For friends on the same Wi-Fi, or on a VPN like Radmin VPN.", 14, grey)
-			else:
-				text(Vector2(left, 240), "No short code: another game on this PC is already hosting.", 14, Color(1, 0.75, 0.5))
-			text(Vector2(left, 326), "Friends on other networks use the long code:", 14, grey)
+			text(Vector2(left, 218), "Invite code:", 15, grey)
 			if invite_code != "":
-				text(Vector2(left, 352), invite_code, 18, gold_col)
-				button(COPY_LONG_RECT, "Copy")
-				text(Vector2(left, 380), "It usually doesn't work from your own Wi-Fi: use the short code there.", 13, grey)
-			elif upnp_thread != null:
-				text(Vector2(left, 352), "Asking your router...", 16, grey)
-			hud.draw_multiline_string(font, Vector2(left, 380), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 13, 3, Color(1, 0.75, 0.5))
-			draw_player_list(Vector2(left, 450))
+				text(Vector2(left, 262), invite_code, 40, gold_col)
+				button(COPY_RECT, "Copy")
+			else:
+				text(Vector2(left, 256), "Getting your invite code...", 18, grey)
+			hud.draw_multiline_string(font, Vector2(left, 296), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 14, 3, grey)
+			draw_player_list(Vector2(left, 400))
 			button(STOP_RECT, "Stop hosting")
 		"client":
 			text(Vector2(left, 218), "You are playing as %s." % PLAYER_NAMES[local_slot], 16, PLAYER_COLORS[local_slot])
@@ -2224,12 +2189,9 @@ func menu_click(p: Vector2) -> void:
 				net_mode = ""
 				net_status = ""
 		"host":
-			if COPY_RECT.has_point(p) and short_code != "":
-				DisplayServer.clipboard_set(short_code)
-				flash("Invite code copied")
-			elif COPY_LONG_RECT.has_point(p) and invite_code != "":
+			if COPY_RECT.has_point(p) and invite_code != "":
 				DisplayServer.clipboard_set(invite_code)
-				flash("Long invite code copied")
+				flash("Invite code copied")
 			elif STOP_RECT.has_point(p):
 				stop_hosting()
 		"client":

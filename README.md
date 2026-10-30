@@ -12,7 +12,7 @@ The 3D world is built from simple shapes in code, so the game has no image, mode
 
 ## Download
 
-**Windows:** download the latest `.zip` from the [Releases page](https://github.com/gettic/Gettics-first-TD/releases/latest), unzip it, and run the game (for example `Gettic's first TD v1.10.exe`). No install needed.
+**Windows:** download the latest `.zip` from the [Releases page](https://github.com/gettic/Gettics-first-TD/releases/latest), unzip it, and run the game (for example `Gettic's first TD v1.11.exe`). No install needed.
 
 When the game starts, it checks GitHub for a newer version. If one is out, a **New version – Update** button appears in the side panel. Click it to see what's new and update with one click: the game downloads the new version and restarts by itself.
 
@@ -81,10 +81,10 @@ Up to 4 players can defend the square together.
 1. The host presses **Esc** and clicks **Host a game and get an invite code**.
 2. The other players press **Esc**, type the code in the box and click **Join**.
 
-There are two codes:
+The invite code is 7 letters and digits (like `JYE8PFR`), and the same code works for friends on your **Wi-Fi** and over the **internet**. When you join, the game first looks for the code on your own network; if the host isn't there, it connects over the internet.
 
-- The **5-character code** (like `W7Q28`) works for players on the **same Wi-Fi / network** as the host, and over a free VPN like [Radmin VPN](https://www.radmin-vpn.com/) or ZeroTier that puts everyone on one virtual network.
-- The **long code** is for players on **other networks** over the internet. It only shows up if the host's router allowed the game to open its port (UPnP). It usually doesn't work from the host's own Wi-Fi: use the short code there. If the router doesn't allow it, use a VPN and the short code instead.
+- Playing over the internet needs the host's router to let the game open its port (UPnP). The game tries this by itself and the menu tells you if it worked.
+- If the host's router doesn't allow it, the code only works on the host's network. Friends far away can still join if everyone uses a free VPN like [Radmin VPN](https://www.radmin-vpn.com/) or ZeroTier, which puts everyone on one virtual network.
 
 The first time you host, Windows may ask whether to let the game through the firewall: click **Allow**. Everyone needs the same game version.
 
