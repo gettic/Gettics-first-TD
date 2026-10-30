@@ -8,7 +8,11 @@ Enemies walk a spiral path toward a portal in the middle of the map. Build tower
 
 Everything is drawn with simple shapes in code, so the game has no image or sound files.
 
-## How to play
+## Download
+
+**Windows:** download the latest `.zip` from the [Releases page](https://github.com/gettic/Gettics-first-TD/releases/latest), unzip it, and run `GetticsFirstTD.exe`. No install needed.
+
+## Run from source
 
 1. Install [Godot 4.7](https://godotengine.org/download) (the standard version, not .NET).
 2. Download this repository (**Code → Download ZIP**) or clone it.
