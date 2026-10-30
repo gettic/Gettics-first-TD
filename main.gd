@@ -110,6 +110,11 @@ const DIALOG_RECT := Rect2(340, 140, 600, 440)
 const DIALOG_YES_RECT := Rect2(380, 506, 250, 44)
 const DIALOG_NO_RECT := Rect2(650, 506, 250, 44)
 
+# Box asking whether another player may build in your area (screen pixels)
+const ASK_RECT := Rect2(220, 16, 520, 100)
+const ASK_YES_RECT := Rect2(240, 64, 230, 38)
+const ASK_NO_RECT := Rect2(490, 64, 230, 38)
+
 # Checked at startup to see if a newer release is on GitHub
 const RELEASES_API := "https://api.github.com/repos/gettic/Gettics-first-TD/releases/latest"
 
@@ -339,6 +344,9 @@ var wave := 0
 var spawn_queues: Array = [[], [], [], []]  # monster kinds still to come out of each gate
 var spawn_timers := [0.0, 0.0, 0.0, 0.0]
 var spawn_hp := 0.0
+var requests := {}  # host: id -> {from, to, cell, type, time}, a player asking to build in another's area
+var next_request_id := 1
+var asks: Array = []  # [id, from slot, tower type, cell]: other players asking to build in our area
 var net_spawn_left := 0  # other players: monsters still to spawn, from the host
 var build_type := ""
 var selected: Tower = null
@@ -391,6 +399,7 @@ var zoom := 1.0
 var target_zoom := 1.0
 var hud: Node2D
 var gate_parts: Array = []  # per gate: the portal pieces that only show while a player uses that gate
+var area_planes: Array = []  # per player slot: covers that player's area while building
 var range_disc: MeshInstance3D
 var ghost: MeshInstance3D
 var ghost_mat: StandardMaterial3D
@@ -635,6 +644,8 @@ func clear_world() -> void:
 			fx["node"].queue_free()
 	enemies.clear()
 	enemy_by_id.clear()
+	requests.clear()
+	asks.clear()
 	towers.clear()
 	shots.clear()
 	effects.clear()
@@ -868,6 +879,20 @@ func build_markers_and_hud() -> void:
 	ghost = add_mesh(self, ghost_mesh, ghost_mat)
 	ghost.visible = false
 
+	# Each player's area, shown while placing a tower in multiplayer
+	var area_mesh := PlaneMesh.new()
+	area_mesh.size = Vector2(COLS / 2.0, ROWS / 2.0)
+	for slot in MAX_PLAYERS:
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		var right := slot >= 2
+		var top := slot == 1 or slot == 2
+		var pos := Vector3(COLS * (0.75 if right else 0.25), 0.04, ROWS * (0.25 if top else 0.75))
+		var plane := add_mesh(self, area_mesh, m, pos)
+		plane.visible = false
+		area_planes.append(plane)
+
 	# Shared materials and meshes
 	stone_mat = mat(Color(0.35, 0.35, 0.4))
 	dark_mat = mat(Color(0.15, 0.15, 0.18))
@@ -982,6 +1007,12 @@ func update_visuals(delta: float) -> void:
 	for s in shots:
 		s.node.position = to3d(s.pos, 0.6)
 
+	# While placing a tower: your area glows in your color, other players' areas go dark
+	for slot in MAX_PLAYERS:
+		var plane: MeshInstance3D = area_planes[slot]
+		plane.visible = showing_areas() and players[slot] != null
+		var own := slot == local_slot
+		plane.material_override.albedo_color = Color(PLAYER_COLORS[slot], 0.22) if own else Color(0, 0, 0, 0.5)
 	range_disc.visible = false
 	ghost.visible = false
 	if selected != null:
@@ -991,8 +1022,18 @@ func update_visuals(delta: float) -> void:
 		if in_map(c):
 			ghost.visible = true
 			ghost.position = Vector3(c.x + 0.5, 0.05, c.y + 0.5)
-			ghost_mat.albedo_color = Color(0.3, 1, 0.3, 0.4) if can_build(c) else Color(1, 0.2, 0.2, 0.4)
+			var owner := area_owner(c)
+			if not can_build(c):
+				ghost_mat.albedo_color = Color(1, 0.2, 0.2, 0.4)
+			elif owner >= 0 and owner != local_slot:
+				ghost_mat.albedo_color = Color(1, 0.6, 0.1, 0.5)  # needs the other player's yes
+			else:
+				ghost_mat.albedo_color = Color(0.3, 1, 0.3, 0.4)
 			show_range(cell_center(c), TOWERS[build_type]["range"][0])
+
+
+func showing_areas() -> bool:
+	return build_type != "" and state == "playing" and player_count() > 1
 
 
 func show_range(p: Vector2, rng: float) -> void:
@@ -1130,6 +1171,7 @@ func _process(delta: float) -> void:
 			answer_searches()
 		if relay != null:
 			update_relay_host(delta)
+		update_requests(delta)
 	if menu_open and net_mode == "" and relay_url != "":
 		games_timer -= delta
 		if games_timer <= 0.0:
@@ -1452,6 +1494,10 @@ func _unhandled_input(event: InputEvent) -> void:
 				sell_selected()
 			KEY_F:
 				act("speed", [])
+			KEY_Y:
+				answer_ask(true)
+			KEY_N:
+				answer_ask(false)
 			KEY_R:
 				if state != "playing":
 					act("restart", [])
@@ -1460,6 +1506,13 @@ func _unhandled_input(event: InputEvent) -> void:
 func on_click(p: Vector2) -> void:
 	if state != "playing":
 		return
+	if not asks.is_empty():
+		if ASK_YES_RECT.has_point(p):
+			answer_ask(true)
+			return
+		if ASK_NO_RECT.has_point(p):
+			answer_ask(false)
+			return
 	if p.x >= PANEL_LEFT:
 		for i in TOWER_TYPES.size():
 			if tower_button_rect(i).has_point(p):
@@ -1571,15 +1624,110 @@ func perform(slot: int, action: String, args: Array) -> String:
 		"restart":
 			if state != "playing":
 				new_game()
+		"answer":
+			if args.size() == 2 and args[0] is int and args[1] is bool:
+				answer_request(slot, args[0], args[1])
 	return ""
 
 
-func build_tower(slot: int, c: Vector2i, type: String) -> String:
+# Each player has the quarter of the map around their gate. Returns the player
+# whose area a tile is in, or -1 if nobody plays that gate (then anyone can build).
+func area_owner(c: Vector2i) -> int:
+	var slot := 0
+	if c.x < COLS / 2.0:
+		slot = 1 if c.y < ROWS / 2.0 else 0
+	else:
+		slot = 2 if c.y < ROWS / 2.0 else 3
+	return slot if players[slot] != null else -1
+
+
+# Host: building in another player's area needs their yes first.
+func ask_to_build(slot: int, owner: int, c: Vector2i, type: String) -> String:
+	for r in requests.values():
+		if r.cell == c:
+			return "Someone is already asking to build there"
+	var id := next_request_id
+	next_request_id += 1
+	requests[id] = {"from": slot, "to": owner, "cell": c, "type": type, "time": 0.0}
+	if owner == local_slot:
+		asks.append([id, slot, type, c])
+	else:
+		net_ask.rpc_id(players[owner].peer, id, slot, type, c)
+	return "That's %s's area. Waiting for %s to say yes..." % [PLAYER_NAMES[owner], PLAYER_NAMES[owner]]
+
+
+func answer_request(slot: int, id: int, yes: bool) -> void:
+	var r: Dictionary = requests.get(id, {})
+	if r.is_empty() or r.to != slot:
+		return
+	end_request(id)
+	var who: String = PLAYER_NAMES[slot]
+	if not yes:
+		tell(r.from, "%s said no" % who)
+		return
+	var error := build_tower(r.from, r.cell, r.type, true)
+	if error == "" and (not towers.has(r.cell) or towers[r.cell].owner != r.from):
+		error = "%s said yes, but you can't build there anymore" % who
+	tell(r.from, error if error != "" else "%s said yes" % who)
+
+
+# Host: forgets a request, and takes the question away from the player it was for.
+func end_request(id: int) -> void:
+	var r: Dictionary = requests[id]
+	requests.erase(id)
+	if r.to == local_slot:
+		close_ask(id)
+	elif players[r.to] != null:
+		net_ask_closed.rpc_id(players[r.to].peer, id)
+
+
+# Host: requests nobody answered in time, or from players who left.
+func update_requests(delta: float) -> void:
+	for id in requests.keys():
+		var r: Dictionary = requests[id]
+		r.time += delta
+		if players[r.from] == null or players[r.to] == null:
+			end_request(id)
+		elif r.time > 30.0:
+			end_request(id)
+			tell(r.from, "%s didn't answer" % PLAYER_NAMES[r.to])
+
+
+func close_ask(id: int) -> void:
+	for i in range(asks.size() - 1, -1, -1):
+		if asks[i][0] == id:
+			asks.remove_at(i)
+
+
+# This player answers the oldest question from another player.
+func answer_ask(yes: bool) -> void:
+	if asks.is_empty():
+		return
+	var id: int = asks[0][0]
+	close_ask(id)
+	act("answer", [id, yes])
+
+
+# Host: shows a message to one player.
+func tell(slot: int, text: String) -> void:
+	if players[slot] == null:
+		return
+	if slot == local_slot:
+		flash(text)
+	else:
+		net_message.rpc_id(players[slot].peer, text)
+
+
+# allowed: the player whose area it is already said yes.
+func build_tower(slot: int, c: Vector2i, type: String, allowed := false) -> String:
 	if state != "playing" or not can_build(c):
 		return ""
 	var cost: int = TOWERS[type]["cost"][0]
 	if players[slot].gold < cost:
 		return "Not enough gold"
+	var owner := area_owner(c)
+	if owner >= 0 and owner != slot and not allowed:
+		return ask_to_build(slot, owner, c, type)
 	var t := Tower.new()
 	t.type = type
 	t.cell = c
@@ -1967,6 +2115,8 @@ func stop_hosting() -> void:
 	net_mode = ""
 	invite_code = ""
 	net_status = ""
+	requests.clear()
+	asks.clear()
 	for slot in MAX_PLAYERS:
 		if slot != local_slot:
 			players[slot] = null
@@ -2134,6 +2284,17 @@ func net_message(text: String) -> void:
 	flash(text)
 
 
+# Another player asks to build in our area.
+@rpc("authority", "call_remote", "reliable")
+func net_ask(id: int, from_slot: int, type: String, cell: Vector2i) -> void:
+	asks.append([id, from_slot, type, cell])
+
+
+@rpc("authority", "call_remote", "reliable")
+func net_ask_closed(id: int) -> void:
+	close_ask(id)
+
+
 @rpc("authority", "call_remote", "reliable")
 func net_reset() -> void:
 	clear_world()
@@ -2231,6 +2392,10 @@ func draw_hud() -> void:
 			var a: float = fx["time"] / fx["max"]
 			hud.draw_polyline(pts, Color(0.75, 0.5, 1.0, a * 0.5), 7.0)
 			hud.draw_polyline(pts, Color(0.95, 0.9, 1.0, a), 2.5)
+	if showing_areas():
+		draw_area_labels()
+	if not asks.is_empty() and state == "playing":
+		draw_ask()
 	draw_panel()
 	if state != "playing":
 		draw_end_screen()
@@ -2238,6 +2403,45 @@ func draw_hud() -> void:
 		draw_menu()
 	if update_dialog != "":
 		draw_update_dialog()
+
+
+func draw_area_labels() -> void:
+	for slot in MAX_PLAYERS:
+		if players[slot] == null:
+			continue
+		var p := camera.unproject_position(area_planes[slot].position)
+		if slot == local_slot:
+			outlined(p, "Your area", 24, Color.WHITE)
+		else:
+			outlined(p, "%s's area" % PLAYER_NAMES[slot], 24, PLAYER_COLORS[slot])
+			outlined(p + Vector2(0, 24), "%s must say yes" % PLAYER_NAMES[slot], 15, Color(0.85, 0.85, 0.9))
+
+
+# Centered text with a dark outline, readable on top of the map.
+func outlined(center: Vector2, s: String, size: int, col: Color) -> void:
+	var w := font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	var pos := center - Vector2(w / 2.0, 0)
+	hud.draw_string_outline(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, 5, Color(0, 0, 0, 0.8))
+	hud.draw_string(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
+
+
+# Another player asks to build in our area: Yes or No.
+func draw_ask() -> void:
+	var ask: Array = asks[0]
+	var from: int = ask[1]
+	var cell: Vector2i = ask[3]
+	var r := ASK_RECT
+	hud.draw_rect(r, Color(0.11, 0.12, 0.16, 0.95))
+	hud.draw_rect(r, PLAYER_COLORS[from], false, 2.0)
+	var line := "%s wants to build a %s tower in your area" % [PLAYER_NAMES[from], str(ask[2]).capitalize()]
+	if asks.size() > 1:
+		line += "  (+%d more)" % (asks.size() - 1)
+	text(r.position + Vector2(20, 32), line, 17, PLAYER_COLORS[from])
+	button(ASK_YES_RECT, "Yes (Y)", true, true)
+	button(ASK_NO_RECT, "No (N)")
+	# Point at the spot with a pulsing ring
+	var spot := camera.unproject_position(Vector3(cell.x + 0.5, 0.1, cell.y + 0.5))
+	hud.draw_arc(spot, 16.0 + sin(time * 6.0) * 4.0, 0, TAU, 32, PLAYER_COLORS[from], 3.0)
 
 
 func draw_update_dialog() -> void:

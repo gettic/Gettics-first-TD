@@ -41,6 +41,7 @@ godot --path path/to/this/folder
 | **Scroll wheel** | Zoom in and out |
 | **Space** | Start the game / send the next wave early (bonus gold, once the current wave has fully spawned) |
 | **F** | Change game speed (1×, 2×, 3×; in multiplayer only the host can) |
+| **Y** / **N** | Say yes or no when another player asks to build in your area |
 | **Right-click** | Cancel |
 | **Esc** | Menu: pause / continue, and host or join a multiplayer game |
 | **R** | Restart after winning or losing |
@@ -72,6 +73,7 @@ You start with 150 gold. You earn gold for each kill and a bonus at the start of
 Up to 4 players can defend the square together.
 
 - Each player has a **gate at their own corner** of the square: Blue bottom-left, Red top-left, Yellow top-right, Pink bottom-right. Every player's gate sends a full wave, so **more players means more monsters**, and the loss limit grows with it: **50 alive monsters per player** (100 with 2 players, 200 with 4).
+- **Each player has their own area**: the quarter of the map around their gate. When you pick a tower to build, your area lights up and the other players' areas go dark. To build in someone else's area, they have to say yes: a box pops up for them (**Y** for yes, **N** for no). Areas of gates nobody plays are free for everyone.
 - **Everyone has their own gold.** Every player gets the wave bonus, and the gold for a kill goes to the player whose tower made it. Tower bases are tinted in the owner's color, and you can only upgrade or sell your own towers.
 - You can start hosting in the middle of a game and keep your towers. A player who joins late gets some extra gold to catch up. If a player leaves, their gate closes and their towers stay.
 - In multiplayer, **Esc doesn't pause** the game.
