@@ -2,6 +2,10 @@
 
 A small 3D tower defense game made with [Godot 4](https://godotengine.org/), inspired by the classic Warcraft III custom tower defense maps.
 
+![Made with AI](https://img.shields.io/badge/made%20with-AI%20%28Claude%29-8A63D2)
+
+The code for this game was written by Claude, an AI by Anthropic. Gettic came up with the ideas, made the choices and play-tested it.
+
 ![Screenshot of the game](screenshot.png)
 
 Monsters come out of a green portal in a stone gate at a corner of the map, walk onto a square path and walk around it clockwise, forever, until your towers kill them. Build towers on the grass, upgrade them, and don't let too many monsters pile up: if 50 are alive at the same time, you lose. Survive all 30 waves to win.
