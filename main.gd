@@ -39,6 +39,10 @@ const NET_PORT := 24750
 const SEARCH_PORT := 24751  # the host listens here for players on its network looking for its code
 const SNAPSHOT_RATE := 15.0  # monster updates per second sent to the other players
 const CODE_LETTERS := "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # for invite codes (no I, L, O or U)
+# The game server (relay/worker.js) that lists public games and passes messages
+# along, so no router ports are needed. Empty: always connect straight to the host.
+# Start the game with "-- --relay=http://127.0.0.1:8787" to use a test server.
+const RELAY_URL := "https://gtd-relay.gtd-relay.workers.dev"
 
 # Tower stats per level (index 0 = level 1). "cost"[0] is the build price,
 # the rest are upgrade prices.
@@ -97,6 +101,9 @@ const JOIN_BUTTON_RECT := Rect2(570, 292, 120, 40)
 const COPY_RECT := Rect2(570, 226, 120, 40)
 const STOP_RECT := Rect2(270, 560, 420, 40)
 const RESUME_RECT := Rect2(270, 616, 420, 44)
+const PUBLIC_RECT := Rect2(270, 350, 420, 36)
+const REFRESH_RECT := Rect2(590, 408, 100, 28)
+const GAME_ROWS := 4  # public games shown in the menu
 
 # Update popup layout (screen pixels)
 const DIALOG_RECT := Rect2(340, 140, 600, 440)
@@ -163,6 +170,152 @@ class Player:
 	var gold := 0
 
 
+# A network connection that goes through the game server (relay/worker.js)
+# instead of straight to the host, so nobody has to open router ports.
+# Godot's multiplayer uses it just like a direct connection.
+class RelayPeer extends MultiplayerPeerExtension:
+	var socket := WebSocketPeer.new()
+	var hosting := false
+	var my_id := 0
+	var status := CONNECTION_CONNECTING
+	var code := ""  # host: this game's code from the server
+	var error := ""  # why the server refused us, if it did
+	var peers: Array[int] = []
+	var incoming: Array = []  # [sender, channel, mode, data] per message
+	var target := 0
+	var channel := 0
+	var mode := TRANSFER_MODE_RELIABLE
+	var refusing := false
+
+	func _init(url: String) -> void:
+		socket.inbound_buffer_size = 1 << 20
+		socket.outbound_buffer_size = 1 << 20
+		if socket.connect_to_url(url) != OK:
+			status = CONNECTION_DISCONNECTED
+
+	func send_text(data: Dictionary) -> void:
+		if socket.get_ready_state() == WebSocketPeer.STATE_OPEN:
+			socket.send_text(JSON.stringify(data))
+
+	func _poll() -> void:
+		socket.poll()
+		while socket.get_available_packet_count() > 0:
+			var packet := socket.get_packet()
+			if socket.was_string_packet():
+				server_message(JSON.parse_string(packet.get_string_from_utf8()))
+			elif packet.size() >= 6:
+				incoming.append([packet.decode_s32(0), packet[4], packet[5], packet.slice(6)])
+		var closed := socket.get_ready_state() == WebSocketPeer.STATE_CLOSED or error != ""
+		if closed and status != CONNECTION_DISCONNECTED:
+			lost()
+
+	func server_message(m: Variant) -> void:
+		if not (m is Dictionary):
+			return
+		match m.get("t"):
+			"hosted":
+				code = m.code
+				my_id = 1
+				status = CONNECTION_CONNECTED
+			"joined":
+				# Connected first: Godot says hello to the host as soon as it hears about it
+				my_id = int(m.id)
+				status = CONNECTION_CONNECTED
+				peers.append(1)
+				peer_connected.emit(1)
+			"peer":
+				if not refusing:
+					peers.append(int(m.id))
+					peer_connected.emit(int(m.id))
+			"left":
+				var id := int(m.id)
+				if peers.has(id):
+					peers.erase(id)
+					peer_disconnected.emit(id)
+			"error":
+				error = m.text
+				socket.close()
+
+	func lost() -> void:
+		status = CONNECTION_DISCONNECTED
+		for id in peers.duplicate():
+			peer_disconnected.emit(id)
+		peers.clear()
+
+	func _get_available_packet_count() -> int:
+		return incoming.size()
+
+	func _get_packet_script() -> PackedByteArray:
+		return incoming.pop_front()[3]
+
+	func _put_packet_script(data: PackedByteArray) -> Error:
+		var packet := PackedByteArray()
+		packet.resize(6)
+		packet.encode_s32(0, target)
+		packet[4] = channel
+		packet[5] = mode
+		packet.append_array(data)
+		return socket.put_packet(packet)
+
+	# Godot asks who sent the next message before it takes it
+	func _get_packet_peer() -> int:
+		return incoming[0][0] if not incoming.is_empty() else 0
+
+	func _get_packet_channel() -> int:
+		return incoming[0][1] if not incoming.is_empty() else 0
+
+	func _get_packet_mode() -> TransferMode:
+		return incoming[0][2] if not incoming.is_empty() else TRANSFER_MODE_RELIABLE
+
+	func _get_max_packet_size() -> int:
+		return 1 << 20
+
+	func _set_target_peer(id: int) -> void:
+		target = id
+
+	func _set_transfer_channel(c: int) -> void:
+		channel = c
+
+	func _get_transfer_channel() -> int:
+		return channel
+
+	func _set_transfer_mode(m: TransferMode) -> void:
+		mode = m
+
+	func _get_transfer_mode() -> TransferMode:
+		return mode
+
+	func _get_unique_id() -> int:
+		return my_id
+
+	func _is_server() -> bool:
+		return hosting
+
+	func _is_server_relay_supported() -> bool:
+		return false
+
+	func _get_connection_status() -> ConnectionStatus:
+		return status
+
+	func _set_refuse_new_connections(enable: bool) -> void:
+		refusing = enable
+
+	func _is_refusing_new_connections() -> bool:
+		return refusing
+
+	func _disconnect_peer(id: int, _force: bool) -> void:
+		send_text({"t": "kick", "id": id})
+		if peers.has(id):
+			peers.erase(id)
+			peer_disconnected.emit(id)
+
+	func _close() -> void:
+		socket.close()
+		status = CONNECTION_DISCONNECTED
+		peers.clear()
+		incoming.clear()
+
+
 var path_cells := {}
 var routes: Array = []  # per gate: Array[Vector2] of points, gate first
 var enemies: Array[Enemy] = []
@@ -207,6 +360,14 @@ var search_found: Array = []  # addresses of hosts that answered
 var snapshot_timer := 0.0
 var upnp: UPNP  # host: the router port opening, removed again when hosting stops
 var upnp_thread: Thread
+var relay_url := RELAY_URL
+var relay: RelayPeer  # the connection when it goes through the game server
+var public_game := false  # host: shown in everyone's list of public games
+var game_info_timer := 0.0
+var public_games: Array = []  # [{code, players, wave}] from the game server
+var games_status := "Looking for public games..."
+var games_http: HTTPRequest
+var games_timer := 0.0
 var code_input: LineEdit
 var message := ""
 var message_time := 0.0
@@ -258,6 +419,9 @@ func _ready() -> void:
 	multiplayer.connected_to_server.connect(_on_connected_to_host)
 	multiplayer.connection_failed.connect(_on_connection_failed)
 	multiplayer.server_disconnected.connect(_on_host_left)
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--relay="):
+			relay_url = arg.trim_prefix("--relay=")
 	play_alone()
 	check_for_update()
 
@@ -957,10 +1121,20 @@ func _process(delta: float) -> void:
 		update_search(delta)
 	elif net_mode == "connecting":
 		net_connect_time += delta
-		if net_connect_time > 4.0:
+		if relay == null and net_connect_time > 4.0:
 			try_next_address()
-	elif net_mode == "host" and search_peer != null:
-		answer_searches()
+		elif relay != null and net_connect_time > 10.0:
+			relay_join_failed()
+	elif net_mode == "host":
+		if search_peer != null:
+			answer_searches()
+		if relay != null:
+			update_relay_host(delta)
+	if menu_open and net_mode == "" and relay_url != "":
+		games_timer -= delta
+		if games_timer <= 0.0:
+			games_timer = 5.0
+			refresh_games()
 	# Playing alone, the menu and the update popup pause the game. In multiplayer it keeps going.
 	if (menu_open and net_mode == "") or (update_dialog != "" and net_mode == ""):
 		update_visuals(0.0)
@@ -1353,6 +1527,7 @@ func sell_selected() -> void:
 func toggle_menu() -> void:
 	menu_open = not menu_open
 	build_type = ""
+	games_timer = 0.0  # fresh list of public games when the menu opens
 	if not menu_open:
 		code_input.release_focus()
 
@@ -1477,6 +1652,78 @@ func send_all(method: StringName, args: Array) -> void:
 
 
 func host_game() -> void:
+	if relay_url == "":
+		host_direct()
+		return
+	relay = RelayPeer.new(relay_address("/host?version=" + version.uri_encode()))
+	relay.hosting = true
+	relay.my_id = 1
+	multiplayer.multiplayer_peer = relay
+	net_mode = "host"
+	players[local_slot].peer = 1
+	invite_code = ""
+	net_connect_time = 0.0
+	net_status = "Connecting to the game server..."
+
+
+# The game server's WebSocket address: ws:// for http:// and wss:// for https://.
+func relay_address(path: String) -> String:
+	return "ws" + relay_url.trim_prefix("http") + path
+
+
+# Host through the game server: wait for the code, keep the public game list
+# up to date, and fall back to hosting straight from this computer if the
+# server can't be reached.
+func update_relay_host(delta: float) -> void:
+	if invite_code == "":
+		net_connect_time += delta
+		if relay.code != "":
+			invite_code = relay.code
+			net_status = "Works for anyone, anywhere. No router setup needed."
+			game_info_timer = 0.0
+		elif relay.get_connection_status() == MultiplayerPeer.CONNECTION_DISCONNECTED or net_connect_time > 8.0:
+			close_connection()
+			net_mode = ""
+			host_direct()
+		return
+	if relay.get_connection_status() == MultiplayerPeer.CONNECTION_DISCONNECTED:
+		stop_hosting()
+		net_status = "Lost the connection to the game server, so the other players were dropped."
+		flash("Lost the connection to the game server")
+		return
+	game_info_timer -= delta
+	if game_info_timer <= 0.0:
+		game_info_timer = 3.0
+		relay.send_text({"t": "info", "public": public_game, "players": player_count(), "wave": wave})
+
+
+# Asks the game server for the public games with this version of the game.
+func refresh_games() -> void:
+	if games_http != null:
+		return
+	games_http = HTTPRequest.new()
+	games_http.timeout = 8.0
+	add_child(games_http)
+	games_http.request_completed.connect(_on_games_listed)
+	if games_http.request(relay_url + "/games?version=" + version.uri_encode()) != OK:
+		_on_games_listed(HTTPRequest.RESULT_CANT_CONNECT, 0, PackedStringArray(), PackedByteArray())
+
+
+func _on_games_listed(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	games_http.queue_free()
+	games_http = null
+	var list: Variant = null
+	if result == HTTPRequest.RESULT_SUCCESS and code == 200:
+		list = JSON.parse_string(body.get_string_from_utf8())
+	if not (list is Array):
+		public_games.clear()
+		games_status = "Couldn't reach the game server."
+		return
+	public_games = list
+	games_status = "No public games right now. Host one and make it public!"
+
+
+func host_direct() -> void:
 	var peer := ENetMultiplayerPeer.new()
 	if peer.create_server(NET_PORT, MAX_PLAYERS - 1) != OK:
 		net_status = "Couldn't start hosting. Is the game already hosting in another window?"
@@ -1603,10 +1850,32 @@ func code_internet_address(code: String) -> String:
 func join_game() -> void:
 	code_input.release_focus()
 	var code := clean_code(code_input.text)
-	if code.length() != 7:
-		net_status = "That invite code doesn't look right. It has 7 letters and digits."
-		return
-	start_search(code)
+	if code.length() == 5 and relay_url != "":
+		join_relay(code)
+	elif code.length() == 7:
+		start_search(code)
+	else:
+		net_status = "That invite code doesn't look right. It has 5 or 7 letters and digits."
+
+
+# 5-letter codes are games on the game server.
+func join_relay(code: String) -> void:
+	close_connection()
+	relay = RelayPeer.new(relay_address("/join?code=" + code))
+	multiplayer.multiplayer_peer = relay
+	net_addresses.clear()
+	net_mode = "connecting"
+	net_connect_time = 0.0
+	net_status = "Joining game %s..." % code
+
+
+func relay_join_failed() -> void:
+	var reason := "Couldn't reach the game server. Check your internet connection."
+	if relay != null and relay.error != "":
+		reason = relay.error
+	close_connection()
+	net_mode = ""
+	net_status = reason
 
 
 # First ask everyone on the local network which game has the code.
@@ -1688,6 +1957,7 @@ func close_connection() -> void:
 	if not (multiplayer.multiplayer_peer is OfflineMultiplayerPeer):
 		multiplayer.multiplayer_peer.close()
 	multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
+	relay = null
 
 
 func stop_hosting() -> void:
@@ -1713,11 +1983,16 @@ func leave_game(text: String) -> void:
 
 
 func _on_connected_to_host() -> void:
-	net_join.rpc_id(1, version)
+	if net_mode == "connecting":
+		net_join.rpc_id(1, version)
 
 
 func _on_connection_failed() -> void:
-	if net_mode == "connecting":
+	if net_mode != "connecting":
+		return
+	if relay != null:
+		relay_join_failed()
+	else:
 		try_next_address()
 
 
@@ -2135,7 +2410,9 @@ func draw_menu() -> void:
 			button(HOST_RECT, "Host a game and get an invite code", true, true)
 			text(Vector2(left, 280), "Or join a friend's game with their invite code:", 15, grey)
 			button(JOIN_BUTTON_RECT, "Join")
-			hud.draw_multiline_string(font, Vector2(left, 360), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 15, 4, Color(1, 0.75, 0.5))
+			hud.draw_multiline_string(font, Vector2(left, 360), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 15, 3, Color(1, 0.75, 0.5))
+			if relay_url != "":
+				draw_public_games()
 		"searching", "connecting":
 			button(HOST_RECT, "Cancel")
 			hud.draw_multiline_string(font, Vector2(left, 270), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 16, 3, grey)
@@ -2147,13 +2424,31 @@ func draw_menu() -> void:
 			else:
 				text(Vector2(left, 256), "Getting your invite code...", 18, grey)
 			hud.draw_multiline_string(font, Vector2(left, 296), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 14, 3, grey)
-			draw_player_list(Vector2(left, 400))
+			if relay != null and invite_code != "":
+				var label := "Public game: ON  (anyone can find it in the list)" if public_game else "Public game: OFF  (only friends with the code)"
+				button(PUBLIC_RECT, label, true, public_game)
+			draw_player_list(Vector2(left, 412))
 			button(STOP_RECT, "Stop hosting")
 		"client":
 			text(Vector2(left, 218), "You are playing as %s." % PLAYER_NAMES[local_slot], 16, PLAYER_COLORS[local_slot])
 			draw_player_list(Vector2(left, 250))
 			button(STOP_RECT, "Leave the game")
 	button(RESUME_RECT, "Resume (Esc)")
+
+
+func game_row_rect(i: int) -> Rect2:
+	return Rect2(HOST_RECT.position.x, 444 + i * 38, HOST_RECT.size.x, 34)
+
+
+func draw_public_games() -> void:
+	var left := HOST_RECT.position.x
+	text(Vector2(left, 428), "PUBLIC GAMES", 16, Color(1, 0.85, 0.3))
+	button(REFRESH_RECT, "Refresh", games_http == null)
+	if public_games.is_empty():
+		text(Vector2(left, 470), games_status, 15, Color(0.75, 0.75, 0.8))
+	for i in mini(public_games.size(), GAME_ROWS):
+		var g: Dictionary = public_games[i]
+		button(game_row_rect(i), "Join  %s      %d / %d players      wave %d" % [g.code, int(g.players), MAX_PLAYERS, int(g.wave)])
 
 
 func draw_player_list(pos: Vector2) -> void:
@@ -2182,6 +2477,13 @@ func menu_click(p: Vector2) -> void:
 				host_game()
 			elif JOIN_BUTTON_RECT.has_point(p):
 				join_game()
+			elif relay_url != "" and REFRESH_RECT.has_point(p):
+				refresh_games()
+			elif relay_url != "":
+				for i in mini(public_games.size(), GAME_ROWS):
+					if game_row_rect(i).has_point(p):
+						code_input.text = public_games[i].code
+						join_game()
 		"searching", "connecting":
 			if HOST_RECT.has_point(p):
 				close_search()
@@ -2192,6 +2494,9 @@ func menu_click(p: Vector2) -> void:
 			if COPY_RECT.has_point(p) and invite_code != "":
 				DisplayServer.clipboard_set(invite_code)
 				flash("Invite code copied")
+			elif relay != null and invite_code != "" and PUBLIC_RECT.has_point(p):
+				public_game = not public_game
+				game_info_timer = 0.0
 			elif STOP_RECT.has_point(p):
 				stop_hosting()
 		"client":

@@ -81,12 +81,17 @@ Up to 4 players can defend the square together.
 1. The host presses **Esc** and clicks **Host a game and get an invite code**.
 2. The other players press **Esc**, type the code in the box and click **Join**.
 
-The invite code is 7 letters and digits (like `JYE8PFR`), and the same code works for friends on your **Wi-Fi** and over the **internet**. When you join, the game first looks for the code on your own network; if the host isn't there, it connects over the internet.
+The invite code is 5 letters and digits (like `JR61X`). It works for anyone, anywhere: the game connects through a small game server, so nobody has to change anything in their router.
 
-- Playing over the internet needs the host's router to let the game open its port (UPnP). The game tries this by itself and the menu tells you if it worked.
-- If the host's router doesn't allow it, the code only works on the host's network. Friends far away can still join if everyone uses a free VPN like [Radmin VPN](https://www.radmin-vpn.com/) or ZeroTier, which puts everyone on one virtual network.
+**Public and private games**
 
-The first time you host, Windows may ask whether to let the game through the firewall: click **Allow**. Everyone needs the same game version.
+A new game is **private**: only friends with the code can join. The host can click **Public game** in the menu to turn it on, and then the game shows up under **Public games** in everyone's menu (if it isn't full), where anyone can click it to join. Click it again to make the game private again. The list only shows games with your version of the game.
+
+**If the game server can't be reached**
+
+The game then hosts straight from your computer and gives a 7-letter code instead (like `JYE8PFR`). That code works for friends on your **Wi-Fi**, and over the **internet** if the host's router lets the game open its port (UPnP); the menu tells you if it worked. If it doesn't, friends far away can still join if everyone uses a free VPN like [Radmin VPN](https://www.radmin-vpn.com/) or ZeroTier. The first time you host this way, Windows may ask whether to let the game through the firewall: click **Allow**.
+
+Everyone needs the same game version.
 
 ## Changing the game
 
@@ -100,4 +105,5 @@ All the game code is in `main.gd`. Good places to start:
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.
 - `build_world()` sets up the 3D scene: camera angle, lighting and map colors. `build_gate()` builds the gates.
 - `build_tower_node()` builds each tower's 3D model.
-- The **multiplayer** section of `main.gd` has the networking: `NET_PORT` and `SEARCH_PORT` are the network ports it uses.
+- The **multiplayer** section of `main.gd` has the networking: `RELAY_URL` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used when hosting straight from your computer.
+- The game server itself is in the `relay` folder (see [relay/README.md](relay/README.md)).
