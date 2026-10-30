@@ -32,7 +32,8 @@ godot --path path/to/this/folder
 | **Left-click** on grass | Build the chosen tower |
 | **Left-click** on a tower | Select it |
 | **U** | Upgrade the selected tower |
-| **S** | Sell the selected tower (70% refund) |
+| **X** / **Delete** | Sell the selected tower (70% refund) |
+| **W A S D** | Move the camera |
 | **Space** | Start the next wave |
 | **F** | Change game speed (1×, 2×, 3×) |
 | **Right-click** / **Esc** | Cancel |

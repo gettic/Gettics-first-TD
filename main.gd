@@ -11,6 +11,8 @@ const ROWS := 18
 const SCREEN_W := 1280
 const SCREEN_H := 720
 const PANEL_LEFT := 960
+const CAMERA_SPEED := 12.0  # tiles per second
+const CAMERA_LIMIT := Vector2(9.0, 7.0)  # how far the camera can move from its start
 const MAX_WAVE := 30
 const START_GOLD := 150
 const START_LIVES := 20
@@ -140,6 +142,7 @@ var time := 0.0
 
 # 3D scene pieces
 var camera: Camera3D
+var camera_home: Vector3
 var hud: Node2D
 var portal: Node3D
 var range_disc: MeshInstance3D
@@ -212,7 +215,10 @@ func mouse_over_panel() -> bool:
 
 # Finds the map tile under the mouse by shooting a ray from the camera to the ground.
 func mouse_cell() -> Vector2i:
-	var mp := get_viewport().get_mouse_position()
+	return screen_to_cell(get_viewport().get_mouse_position())
+
+
+func screen_to_cell(mp: Vector2) -> Vector2i:
 	var from := camera.project_ray_origin(mp)
 	var dir := camera.project_ray_normal(mp)
 	if absf(dir.y) < 0.0001:
@@ -267,7 +273,7 @@ func build_world() -> void:
 	env.background_color = Color(0.015, 0.02, 0.03)
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color(0.55, 0.6, 0.7)
-	env.ambient_light_energy = 0.35
+	env.ambient_light_energy = 0.45
 	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	env.glow_enabled = true
 	var world_env := WorldEnvironment.new()
@@ -288,10 +294,13 @@ func build_world() -> void:
 	camera.look_at(Vector3(COLS / 2.0, 0.0, ROWS / 2.0 + 0.3))
 	# Shift the view so the map is centered in the area left of the side panel
 	camera.h_offset = 4.4
+	camera_home = camera.position
 
-	# Ground: grass tiles, with the path sunk a little lower
+	# Ground: grass tiles, with the path sunk a little lower.
+	# Tiles are slightly bigger than one unit so they overlap and no gaps show between them.
+	# The two grass colors sit at very slightly different heights so the overlaps don't flicker.
 	var tile := BoxMesh.new()
-	tile.size = Vector3(1, 0.5, 1)
+	tile.size = Vector3(1.01, 0.5, 1.01)
 	var grass_a := mat(Color(0.11, 0.24, 0.09))
 	var grass_b := mat(Color(0.13, 0.28, 0.11))
 	var dirt := mat(Color(0.3, 0.2, 0.12))
@@ -299,8 +308,10 @@ func build_world() -> void:
 		for y in ROWS:
 			if path_cells.has(Vector2i(x, y)):
 				add_mesh(self, tile, dirt, Vector3(x + 0.5, -0.33, y + 0.5))
+			elif (x + y) % 2 == 0:
+				add_mesh(self, tile, grass_a, Vector3(x + 0.5, -0.25, y + 0.5))
 			else:
-				add_mesh(self, tile, grass_a if (x + y) % 2 == 0 else grass_b, Vector3(x + 0.5, -0.25, y + 0.5))
+				add_mesh(self, tile, grass_b, Vector3(x + 0.5, -0.252, y + 0.5))
 	var base := BoxMesh.new()
 	base.size = Vector3(COLS + 0.6, 1.0, ROWS + 0.6)
 	add_mesh(self, base, mat(Color(0.16, 0.12, 0.09)), Vector3(COLS / 2.0, -0.85, ROWS / 2.0))
@@ -552,8 +563,27 @@ func _process(delta: float) -> void:
 				state = "won"
 			else:
 				flash("Wave %d cleared! +%d gold" % [wave, bonus])
+	update_camera(delta)
 	update_visuals(delta)
 	hud.queue_redraw()
+
+
+# Moves the camera with WASD (by key position, so it works on any keyboard layout).
+func update_camera(delta: float) -> void:
+	var dir := Vector2.ZERO
+	if Input.is_physical_key_pressed(KEY_W):
+		dir.y -= 1
+	if Input.is_physical_key_pressed(KEY_S):
+		dir.y += 1
+	if Input.is_physical_key_pressed(KEY_A):
+		dir.x -= 1
+	if Input.is_physical_key_pressed(KEY_D):
+		dir.x += 1
+	if dir == Vector2.ZERO:
+		return
+	var move := dir.normalized() * CAMERA_SPEED * delta
+	camera.position.x = clampf(camera.position.x + move.x, camera_home.x - CAMERA_LIMIT.x, camera_home.x + CAMERA_LIMIT.x)
+	camera.position.z = clampf(camera.position.z + move.y, camera_home.z - CAMERA_LIMIT.y, camera_home.z + CAMERA_LIMIT.y)
 
 
 func update_spawning(dt: float) -> void:
@@ -756,7 +786,7 @@ func _unhandled_input(event: InputEvent) -> void:
 				start_wave()
 			KEY_U:
 				upgrade_selected()
-			KEY_S:
+			KEY_X, KEY_DELETE:
 				sell_selected()
 			KEY_F:
 				toggle_speed()
@@ -922,7 +952,7 @@ func draw_panel() -> void:
 			button(UPGRADE_RECT, "Upgrade %dg (U)" % cost, gold >= cost)
 		else:
 			button(UPGRADE_RECT, "Max level", false)
-		button(SELL_RECT, "Sell %dg (S)" % int(selected.spent * 0.7))
+		button(SELL_RECT, "Sell %dg (X)" % int(selected.spent * 0.7))
 	else:
 		text(Vector2(PANEL_X, 430), "Click a tower to upgrade or sell it.", 14, Color(0.6, 0.6, 0.65))
 
@@ -932,7 +962,8 @@ func draw_panel() -> void:
 	var wave_label := "Wave running..." if wave_running else "Next wave (SPACE)"
 	button(WAVE_RECT, wave_label, not wave_running and state == "playing")
 	button(SPEED_RECT, "x%d (F)" % game_speed, true, game_speed > 1)
-	text(Vector2(PANEL_X, 690), "Right-click / Esc: cancel", 13, Color(0.55, 0.55, 0.6))
+	text(Vector2(PANEL_X, 676), "WASD: move camera", 13, Color(0.55, 0.55, 0.6))
+	text(Vector2(PANEL_X, 696), "Right-click / Esc: cancel", 13, Color(0.55, 0.55, 0.6))
 
 
 func draw_end_screen() -> void:
