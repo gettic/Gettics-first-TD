@@ -1,6 +1,7 @@
 ﻿extends Node3D
 ## Gettic's first TD - a small 3D tower defense game.
-## Enemies walk a spiral path toward the portal in the middle.
+## Monsters come out of a gate at each player's corner and walk around a square.
+## Up to 4 players can play together over the network (see "multiplayer").
 ## The game logic runs on a flat map measured in pixels (CELL pixels per tile).
 ## to3d() turns those positions into the 3D world, where one tile is one unit.
 ## The side panel, health bars and lightning are drawn in 2D on top (draw_hud).
@@ -19,13 +20,25 @@ const ZOOM_MAX := 1.3   # furthest zoom
 const ZOOM_STEP := 0.1  # how much one scroll-wheel notch zooms
 const MAX_WAVE := 30
 const START_GOLD := 150
-const MAX_ALIVE := 50  # you lose when this many monsters are alive at once (a boss counts as 5)
+const MAX_ALIVE := 50  # per player: you lose when this many monsters are alive at once (a boss counts as 5)
 const WAVE_INTERVAL := 25.0  # seconds between waves once the game has started
 
-# The path in grid coordinates. Monsters come out of the portal in the middle,
-# walk out to the square, then walk around the square clockwise forever.
-const SPAWN_PATH := [Vector2i(12, 9), Vector2i(12, 15)]
-const LOOP := [Vector2i(12, 15), Vector2i(2, 15), Vector2i(2, 2), Vector2i(21, 2), Vector2i(21, 15)]
+# The path in grid coordinates. The square's corners, clockwise. Monsters walk
+# around the square forever.
+const LOOP := [Vector2i(2, 15), Vector2i(2, 2), Vector2i(21, 2), Vector2i(21, 15)]
+# Each player has a gate just outside one corner of the square (player 1 uses
+# GATES[0]). Its monsters walk from the gate into that corner, then join the loop.
+const GATES := [Vector2i(2, 17), Vector2i(0, 2), Vector2i(21, 0), Vector2i(23, 15)]
+const MAX_PLAYERS := 4
+const PLAYER_NAMES := ["Blue", "Red", "Yellow", "Pink"]
+const PLAYER_COLORS := [Color(0.3, 0.55, 1.0), Color(1.0, 0.3, 0.3), Color(1.0, 0.85, 0.2), Color(1.0, 0.45, 0.8)]
+const ENEMY_KINDS := ["normal", "fast", "armored", "boss"]
+
+# Multiplayer: the host's game runs everything, the others send it their actions
+const NET_PORT := 24750
+const SEARCH_PORT := 24751  # the host listens here for players looking for its short code
+const SNAPSHOT_RATE := 15.0  # monster updates per second sent to the other players
+const CODE_LETTERS := "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # for invite codes (no I, L, O or U)
 
 # Tower stats per level (index 0 = level 1). "cost"[0] is the build price,
 # the rest are upgrade prices.
@@ -76,6 +89,16 @@ const WAVE_RECT := Rect2(PANEL_X, 610, 200, 44)
 const SPEED_RECT := Rect2(PANEL_X + 208, 610, 80, 44)
 const UPDATE_RECT := Rect2(PANEL_X, 532, 288, 36)
 
+# Esc menu layout (screen pixels)
+const MENU_RECT := Rect2(230, 60, 500, 620)
+const HOST_RECT := Rect2(270, 198, 420, 44)
+const JOIN_INPUT_RECT := Rect2(270, 292, 290, 40)
+const JOIN_BUTTON_RECT := Rect2(570, 292, 120, 40)
+const COPY_RECT := Rect2(570, 226, 120, 40)
+const COPY_LONG_RECT := Rect2(570, 330, 120, 32)
+const STOP_RECT := Rect2(270, 560, 420, 40)
+const RESUME_RECT := Rect2(270, 616, 420, 44)
+
 # Update popup layout (screen pixels)
 const DIALOG_RECT := Rect2(340, 140, 600, 440)
 const DIALOG_YES_RECT := Rect2(380, 506, 250, 44)
@@ -86,7 +109,11 @@ const RELEASES_API := "https://api.github.com/repos/gettic/Gettics-first-TD/rele
 
 
 class Enemy:
+	var id := 0  # the same on every player's computer
+	var kind := "normal"
 	var pos: Vector2
+	var net_pos: Vector2  # other players: latest position from the host, pos glides toward it
+	var route: Array[Vector2]  # this monster's gate, then the square's corners from where it joins
 	var wp := 1
 	var hp := 1.0
 	var max_hp := 1.0
@@ -109,6 +136,7 @@ class Tower:
 	var type: String
 	var cell: Vector2i
 	var pos: Vector2
+	var owner := 0  # player slot (0-3) that built it and gets the gold for its kills
 	var level := 0
 	var cooldown := 0.0
 	var spent := 0
@@ -123,30 +151,65 @@ class Shot:
 	var target_pos: Vector2
 	var type: String
 	var level := 0
+	var owner := 0
+	var visual := false  # other players' copy of a host's shot: just for show, does no damage
 	var speed := 420.0
 	var done := false
 	var node: MeshInstance3D
 
 
+class Player:
+	var peer := 1  # network id; the host is always 1
+	var slot := 0  # 0-3: which gate and color
+	var gold := 0
+
+
 var path_cells := {}
-var path_points: Array[Vector2] = []
-var loop_start := 0  # index in path_points where the square loop starts
+var routes: Array = []  # per gate: Array[Vector2] of points, gate first
 var enemies: Array[Enemy] = []
+var enemy_by_id := {}
+var next_enemy_id := 1
 var towers := {}  # Vector2i -> Tower
 var shots: Array[Shot] = []
 var effects := []  # Dictionaries: bolts and explosions
 
-var gold := 0
+var players: Array = [null, null, null, null]  # Player per slot, null = free
+var local_slot := 0  # this computer's player
+# This computer's gold
+var gold: int:
+	get:
+		return players[local_slot].gold if players[local_slot] != null else 0
+	set(value):
+		if players[local_slot] != null:
+			players[local_slot].gold = value
 var next_wave_timer := 0.0
 var wave := 0
-var spawn_queue: Array[String] = []
-var spawn_timer := 0.0
+var spawn_queues: Array = [[], [], [], []]  # monster kinds still to come out of each gate
+var spawn_timers := [0.0, 0.0, 0.0, 0.0]
 var spawn_hp := 0.0
+var net_spawn_left := 0  # other players: monsters still to spawn, from the host
 var build_type := ""
 var selected: Tower = null
 var game_speed := 1
 var state := "playing"  # "playing", "won" or "lost"
-var paused := false
+var menu_open := false  # the Esc menu; it only pauses the game when playing alone
+
+# Multiplayer
+var net_mode := ""  # "" alone, "host", "searching", "connecting" or "client"
+var net_addresses: Array = []  # client: the host's addresses, tried in order
+var net_connect_time := 0.0
+var net_status := ""  # shown in the menu
+var short_code := ""  # host: 5 letters, found by searching the local network
+var invite_code := ""  # host: long code with the internet address, if the router allowed it
+var search_peer: PacketPeerUDP  # host: answers searches; player: sends them
+var search_time := 0.0
+var search_send_timer := 0.0
+var search_code := ""
+var search_found: Array = []  # addresses of hosts that answered
+var snapshot_timer := 0.0
+var upnp: UPNP  # host: the router port opening, removed again when hosting stops
+var upnp_thread: Thread
+var code_input: LineEdit
 var message := ""
 var message_time := 0.0
 var font: Font
@@ -168,7 +231,7 @@ var camera_pan := Vector2.ZERO  # how far WASD has moved the camera
 var zoom := 1.0
 var target_zoom := 1.0
 var hud: Node2D
-var portal: Node3D
+var gate_parts: Array = []  # per gate: the portal pieces that only show while a player uses that gate
 var range_disc: MeshInstance3D
 var ghost: MeshInstance3D
 var ghost_mat: StandardMaterial3D
@@ -182,25 +245,34 @@ var shot_mats := {}
 
 func _ready() -> void:
 	font = ThemeDB.fallback_font
-	var corners: Array = SPAWN_PATH + LOOP.slice(1)
-	for w in corners:
-		path_points.append(cell_center(w))
-	loop_start = SPAWN_PATH.size() - 1
-	# Mark the path tiles, including the side that closes the square
-	corners.append(LOOP[0])
-	for i in range(corners.size() - 1):
-		var a: Vector2i = corners[i]
-		var b: Vector2i = corners[i + 1]
-		var step := Vector2i(signi(b.x - a.x), signi(b.y - a.y))
-		var c := a
-		while true:
-			path_cells[c] = true
-			if c == b:
-				break
-			c += step
+	# Each gate's route: the gate, then all four corners starting where it joins the square
+	for g in GATES.size():
+		var route: Array[Vector2] = [cell_center(GATES[g])]
+		for i in LOOP.size():
+			route.append(cell_center(LOOP[(g + i) % LOOP.size()]))
+		routes.append(route)
+		mark_path(GATES[g], LOOP[g])
+	for i in LOOP.size():
+		mark_path(LOOP[i], LOOP[(i + 1) % LOOP.size()])
 	build_world()
-	new_game()
+	multiplayer.peer_connected.connect(_on_peer_connected)
+	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
+	multiplayer.connected_to_server.connect(_on_connected_to_host)
+	multiplayer.connection_failed.connect(_on_connection_failed)
+	multiplayer.server_disconnected.connect(_on_host_left)
+	play_alone()
 	check_for_update()
+
+
+# Marks the tiles on a straight line from a to b as path.
+func mark_path(a: Vector2i, b: Vector2i) -> void:
+	var step := Vector2i(signi(b.x - a.x), signi(b.y - a.y))
+	var c := a
+	while true:
+		path_cells[c] = true
+		if c == b:
+			break
+		c += step
 
 
 # ---------------------------------------------------------------- updates
@@ -375,6 +447,21 @@ func is_newer(a: String, b: String) -> bool:
 
 
 func new_game() -> void:
+	clear_world()
+	for p in players:
+		if p != null:
+			p.gold = START_GOLD
+	wave = 0
+	next_wave_timer = 0.0
+	game_speed = 1
+	state = "playing"
+	menu_open = false
+	send_all("net_reset", [])
+	flash("Build towers, then press SPACE to start")
+
+
+# Removes all towers, monsters and effects.
+func clear_world() -> void:
 	for e in enemies:
 		e.node.queue_free()
 	for t: Tower in towers.values():
@@ -385,19 +472,41 @@ func new_game() -> void:
 		if fx.has("node"):
 			fx["node"].queue_free()
 	enemies.clear()
+	enemy_by_id.clear()
 	towers.clear()
 	shots.clear()
 	effects.clear()
-	spawn_queue.clear()
-	gold = START_GOLD
-	wave = 0
-	next_wave_timer = 0.0
+	for q in spawn_queues:
+		q.clear()
 	build_type = ""
 	selected = null
-	game_speed = 1
-	state = "playing"
-	paused = false
-	flash("Build towers, then press SPACE to start")
+
+
+# A fresh single-player game (at startup, or after leaving a multiplayer game).
+func play_alone() -> void:
+	players = [null, null, null, null]
+	var me := Player.new()
+	players[0] = me
+	local_slot = 0
+	new_game()
+
+
+func player_count() -> int:
+	return MAX_PLAYERS - players.count(null)
+
+
+# The loss limit grows with the number of players, like the waves do.
+func max_alive() -> int:
+	return MAX_ALIVE * player_count()
+
+
+func monsters_left_to_spawn() -> int:
+	if net_mode == "client":
+		return net_spawn_left
+	var n := 0
+	for q in spawn_queues:
+		n += q.size()
+	return n
 
 
 func cell_center(c: Vector2i) -> Vector2:
@@ -515,11 +624,27 @@ func build_world() -> void:
 	base.size = Vector3(COLS + 0.6, 1.0, ROWS + 0.6)
 	add_mesh(self, base, mat(Color(0.16, 0.12, 0.09)), Vector3(COLS / 2.0, -0.85, ROWS / 2.0))
 
-	# Stone gate with a green portal where the monsters come out.
-	# It faces along the first stretch of path, so monsters walk straight out of it.
+	for g in GATES.size():
+		build_gate(g)
+
+	# Range circle and build preview
+	var disc := CylinderMesh.new()
+	disc.top_radius = 1.0
+	disc.bottom_radius = 1.0
+	disc.height = 0.02
+	disc.radial_segments = 48
+	range_disc = add_mesh(self, disc, mat(Color.WHITE, 0.0, 0.07))
+	range_disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	build_markers_and_hud()
+
+
+# Stone gate with a green portal where one player's monsters come out. It faces
+# along its stretch of path, so monsters walk straight out of it. A gem on top
+# shows the player's color; the portal only shows while a player uses the gate.
+func build_gate(g: int) -> void:
 	var gate := Node3D.new()
-	gate.position = to3d(path_points[0])
-	var out_dir: Vector2i = SPAWN_PATH[1] - SPAWN_PATH[0]
+	gate.position = to3d(routes[g][0])
+	var out_dir: Vector2i = LOOP[g] - GATES[g]
 	gate.rotation.y = atan2(out_dir.x, out_dir.y)
 	add_child(gate)
 	var stone := mat(Color(0.42, 0.42, 0.46))
@@ -534,6 +659,8 @@ func build_world() -> void:
 	cap.size = Vector3(0.3, 0.1, 0.4)
 	add_mesh(gate, cap, stone, Vector3(-0.5, -0.03, 0))
 	add_mesh(gate, cap, stone, Vector3(0.5, -0.03, 0))
+	var gem := add_mesh(gate, box(0.2, 0.2, 0.2), mat(PLAYER_COLORS[g], 1.2), Vector3(0, 1.55, 0))
+	gem.rotation_degrees = Vector3(45, 0, 45)
 
 	# The portal surface filling the arch, visible from both sides
 	var green := Color(0.25, 1.0, 0.4)
@@ -541,10 +668,11 @@ func build_world() -> void:
 	surface.size = Vector2(0.78, 1.12)
 	var surface_mat := mat(green, 1.6, 0.7)
 	surface_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	add_mesh(gate, surface, surface_mat, Vector3(0, 0.6, 0)).cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var surface_node := add_mesh(gate, surface, surface_mat, Vector3(0, 0.6, 0))
+	surface_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 	# Glowing sparks that swirl inside the portal
-	portal = Node3D.new()
+	var portal := Node3D.new()
 	portal.position = Vector3(0, 0.6, 0.02)
 	gate.add_child(portal)
 	var spark := SphereMesh.new()
@@ -561,15 +689,16 @@ func build_world() -> void:
 	portal_light.light_energy = 1.8
 	portal_light.position = Vector3(0, 0.7, 0.4)
 	gate.add_child(portal_light)
+	gate_parts.append({"surface": surface_node, "sparks": portal, "light": portal_light})
 
-	# Range circle and build preview
-	var disc := CylinderMesh.new()
-	disc.top_radius = 1.0
-	disc.bottom_radius = 1.0
-	disc.height = 0.02
-	disc.radial_segments = 48
-	range_disc = add_mesh(self, disc, mat(Color.WHITE, 0.0, 0.07))
-	range_disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+func box(x: float, y: float, z: float) -> BoxMesh:
+	var b := BoxMesh.new()
+	b.size = Vector3(x, y, z)
+	return b
+
+
+func build_markers_and_hud() -> void:
 	range_disc.visible = false
 	var ghost_mesh := BoxMesh.new()
 	ghost_mesh.size = Vector3(0.95, 0.1, 0.95)
@@ -595,6 +724,17 @@ func build_world() -> void:
 	layer.add_child(hud)
 	hud.draw.connect(draw_hud)
 
+	# Text box in the Esc menu for typing an invite code
+	code_input = LineEdit.new()
+	code_input.position = JOIN_INPUT_RECT.position
+	code_input.size = JOIN_INPUT_RECT.size
+	code_input.placeholder_text = "Invite code"
+	code_input.max_length = 40
+	code_input.add_theme_font_size_override("font_size", 18)
+	code_input.visible = false
+	code_input.text_submitted.connect(func(_t: String) -> void: join_game())
+	layer.add_child(code_input)
+
 
 func build_tower_node(t: Tower) -> void:
 	if t.node != null:
@@ -603,9 +743,10 @@ func build_tower_node(t: Tower) -> void:
 	var root := Node3D.new()
 	root.position = to3d(t.pos)
 	add_child(root)
+	# The base is tinted with the owner's color
 	var base := BoxMesh.new()
 	base.size = Vector3(0.8, 0.3, 0.8)
-	add_mesh(root, base, stone_mat, Vector3(0, 0.15, 0))
+	add_mesh(root, base, mat(stone_mat.albedo_color.lerp(PLAYER_COLORS[t.owner], 0.45)), Vector3(0, 0.15, 0))
 	# The tower gets taller with each level
 	var h := 0.35 + t.level * 0.2
 	var body := CylinderMesh.new()
@@ -662,7 +803,11 @@ func build_tower_node(t: Tower) -> void:
 
 func update_visuals(delta: float) -> void:
 	time += delta
-	portal.rotation.z += delta * 2.0
+	for g in gate_parts.size():
+		var in_use: bool = players[g] != null
+		for part in gate_parts[g].values():
+			part.visible = in_use
+		gate_parts[g]["sparks"].rotation.z += delta * 2.0
 	for e in enemies:
 		var r := e.radius / CELL
 		e.node.position = to3d(e.pos, -0.08 + r + absf(sin(time * 8.0 + e.bob)) * 0.06)
@@ -715,55 +860,78 @@ func start_wave() -> void:
 	var early_bonus := int(maxf(next_wave_timer, 0.0)) if wave > 0 else 0
 	wave += 1
 	var income := 10 + wave * 2
-	gold += income + early_bonus
+	# Every player gets the wave income, and every player's gate sends a full wave
+	for p in players:
+		if p != null:
+			p.gold += income + early_bonus
+	var text := "Wave %d! +%d gold" % [wave, income]
 	if early_bonus > 0:
-		flash("Wave %d! +%d gold (+%d for calling early)" % [wave, income, early_bonus])
-	else:
-		flash("Wave %d! +%d gold" % [wave, income])
+		text = "Wave %d! +%d gold (+%d for calling early)" % [wave, income, early_bonus]
+	flash(text)
+	send_all("net_message", [text])
 	next_wave_timer = WAVE_INTERVAL
 	spawn_hp = 25.0 * pow(1.17, wave - 1)
 	var kind := kind_for_wave(wave)
 	var count := 8 + wave
 	if kind == "boss":
 		count = 1 + int(wave / 10.0)
-	for i in count:
-		spawn_queue.append(kind)
+	for g in MAX_PLAYERS:
+		if players[g] != null:
+			for i in count:
+				spawn_queues[g].append(kind)
 
 
-# The player calling a wave (Space or the button). Not allowed until every enemy
-# of the current wave has spawned.
-func call_wave() -> void:
-	if not spawn_queue.is_empty():
-		flash("Wait until the whole wave has spawned!")
-		return
+# A player calling the next wave early (Space or the button). Not allowed until
+# every monster of the current wave has spawned. Returns an error message, or "".
+func call_wave() -> String:
+	if monsters_left_to_spawn() > 0:
+		return "Wait until the whole wave has spawned!"
 	start_wave()
+	return ""
 
 
-func spawn_enemy(kind: String) -> void:
-	var e := Enemy.new()
-	e.pos = path_points[0]
+# Host: a new monster at gate g.
+func spawn_enemy(kind: String, g: int) -> void:
+	var e := make_enemy(kind)
+	e.id = next_enemy_id
+	next_enemy_id += 1
+	e.route = routes[g]
+	e.pos = e.route[0]
 	e.max_hp = spawn_hp
 	e.bounty = 2 + int(wave / 4.0)
-	e.color = Color(0.95, 0.5, 0.6)
 	match kind:
 		"fast":
 			e.max_hp *= 0.6
 			e.speed *= 1.7
-			e.radius = 8.0
-			e.color = Color(1.0, 0.9, 0.3)
 		"armored":
 			e.max_hp *= 1.3
 			e.armor = 2.0 + wave * 0.6
-			e.radius = 11.0
-			e.color = Color(0.6, 0.65, 0.75)
 		"boss":
 			e.max_hp *= 15.0
 			e.speed *= 0.7
-			e.radius = 18.0
 			e.bounty = 40 + wave * 4
 			e.weight = 5
-			e.color = Color(0.9, 0.15, 0.15)
 	e.hp = e.max_hp
+	enemies.append(e)
+	enemy_by_id[e.id] = e
+
+
+# A monster's looks, used both by the host and by the other players' copies.
+func make_enemy(kind: String) -> Enemy:
+	var e := Enemy.new()
+	e.kind = kind
+	e.color = Color(0.95, 0.5, 0.6)
+	match kind:
+		"fast":
+			e.radius = 8.0
+			e.color = Color(1.0, 0.9, 0.3)
+		"armored":
+			e.radius = 11.0
+			e.color = Color(0.6, 0.65, 0.75)
+		"boss":
+			e.radius = 18.0
+			e.weight = 5
+			e.color = Color(0.9, 0.15, 0.15)
 
 	var r := e.radius / CELL
 	var ball := SphereMesh.new()
@@ -780,20 +948,38 @@ func spawn_enemy(kind: String) -> void:
 		crown.outer_radius = 0.17
 		add_mesh(e.node, crown, gold_mat, Vector3(0, r * 0.95, 0))
 	e.bob = randf() * TAU
-	enemies.append(e)
+	return e
 
 
 # ---------------------------------------------------------------- update
 
 func _process(delta: float) -> void:
-	if paused or update_dialog != "":
+	code_input.visible = menu_open and net_mode == ""
+	if net_mode == "searching":
+		update_search(delta)
+	elif net_mode == "connecting":
+		net_connect_time += delta
+		if net_connect_time > 4.0:
+			try_next_address()
+	elif net_mode == "host" and search_peer != null:
+		answer_searches()
+	# Playing alone, the menu and the update popup pause the game. In multiplayer it keeps going.
+	if (menu_open and net_mode == "") or (update_dialog != "" and net_mode == ""):
 		update_visuals(0.0)
 		hud.queue_redraw()
 		return
 	message_time = maxf(message_time - delta, 0.0)
 	update_effects(delta)
-	if state == "playing":
-		var dt := delta * game_speed
+	var dt := delta * game_speed
+	if net_mode == "client":
+		# The host runs the game. Here monsters just glide to where the host says
+		# they are, and shots fly for show.
+		if state == "playing" and wave > 0:
+			next_wave_timer = maxf(next_wave_timer - dt, 0.0)
+		for e in enemies:
+			e.pos = e.pos.lerp(e.net_pos, minf(delta * 12.0, 1.0))
+		update_shots(dt)
+	elif state == "playing":
 		if wave > 0 and wave < MAX_WAVE:
 			next_wave_timer -= dt
 			if next_wave_timer <= 0.0:
@@ -803,10 +989,15 @@ func _process(delta: float) -> void:
 		update_towers(dt)
 		update_shots(dt)
 		remove_dead()
-		if alive_count() >= MAX_ALIVE:
+		if alive_count() >= max_alive():
 			state = "lost"
-		elif wave >= MAX_WAVE and spawn_queue.is_empty() and enemies.is_empty():
+		elif wave >= MAX_WAVE and monsters_left_to_spawn() == 0 and enemies.is_empty():
 			state = "won"
+	if net_mode == "host":
+		snapshot_timer -= delta
+		if snapshot_timer <= 0.0:
+			snapshot_timer = 1.0 / SNAPSHOT_RATE
+			send_snapshot()
 	update_camera(delta)
 	update_visuals(delta)
 	hud.queue_redraw()
@@ -847,16 +1038,18 @@ func alive_count() -> int:
 
 
 func update_spawning(dt: float) -> void:
-	if spawn_queue.is_empty():
-		return
-	spawn_timer -= dt
-	if spawn_timer <= 0.0:
-		var kind: String = spawn_queue.pop_front()
-		spawn_enemy(kind)
-		match kind:
-			"boss": spawn_timer = 2.0
-			"fast": spawn_timer = 0.45
-			_: spawn_timer = 0.7
+	for g in MAX_PLAYERS:
+		var queue: Array = spawn_queues[g]
+		if queue.is_empty():
+			continue
+		spawn_timers[g] -= dt
+		if spawn_timers[g] <= 0.0:
+			var kind: String = queue.pop_front()
+			spawn_enemy(kind, g)
+			match kind:
+				"boss": spawn_timers[g] = 2.0
+				"fast": spawn_timers[g] = 0.45
+				_: spawn_timers[g] = 0.7
 
 
 func update_enemies(dt: float) -> void:
@@ -867,16 +1060,16 @@ func update_enemies(dt: float) -> void:
 				e.slow_factor = 1.0
 		var move := e.speed * e.slow_factor * dt
 		while move > 0.0:
-			var target := path_points[e.wp]
+			var target := e.route[e.wp]
 			var d := e.pos.distance_to(target)
 			if d <= move:
 				e.pos = target
 				e.traveled += d
 				move -= d
 				e.wp += 1
-				# After the last corner, go around the square again
-				if e.wp >= path_points.size():
-					e.wp = loop_start
+				# After the last corner, go around the square again (route[1] is the first corner)
+				if e.wp >= e.route.size():
+					e.wp = 1
 			else:
 				e.pos += (target - e.pos) / d * move
 				e.traveled += move
@@ -897,21 +1090,30 @@ func update_towers(dt: float) -> void:
 		if t.type == "spark":
 			fire_lightning(t, target)
 		else:
-			var s := Shot.new()
-			s.pos = t.pos + t.aim * 14.0
-			s.target = target
-			s.target_pos = target.pos
-			s.type = t.type
-			s.level = t.level
-			if t.type == "cannon":
-				s.speed = 300.0
-			if not shot_mats.has(t.type):
-				shot_mats[t.type] = mat(data["color"], 2.0)
-			var ball := SphereMesh.new()
-			ball.radius = 0.12 if t.type == "cannon" else 0.07
-			ball.height = ball.radius * 2.0
-			s.node = add_mesh(self, ball, shot_mats[t.type], to3d(s.pos, 0.6))
-			shots.append(s)
+			launch_shot(t, target, false)
+			send_all("net_shot", [t.cell, target.id])
+
+
+# A shot flying from tower t to the target. A visual shot is the other players'
+# copy of the host's shot: it flies the same way but does no damage.
+func launch_shot(t: Tower, target: Enemy, visual: bool) -> void:
+	var s := Shot.new()
+	s.pos = t.pos + t.aim * 14.0
+	s.target = target
+	s.target_pos = target.pos
+	s.type = t.type
+	s.level = t.level
+	s.owner = t.owner
+	s.visual = visual
+	if t.type == "cannon":
+		s.speed = 300.0
+	if not shot_mats.has(t.type):
+		shot_mats[t.type] = mat(TOWERS[t.type]["color"], 2.0)
+	var ball := SphereMesh.new()
+	ball.radius = 0.12 if t.type == "cannon" else 0.07
+	ball.height = ball.radius * 2.0
+	s.node = add_mesh(self, ball, shot_mats[t.type], to3d(s.pos, 0.6))
+	shots.append(s)
 
 
 # Picks the enemy in range that is furthest along the path.
@@ -929,7 +1131,7 @@ func fire_lightning(t: Tower, first: Enemy) -> void:
 	var dmg: float = data["damage"][t.level]
 	var hit: Array[Enemy] = [first]
 	var points := PackedVector3Array([t.node.position + t.head.position + Vector3(0, 0.1, 0), first.node.position])
-	damage_enemy(first, dmg)
+	damage_enemy(first, dmg, t.owner)
 	var current := first
 	for i in range(data["chain"][t.level] - 1):
 		dmg *= 0.8
@@ -946,8 +1148,13 @@ func fire_lightning(t: Tower, first: Enemy) -> void:
 			break
 		hit.append(next)
 		points.append(next.node.position)
-		damage_enemy(next, dmg)
+		damage_enemy(next, dmg, t.owner)
 		current = next
+	add_bolt(points)
+	send_all("net_bolt", [points])
+
+
+func add_bolt(points: PackedVector3Array) -> void:
 	effects.append({"kind": "bolt", "points": points, "time": 0.15, "max": 0.15})
 
 
@@ -959,7 +1166,8 @@ func update_shots(dt: float) -> void:
 		var step := s.speed * dt
 		if to.length() <= step:
 			s.pos = s.target_pos
-			shot_hit(s)
+			if not s.visual:
+				shot_hit(s)
 			s.done = true
 		else:
 			s.pos += to.normalized() * step
@@ -978,37 +1186,45 @@ func shot_hit(s: Shot) -> void:
 			var r: float = data["splash"][s.level]
 			for e in enemies:
 				if not e.dead and e.pos.distance_to(s.pos) <= r:
-					damage_enemy(e, dmg)
-			var m := mat(Color(1.0, 0.55, 0.15), 1.5, 0.5)
-			var node := add_mesh(self, boom_mesh, m, to3d(s.pos, 0.2))
-			node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			node.scale = Vector3.ZERO
-			effects.append({"kind": "boom", "node": node, "mat": m, "radius": r, "time": 0.3, "max": 0.3})
+					damage_enemy(e, dmg, s.owner)
+			add_boom(s.pos, r)
+			send_all("net_boom", [s.pos, r])
 		"frost":
 			if alive:
 				var slow: float = data["slow"][s.level]
 				s.target.slow_factor = minf(s.target.slow_factor, slow)
 				s.target.slow_time = 2.0
-				damage_enemy(s.target, dmg)
+				damage_enemy(s.target, dmg, s.owner)
 		_:
 			if alive:
-				damage_enemy(s.target, dmg)
+				damage_enemy(s.target, dmg, s.owner)
 
 
-func damage_enemy(e: Enemy, amount: float) -> void:
+func add_boom(pos: Vector2, r: float) -> void:
+	var m := mat(Color(1.0, 0.55, 0.15), 1.5, 0.5)
+	var node := add_mesh(self, boom_mesh, m, to3d(pos, 0.2))
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.scale = Vector3.ZERO
+	effects.append({"kind": "boom", "node": node, "mat": m, "radius": r, "time": 0.3, "max": 0.3})
+
+
+# The gold for a kill goes to the player who owns the tower that made it.
+func damage_enemy(e: Enemy, amount: float, owner_slot: int) -> void:
 	if e.dead:
 		return
 	# Armor removes a flat amount, but at least 25% of the hit always goes through.
 	e.hp -= maxf(amount - e.armor, amount * 0.25)
 	if e.hp <= 0.0:
 		e.dead = true
-		gold += e.bounty
+		if players[owner_slot] != null:
+			players[owner_slot].gold += e.bounty
 
 
 func remove_dead() -> void:
 	for i in range(enemies.size() - 1, -1, -1):
 		if enemies[i].dead:
 			enemies[i].node.queue_free()
+			enemy_by_id.erase(enemies[i].id)
 			enemies.remove_at(i)
 
 
@@ -1036,9 +1252,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		dialog_input(event)
 		return
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
-		toggle_pause()
+		toggle_menu()
 		return
-	if paused:
+	if menu_open:
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			menu_click(get_viewport().get_mouse_position())
 		return
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_RIGHT:
@@ -1055,16 +1273,16 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_1, KEY_2, KEY_3, KEY_4:
 				choose_build(TOWER_TYPES[event.keycode - KEY_1])
 			KEY_SPACE:
-				call_wave()
+				act("wave", [])
 			KEY_U:
 				upgrade_selected()
 			KEY_X, KEY_DELETE:
 				sell_selected()
 			KEY_F:
-				toggle_speed()
+				act("speed", [])
 			KEY_R:
 				if state != "playing":
-					new_game()
+					act("restart", [])
 
 
 func on_click(p: Vector2) -> void:
@@ -1079,9 +1297,9 @@ func on_click(p: Vector2) -> void:
 		if selected != null and SELL_RECT.has_point(p):
 			sell_selected()
 		if WAVE_RECT.has_point(p):
-			call_wave()
+			act("wave", [])
 		if SPEED_RECT.has_point(p):
-			toggle_speed()
+			act("speed", [])
 		if update_version != "" and UPDATE_RECT.has_point(p):
 			update_dialog = "ask"
 			build_type = ""
@@ -1119,56 +1337,638 @@ func choose_build(type: String) -> void:
 
 
 func try_build(c: Vector2i) -> void:
-	if not can_build(c):
-		return
-	var cost: int = TOWERS[build_type]["cost"][0]
-	if gold < cost:
-		flash("Not enough gold")
-		return
-	var t := Tower.new()
-	t.type = build_type
-	t.cell = c
-	t.pos = cell_center(c)
-	t.spent = cost
-	gold -= cost
-	towers[c] = t
-	build_tower_node(t)
+	if can_build(c):
+		act("build", [c, build_type])
 
 
 func upgrade_selected() -> void:
-	if selected == null:
-		return
-	if selected.level >= 3:
-		flash("Already max level")
-		return
-	var cost: int = TOWERS[selected.type]["cost"][selected.level + 1]
-	if gold < cost:
-		flash("Not enough gold")
-		return
-	gold -= cost
-	selected.spent += cost
-	selected.level += 1
-	build_tower_node(selected)
+	if selected != null:
+		act("upgrade", [selected.cell])
 
 
 func sell_selected() -> void:
-	if selected == null:
-		return
-	gold += int(selected.spent * 0.7)
-	selected.node.queue_free()
-	towers.erase(selected.cell)
-	selected = null
+	if selected != null:
+		act("sell", [selected.cell])
+		selected = null
 
 
-func toggle_speed() -> void:
-	game_speed = game_speed % 3 + 1
-
-
-func toggle_pause() -> void:
-	if state != "playing":
-		return
-	paused = not paused
+func toggle_menu() -> void:
+	menu_open = not menu_open
 	build_type = ""
+	if not menu_open:
+		code_input.release_focus()
+
+
+# ---------------------------------------------------------------- player actions
+
+# Everything a player does to the game goes through here. Playing alone or as
+# the host it happens right away; the other players ask the host to do it.
+func act(action: String, args: Array) -> void:
+	match net_mode:
+		"client":
+			net_request.rpc_id(1, action, args)
+		"connecting":
+			pass
+		_:
+			var error := perform(local_slot, action, args)
+			if error != "":
+				flash(error)
+
+
+# Does a player's action. Checks everything, since it may come over the network.
+# Returns a message to show the player if it can't be done, or "".
+func perform(slot: int, action: String, args: Array) -> String:
+	match action:
+		"build":
+			if args.size() == 2 and args[0] is Vector2i and args[1] is String and TOWERS.has(args[1]):
+				return build_tower(slot, args[0], args[1])
+		"upgrade":
+			if args.size() == 1 and args[0] is Vector2i:
+				return upgrade_tower(slot, args[0])
+		"sell":
+			if args.size() == 1 and args[0] is Vector2i:
+				return sell_tower(slot, args[0])
+		"wave":
+			if state == "playing":
+				return call_wave()
+		"speed":
+			if slot != local_slot:
+				return "Only the host can change the speed"
+			game_speed = game_speed % 3 + 1
+		"restart":
+			if state != "playing":
+				new_game()
+	return ""
+
+
+func build_tower(slot: int, c: Vector2i, type: String) -> String:
+	if state != "playing" or not can_build(c):
+		return ""
+	var cost: int = TOWERS[type]["cost"][0]
+	if players[slot].gold < cost:
+		return "Not enough gold"
+	var t := Tower.new()
+	t.type = type
+	t.cell = c
+	t.pos = cell_center(c)
+	t.spent = cost
+	t.owner = slot
+	players[slot].gold -= cost
+	towers[c] = t
+	build_tower_node(t)
+	send_tower(t)
+	return ""
+
+
+func upgrade_tower(slot: int, c: Vector2i) -> String:
+	var t: Tower = towers.get(c)
+	if t == null or state != "playing":
+		return ""
+	if t.owner != slot:
+		return "That's %s's tower" % PLAYER_NAMES[t.owner]
+	if t.level >= 3:
+		return "Already max level"
+	var cost: int = TOWERS[t.type]["cost"][t.level + 1]
+	if players[slot].gold < cost:
+		return "Not enough gold"
+	players[slot].gold -= cost
+	t.spent += cost
+	t.level += 1
+	build_tower_node(t)
+	send_tower(t)
+	return ""
+
+
+func sell_tower(slot: int, c: Vector2i) -> String:
+	var t: Tower = towers.get(c)
+	if t == null or state != "playing":
+		return ""
+	if t.owner != slot:
+		return "That's %s's tower" % PLAYER_NAMES[t.owner]
+	players[slot].gold += int(t.spent * 0.7)
+	remove_tower(c)
+	send_all("net_tower_removed", [c])
+	return ""
+
+
+func remove_tower(c: Vector2i) -> void:
+	var t: Tower = towers.get(c)
+	if t == null:
+		return
+	t.node.queue_free()
+	towers.erase(c)
+	if selected == t:
+		selected = null
+
+
+# ---------------------------------------------------------------- multiplayer
+#
+# The host's game is the real one: it moves the monsters, does the damage and
+# keeps everyone's gold. The other players' games send their actions to the
+# host (net_request) and show what the host tells them: towers when they
+# change, every monster's position many times a second (net_snapshot), and
+# shots and explosions as they happen.
+
+var net_port := NET_PORT
+
+
+# Host: sends a message to every player who has joined.
+func send_all(method: StringName, args: Array) -> void:
+	if net_mode != "host":
+		return
+	for p in players:
+		if p != null and p.peer != 1:
+			callv("rpc_id", [p.peer, method] + args)
+
+
+func host_game() -> void:
+	var peer := ENetMultiplayerPeer.new()
+	if peer.create_server(NET_PORT, MAX_PLAYERS - 1) != OK:
+		net_status = "Couldn't start hosting. Is the game already hosting in another window?"
+		return
+	multiplayer.multiplayer_peer = peer
+	net_mode = "host"
+	players[local_slot].peer = 1
+	# The short code: players on the same network find this game by asking for it
+	search_peer = PacketPeerUDP.new()
+	if search_peer.bind(SEARCH_PORT) == OK:
+		short_code = ""
+		for i in 5:
+			short_code += CODE_LETTERS[randi() % CODE_LETTERS.length()]
+	else:
+		search_peer = null
+		short_code = ""
+	invite_code = ""
+	net_status = "Asking your router to let players from the internet in..."
+	upnp_thread = Thread.new()
+	upnp_thread.start(open_router_port)
+
+
+# Host: answers players on the local network who are looking for our short code.
+func answer_searches() -> void:
+	while search_peer.get_available_packet_count() > 0:
+		var message := search_peer.get_packet().get_string_from_utf8()
+		if message == "GTD?" + short_code:
+			search_peer.set_dest_address(search_peer.get_packet_ip(), search_peer.get_packet_port())
+			search_peer.put_packet(("GTD!%s:%d" % [short_code, NET_PORT]).to_utf8_buffer())
+
+
+# Runs in the background, since talking to the router takes a few seconds.
+func open_router_port() -> void:
+	var u := UPNP.new()
+	var public_ip := ""
+	if u.discover(2000, 2) == UPNP.UPNP_RESULT_SUCCESS and u.get_gateway() != null and u.get_gateway().is_valid_gateway():
+		if u.add_port_mapping(NET_PORT, NET_PORT, "Gettic's first TD", "UDP") == UPNP.UPNP_RESULT_SUCCESS:
+			public_ip = u.query_external_address()
+	_on_router_port_done.call_deferred(u, public_ip)
+
+
+func _on_router_port_done(u: UPNP, public_ip: String) -> void:
+	upnp_thread.wait_to_finish()
+	upnp_thread = null
+	var opened := public_ip.is_valid_ip_address() and not public_ip.contains(":")
+	if net_mode != "host":
+		if opened:
+			u.delete_port_mapping(NET_PORT, "UDP")
+		return
+	if opened:
+		upnp = u
+		invite_code = make_invite_code([public_ip])
+		net_status = ""
+	else:
+		net_status = "Your router didn't let players from the internet in. Friends far away can still join if you both use a VPN like Radmin VPN, with the short code."
+
+
+func close_router_port() -> void:
+	if upnp != null:
+		upnp.delete_port_mapping(NET_PORT, "UDP")
+		upnp = null
+
+
+func _exit_tree() -> void:
+	if upnp_thread != null:
+		upnp_thread.wait_to_finish()
+	close_router_port()
+	close_search()
+
+
+# Where to send a search for a short code: this computer, and every network
+# this computer is on (as broadcasts, which every computer on it receives).
+func search_targets() -> Array:
+	var targets := ["127.0.0.1", "255.255.255.255"]
+	for a: String in IP.get_local_addresses():
+		var p := a.split(".")
+		if p.size() != 4 or p[0] == "127" or a.begins_with("169.254."):
+			continue
+		# We don't know each network's size, so try the common ones
+		for b in ["%s.%s.%s.255" % [p[0], p[1], p[2]], "%s.%s.255.255" % [p[0], p[1]], "%s.255.255.255" % p[0]]:
+			if not targets.has(b):
+				targets.append(b)
+	return targets
+
+
+# The long invite code holds the host's internet address and port, written with
+# letters and digits that are hard to mix up.
+func make_invite_code(ips: Array) -> String:
+	var bytes := PackedByteArray([ips.size()])
+	for ip: String in ips:
+		for part in ip.split("."):
+			bytes.append(part.to_int())
+	bytes.append(NET_PORT >> 8)
+	bytes.append(NET_PORT & 255)
+	var code := ""
+	var buffer := 0
+	var bits := 0
+	for b in bytes:
+		buffer = (buffer << 8) | b
+		bits += 8
+		while bits >= 5:
+			bits -= 5
+			code += CODE_LETTERS[(buffer >> bits) & 31]
+		buffer &= (1 << bits) - 1
+	if bits > 0:
+		code += CODE_LETTERS[(buffer << (5 - bits)) & 31]
+	var groups := PackedStringArray()
+	for i in range(0, code.length(), 4):
+		groups.append(code.substr(i, 4))
+	return "-".join(groups)
+
+
+# Returns [addresses, port], or [] if the code isn't valid.
+func read_invite_code(code: String) -> Array:
+	code = code.to_upper().replace("O", "0").replace("I", "1").replace("L", "1")
+	var bytes := PackedByteArray()
+	var buffer := 0
+	var bits := 0
+	for ch in code:
+		var v := CODE_LETTERS.find(ch)
+		if v < 0:
+			continue  # dashes and spaces
+		buffer = (buffer << 5) | v
+		bits += 5
+		if bits >= 8:
+			bits -= 8
+			bytes.append((buffer >> bits) & 255)
+			buffer &= (1 << bits) - 1
+	if bytes.is_empty():
+		return []
+	var count := bytes[0]
+	if count < 1 or count > 2 or bytes.size() < 3 + count * 4:
+		return []
+	var ips := []
+	for i in count:
+		var o := 1 + i * 4
+		ips.append("%d.%d.%d.%d" % [bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]])
+	return [ips, (bytes[1 + count * 4] << 8) | bytes[2 + count * 4]]
+
+
+func join_game() -> void:
+	code_input.release_focus()
+	var letters := ""
+	for ch in code_input.text.to_upper().replace("O", "0").replace("I", "1").replace("L", "1"):
+		if CODE_LETTERS.contains(ch):
+			letters += ch
+	if letters.length() == 5:
+		start_search(letters)
+		return
+	var parsed := read_invite_code(code_input.text)
+	if parsed.is_empty():
+		net_status = "That invite code doesn't look right."
+		return
+	net_addresses = parsed[0]
+	net_port = parsed[1]
+	net_mode = "connecting"
+	try_next_address()
+
+
+# Short code: ask everyone on the local network which game has it.
+func start_search(code: String) -> void:
+	search_peer = PacketPeerUDP.new()
+	search_peer.set_broadcast_enabled(true)
+	if search_peer.bind(0) != OK:
+		search_peer = null
+		net_status = "Couldn't search the network."
+		return
+	search_code = code
+	search_time = 0.0
+	search_send_timer = 0.0
+	search_found.clear()
+	net_mode = "searching"
+	net_status = "Looking for game %s on your network..." % code
+
+
+func update_search(delta: float) -> void:
+	search_time += delta
+	search_send_timer -= delta
+	if search_send_timer <= 0.0:
+		search_send_timer = 0.5
+		for target in search_targets():
+			search_peer.set_dest_address(target, SEARCH_PORT)
+			search_peer.put_packet(("GTD?" + search_code).to_utf8_buffer())
+	while search_peer.get_available_packet_count() > 0:
+		var reply := search_peer.get_packet().get_string_from_utf8()
+		var ip := search_peer.get_packet_ip()
+		if reply.begins_with("GTD!%s:" % search_code) and not search_found.has(ip):
+			net_port = reply.get_slice(":", 1).to_int()
+			# The same computer is the surest way in, so try that first
+			if ip == "127.0.0.1":
+				search_found.push_front(ip)
+			else:
+				search_found.append(ip)
+	# Once someone answered, wait a moment for answers from other networks, then connect
+	if not search_found.is_empty() and search_send_timer < 0.2:
+		close_search()
+		net_addresses = search_found.duplicate()
+		net_mode = "connecting"
+		try_next_address()
+	elif search_time > 4.0:
+		close_search()
+		net_mode = ""
+		net_status = "Couldn't find game %s on your network. If your friend is far away, use their long code, or both use a VPN like Radmin VPN." % search_code
+
+
+func close_search() -> void:
+	if search_peer != null:
+		search_peer.close()
+		search_peer = null
+
+
+# Tries the host's addresses from the invite code one by one.
+func try_next_address() -> void:
+	close_connection()
+	if net_addresses.is_empty():
+		net_mode = ""
+		net_status = "Couldn't reach the host. Check the code, and that the host is still hosting. On the same Wi-Fi as the host? Use the 5-character code instead. Otherwise the host may need to allow the game through the Windows firewall."
+		return
+	var address: String = net_addresses.pop_front()
+	var peer := ENetMultiplayerPeer.new()
+	if peer.create_client(address, net_port) != OK:
+		try_next_address()
+		return
+	multiplayer.multiplayer_peer = peer
+	net_connect_time = 0.0
+	net_status = "Connecting to the host..."
+
+
+func close_connection() -> void:
+	if not (multiplayer.multiplayer_peer is OfflineMultiplayerPeer):
+		multiplayer.multiplayer_peer.close()
+	multiplayer.multiplayer_peer = OfflineMultiplayerPeer.new()
+
+
+func stop_hosting() -> void:
+	close_connection()
+	close_router_port()
+	close_search()
+	net_mode = ""
+	invite_code = ""
+	short_code = ""
+	net_status = ""
+	for slot in MAX_PLAYERS:
+		if slot != local_slot:
+			players[slot] = null
+			spawn_queues[slot].clear()
+
+
+# Back to playing alone, with a fresh game.
+func leave_game(text: String) -> void:
+	close_connection()
+	net_mode = ""
+	play_alone()
+	net_status = text
+	flash(text)
+
+
+func _on_connected_to_host() -> void:
+	net_join.rpc_id(1, version)
+
+
+func _on_connection_failed() -> void:
+	if net_mode == "connecting":
+		try_next_address()
+
+
+func _on_host_left() -> void:
+	if net_mode == "client":
+		leave_game("The host left the game.")
+	elif net_mode == "connecting":
+		try_next_address()
+
+
+func _on_peer_connected(_id: int) -> void:
+	pass  # the host waits for net_join, which says which version the player has
+
+
+func _on_peer_disconnected(id: int) -> void:
+	if net_mode != "host":
+		return
+	for slot in MAX_PLAYERS:
+		if players[slot] != null and players[slot].peer == id:
+			players[slot] = null
+			spawn_queues[slot].clear()
+			send_players()
+			var text := "%s left the game" % PLAYER_NAMES[slot]
+			flash(text)
+			send_all("net_message", [text])
+
+
+func send_players() -> void:
+	var list := []
+	for p in players:
+		if p != null:
+			list.append([p.peer, p.slot])
+	send_all("net_players", [list])
+
+
+func send_tower(t: Tower) -> void:
+	send_all("net_tower", [t.cell, t.type, t.level, t.owner, t.spent])
+
+
+func send_snapshot() -> void:
+	var ids := PackedInt32Array()
+	var kinds := PackedByteArray()
+	var data := PackedFloat32Array()
+	for e in enemies:
+		ids.append(e.id)
+		kinds.append(ENEMY_KINDS.find(e.kind))
+		data.append_array(PackedFloat32Array([e.pos.x, e.pos.y, e.hp, e.max_hp, e.slow_time]))
+	var golds := []
+	for p in players:
+		golds.append(p.gold if p != null else 0)
+	var info := [wave, next_wave_timer, state, game_speed, monsters_left_to_spawn(), golds]
+	send_all("net_snapshot", [info, ids, kinds, data])
+
+
+# ----- messages from a player to the host
+
+@rpc("any_peer", "call_remote", "reliable")
+func net_join(their_version: String) -> void:
+	if net_mode != "host":
+		return
+	var peer := multiplayer.get_remote_sender_id()
+	if their_version != version:
+		net_refused.rpc_id(peer, "The host has version %s and you have %s. You both need the same version." % [version, their_version])
+		return
+	var slot := players.find(null)
+	if slot < 0:
+		net_refused.rpc_id(peer, "That game is full (4 players).")
+		return
+	var p := Player.new()
+	p.peer = peer
+	p.slot = slot
+	# Joining late: some extra gold to catch up
+	p.gold = START_GOLD + wave * 20
+	players[slot] = p
+	net_welcome.rpc_id(peer, slot)
+	for t: Tower in towers.values():
+		net_tower.rpc_id(peer, t.cell, t.type, t.level, t.owner, t.spent)
+	send_players()
+	var text := "%s joined the game" % PLAYER_NAMES[slot]
+	flash(text)
+	send_all("net_message", [text])
+
+
+@rpc("any_peer", "call_remote", "reliable")
+func net_request(action: String, args: Array) -> void:
+	if net_mode != "host":
+		return
+	var peer := multiplayer.get_remote_sender_id()
+	for p in players:
+		if p != null and p.peer == peer:
+			var error := perform(p.slot, action, args)
+			if error != "":
+				net_message.rpc_id(peer, error)
+			return
+
+
+# ----- messages from the host to the players
+
+@rpc("authority", "call_remote", "reliable")
+func net_welcome(slot: int) -> void:
+	net_mode = "client"
+	clear_world()
+	players = [null, null, null, null]
+	local_slot = slot
+	var me := Player.new()
+	me.slot = slot
+	players[slot] = me
+	menu_open = false
+	code_input.release_focus()
+	net_status = ""
+	flash("You joined as %s!" % PLAYER_NAMES[slot])
+
+
+@rpc("authority", "call_remote", "reliable")
+func net_refused(reason: String) -> void:
+	close_connection()
+	net_mode = ""
+	net_status = reason
+
+
+@rpc("authority", "call_remote", "reliable")
+func net_players(list: Array) -> void:
+	if net_mode != "client":
+		return
+	var golds := []
+	for p in players:
+		golds.append(p.gold if p != null else 0)
+	players = [null, null, null, null]
+	for item in list:
+		var p := Player.new()
+		p.peer = item[0]
+		p.slot = item[1]
+		p.gold = golds[p.slot]
+		players[p.slot] = p
+
+
+@rpc("authority", "call_remote", "reliable")
+func net_message(text: String) -> void:
+	flash(text)
+
+
+@rpc("authority", "call_remote", "reliable")
+func net_reset() -> void:
+	clear_world()
+
+
+@rpc("authority", "call_remote", "reliable")
+func net_tower(cell: Vector2i, type: String, level: int, owner_slot: int, spent: int) -> void:
+	var t: Tower = towers.get(cell)
+	if t == null:
+		t = Tower.new()
+		t.cell = cell
+		t.pos = cell_center(cell)
+		towers[cell] = t
+	t.type = type
+	t.level = level
+	t.owner = owner_slot
+	t.spent = spent
+	build_tower_node(t)
+
+
+@rpc("authority", "call_remote", "reliable")
+func net_tower_removed(cell: Vector2i) -> void:
+	remove_tower(cell)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func net_shot(cell: Vector2i, target_id: int) -> void:
+	var t: Tower = towers.get(cell)
+	var target: Enemy = enemy_by_id.get(target_id)
+	if t == null or target == null:
+		return
+	t.aim = (target.pos - t.pos).normalized()
+	launch_shot(t, target, true)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func net_bolt(points: PackedVector3Array) -> void:
+	add_bolt(points)
+
+
+@rpc("authority", "call_remote", "unreliable_ordered")
+func net_boom(pos: Vector2, r: float) -> void:
+	add_boom(pos, r)
+
+
+# Where every monster is, plus the wave, timer and everyone's gold.
+@rpc("authority", "call_remote", "unreliable_ordered")
+func net_snapshot(info: Array, ids: PackedInt32Array, kinds: PackedByteArray, data: PackedFloat32Array) -> void:
+	if net_mode != "client":
+		return
+	wave = info[0]
+	next_wave_timer = info[1]
+	state = info[2]
+	game_speed = info[3]
+	net_spawn_left = info[4]
+	var golds: Array = info[5]
+	for slot in MAX_PLAYERS:
+		if players[slot] != null:
+			players[slot].gold = golds[slot]
+	var seen := {}
+	for i in ids.size():
+		var id := ids[i]
+		seen[id] = true
+		var p := Vector2(data[i * 5], data[i * 5 + 1])
+		var e: Enemy = enemy_by_id.get(id)
+		if e == null:
+			e = make_enemy(ENEMY_KINDS[kinds[i]])
+			e.id = id
+			e.pos = p
+			enemies.append(e)
+			enemy_by_id[id] = e
+		e.net_pos = p
+		e.hp = data[i * 5 + 2]
+		e.max_hp = data[i * 5 + 3]
+		e.slow_time = data[i * 5 + 4]
+	# Monsters the host no longer has were killed
+	for i in range(enemies.size() - 1, -1, -1):
+		var e := enemies[i]
+		if not seen.has(e.id):
+			e.dead = true
+			e.node.queue_free()
+			enemy_by_id.erase(e.id)
+			enemies.remove_at(i)
 
 
 # ---------------------------------------------------------------- 2D overlay
@@ -1186,8 +1986,8 @@ func draw_hud() -> void:
 	draw_panel()
 	if state != "playing":
 		draw_end_screen()
-	elif paused:
-		draw_pause_screen()
+	if menu_open:
+		draw_menu()
 	if update_dialog != "":
 		draw_update_dialog()
 
@@ -1258,9 +2058,9 @@ func draw_panel() -> void:
 	text(Vector2(PANEL_X + 250, 34), "v" + version, 13, Color(0.5, 0.5, 0.55))
 	# How close you are to losing: green when few monsters are alive, red near the limit
 	var alive := alive_count()
-	var danger := clampf(float(alive) / MAX_ALIVE, 0.0, 1.0)
+	var danger := clampf(float(alive) / max_alive(), 0.0, 1.0)
 	var danger_col := Color(0.4, 0.9, 0.4).lerp(Color(1, 0.3, 0.3), danger)
-	text(Vector2(PANEL_X, 66), "Alive: %d / %d" % [alive, MAX_ALIVE], 20, danger_col)
+	text(Vector2(PANEL_X, 66), "Alive: %d / %d" % [alive, max_alive()], 20, danger_col)
 	text(Vector2(PANEL_X + 170, 66), "Gold: %d" % gold, 20, Color(1, 0.85, 0.3))
 	hud.draw_rect(Rect2(PANEL_X, 74, 288, 6), Color(0.2, 0.2, 0.25))
 	hud.draw_rect(Rect2(PANEL_X, 74, 288 * danger, 6), danger_col)
@@ -1272,7 +2072,19 @@ func draw_panel() -> void:
 	else:
 		next_text = "Last wave! Kill them all"
 	text(Vector2(PANEL_X, 104), next_text, 16, Color(0.75, 0.75, 0.8))
-	text(Vector2(PANEL_X, 136), "Build (keys 1-4)", 14, Color(0.6, 0.6, 0.65))
+	if net_mode == "host" or net_mode == "client":
+		# A dot per player in their color; yours has a ring
+		var x := PANEL_X
+		for slot in MAX_PLAYERS:
+			if players[slot] == null:
+				continue
+			hud.draw_circle(Vector2(x + 6, 120), 6, PLAYER_COLORS[slot])
+			if slot == local_slot:
+				hud.draw_arc(Vector2(x + 6, 120), 9, 0, TAU, 20, Color.WHITE, 1.5)
+			x += 22
+		text(Vector2(x + 4, 125), "You: %s" % PLAYER_NAMES[local_slot], 14, PLAYER_COLORS[local_slot])
+	else:
+		text(Vector2(PANEL_X, 136), "Build (keys 1-4)", 14, Color(0.6, 0.6, 0.65))
 
 	for i in TOWER_TYPES.size():
 		var type: String = TOWER_TYPES[i]
@@ -1292,13 +2104,16 @@ func draw_panel() -> void:
 		var lv := selected.level
 		text(Vector2(PANEL_X, 418), "%s  -  Level %d" % [data["name"], lv + 1], 20, data["color"])
 		text(Vector2(PANEL_X, 444), "Damage %d   Range %d   Speed %.2fs" % [data["damage"][lv], data["range"][lv], data["cooldown"][lv]], 14)
-		if lv < 3:
+		if selected.owner != local_slot:
+			text(Vector2(PANEL_X, 466), "Built by %s" % PLAYER_NAMES[selected.owner], 14, PLAYER_COLORS[selected.owner])
+		elif lv < 3:
 			text(Vector2(PANEL_X, 466), "Next: Damage %d   Range %d" % [data["damage"][lv + 1], data["range"][lv + 1]], 14, Color(0.6, 0.9, 0.6))
 			var cost: int = data["cost"][lv + 1]
 			button(UPGRADE_RECT, "Upgrade %dg (U)" % cost, gold >= cost)
 		else:
 			button(UPGRADE_RECT, "Max level", false)
-		button(SELL_RECT, "Sell %dg (X)" % int(selected.spent * 0.7))
+		if selected.owner == local_slot:
+			button(SELL_RECT, "Sell %dg (X)" % int(selected.spent * 0.7))
 	else:
 		text(Vector2(PANEL_X, 430), "Click a tower to upgrade or sell it.", 14, Color(0.6, 0.6, 0.65))
 
@@ -1311,24 +2126,115 @@ func draw_panel() -> void:
 	var wave_label: String
 	if wave == 0:
 		wave_label = "Start (SPACE)"
-	elif wave < MAX_WAVE and not spawn_queue.is_empty():
-		wave_label = "Spawning... (%d left)" % spawn_queue.size()
+	elif wave < MAX_WAVE and monsters_left_to_spawn() > 0:
+		wave_label = "Spawning... (%d left)" % monsters_left_to_spawn()
 	elif wave < MAX_WAVE:
 		wave_label = "Send now +%dg (SPACE)" % int(maxf(next_wave_timer, 0.0))
 	else:
 		wave_label = "No more waves"
-	button(WAVE_RECT, wave_label, wave < MAX_WAVE and state == "playing" and spawn_queue.is_empty())
-	button(SPEED_RECT, "x%d (F)" % game_speed, true, game_speed > 1)
+	button(WAVE_RECT, wave_label, wave < MAX_WAVE and state == "playing" and monsters_left_to_spawn() == 0)
+	button(SPEED_RECT, "x%d (F)" % game_speed, net_mode != "client", game_speed > 1)
 	text(Vector2(PANEL_X, 676), "WASD: move camera   Scroll: zoom", 13, Color(0.55, 0.55, 0.6))
-	text(Vector2(PANEL_X, 696), "Right-click: cancel   Esc: pause", 13, Color(0.55, 0.55, 0.6))
+	text(Vector2(PANEL_X, 696), "Right-click: cancel   Esc: menu & multiplayer", 13, Color(0.55, 0.55, 0.6))
 
 
-func draw_pause_screen() -> void:
+func centered(y: float, s: String, size: int, col := Color.WHITE) -> void:
+	var w := font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	text(Vector2((PANEL_LEFT - w) / 2.0, y), s, size, col)
+
+
+# The Esc menu: pause, and host or join a multiplayer game.
+func draw_menu() -> void:
+	var m := MENU_RECT
+	var left := HOST_RECT.position.x
+	var width := HOST_RECT.size.x
 	hud.draw_rect(Rect2(0, 0, PANEL_LEFT, SCREEN_H), Color(0, 0, 0, 0.5))
-	var size := font.get_string_size("PAUSED", HORIZONTAL_ALIGNMENT_LEFT, -1, 64)
-	text(Vector2((PANEL_LEFT - size.x) / 2.0, 340), "PAUSED", 64)
-	size = font.get_string_size("Press Esc to continue", HORIZONTAL_ALIGNMENT_LEFT, -1, 20)
-	text(Vector2((PANEL_LEFT - size.x) / 2.0, 385), "Press Esc to continue", 20, Color(0.8, 0.8, 0.8))
+	hud.draw_rect(m, Color(0.11, 0.12, 0.16))
+	hud.draw_rect(m, Color(0.45, 0.48, 0.55), false, 2.0)
+	centered(m.position.y + 50, "PAUSED" if net_mode == "" else "MENU", 40)
+	var sub := "The game is paused." if net_mode == "" else "The game keeps running while this menu is open."
+	centered(m.position.y + 80, sub, 15, Color(0.7, 0.7, 0.75))
+	text(Vector2(left, 180), "MULTIPLAYER", 16, Color(1, 0.85, 0.3))
+	var grey := Color(0.75, 0.75, 0.8)
+	var gold_col := Color(1, 0.85, 0.3)
+	match net_mode:
+		"":
+			button(HOST_RECT, "Host a game and get an invite code", true, true)
+			text(Vector2(left, 280), "Or join a friend's game with their invite code:", 15, grey)
+			button(JOIN_BUTTON_RECT, "Join")
+			hud.draw_multiline_string(font, Vector2(left, 360), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 15, 4, Color(1, 0.75, 0.5))
+		"searching", "connecting":
+			button(HOST_RECT, "Cancel")
+			hud.draw_multiline_string(font, Vector2(left, 270), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 16, 3, grey)
+		"host":
+			if short_code != "":
+				text(Vector2(left, 218), "Invite code:", 15, grey)
+				text(Vector2(left, 262), short_code, 40, gold_col)
+				button(COPY_RECT, "Copy")
+				text(Vector2(left, 290), "For friends on the same Wi-Fi, or on a VPN like Radmin VPN.", 14, grey)
+			else:
+				text(Vector2(left, 240), "No short code: another game on this PC is already hosting.", 14, Color(1, 0.75, 0.5))
+			text(Vector2(left, 326), "Friends on other networks use the long code:", 14, grey)
+			if invite_code != "":
+				text(Vector2(left, 352), invite_code, 18, gold_col)
+				button(COPY_LONG_RECT, "Copy")
+				text(Vector2(left, 380), "It usually doesn't work from your own Wi-Fi: use the short code there.", 13, grey)
+			elif upnp_thread != null:
+				text(Vector2(left, 352), "Asking your router...", 16, grey)
+			hud.draw_multiline_string(font, Vector2(left, 380), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 13, 3, Color(1, 0.75, 0.5))
+			draw_player_list(Vector2(left, 450))
+			button(STOP_RECT, "Stop hosting")
+		"client":
+			text(Vector2(left, 218), "You are playing as %s." % PLAYER_NAMES[local_slot], 16, PLAYER_COLORS[local_slot])
+			draw_player_list(Vector2(left, 250))
+			button(STOP_RECT, "Leave the game")
+	button(RESUME_RECT, "Resume (Esc)")
+
+
+func draw_player_list(pos: Vector2) -> void:
+	text(pos, "Players (%d / %d):" % [player_count(), MAX_PLAYERS], 15, Color(0.75, 0.75, 0.8))
+	var y := pos.y + 24
+	for slot in MAX_PLAYERS:
+		if players[slot] == null:
+			continue
+		hud.draw_circle(Vector2(pos.x + 8, y - 5), 6, PLAYER_COLORS[slot])
+		var who: String = PLAYER_NAMES[slot]
+		if slot == local_slot:
+			who += " (you)"
+		elif players[slot].peer == 1:
+			who += " (host)"
+		text(Vector2(pos.x + 22, y), who, 15)
+		y += 20
+
+
+func menu_click(p: Vector2) -> void:
+	if RESUME_RECT.has_point(p):
+		toggle_menu()
+		return
+	match net_mode:
+		"":
+			if HOST_RECT.has_point(p):
+				host_game()
+			elif JOIN_BUTTON_RECT.has_point(p):
+				join_game()
+		"searching", "connecting":
+			if HOST_RECT.has_point(p):
+				close_search()
+				close_connection()
+				net_mode = ""
+				net_status = ""
+		"host":
+			if COPY_RECT.has_point(p) and short_code != "":
+				DisplayServer.clipboard_set(short_code)
+				flash("Invite code copied")
+			elif COPY_LONG_RECT.has_point(p) and invite_code != "":
+				DisplayServer.clipboard_set(invite_code)
+				flash("Long invite code copied")
+			elif STOP_RECT.has_point(p):
+				stop_hosting()
+		"client":
+			if STOP_RECT.has_point(p):
+				leave_game("You left the game.")
 
 
 func draw_end_screen() -> void:
