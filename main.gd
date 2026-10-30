@@ -74,6 +74,11 @@ const WAVE_RECT := Rect2(PANEL_X, 610, 200, 44)
 const SPEED_RECT := Rect2(PANEL_X + 208, 610, 80, 44)
 const UPDATE_RECT := Rect2(PANEL_X, 532, 288, 36)
 
+# Update popup layout (screen pixels)
+const DIALOG_RECT := Rect2(340, 140, 600, 440)
+const DIALOG_YES_RECT := Rect2(380, 506, 250, 44)
+const DIALOG_NO_RECT := Rect2(650, 506, 250, 44)
+
 # Checked at startup to see if a newer release is on GitHub
 const RELEASES_API := "https://api.github.com/repos/gettic/Gettics-first-TD/releases/latest"
 
@@ -146,7 +151,12 @@ var font: Font
 var time := 0.0
 var version := ""
 var update_version := ""  # set when GitHub has a newer release
-var update_url := ""
+var update_url := ""  # release page
+var update_zip_url := ""  # the Windows .zip in the release
+var update_notes := ""  # "What's new" from the release notes
+var update_dialog := ""  # "", "ask", "downloading" or "failed"
+var update_error := ""
+var update_http: HTTPRequest
 
 # 3D scene pieces
 var camera: Camera3D
@@ -188,6 +198,9 @@ func _ready() -> void:
 
 func check_for_update() -> void:
 	version = str(ProjectSettings.get_setting("application/config/version", "0"))
+	# Clean up the old game file left behind by the last update.
+	if OS.has_feature("template"):
+		DirAccess.remove_absolute(game_exe_path() + ".old")
 	var http := HTTPRequest.new()
 	http.timeout = 10.0
 	add_child(http)
@@ -208,6 +221,105 @@ func _on_update_checked(result: int, code: int, _headers: PackedStringArray, bod
 	if is_newer(tag, version):
 		update_version = tag
 		update_url = str(data.get("html_url", ""))
+		var notes = data.get("body")
+		update_notes = clean_notes(notes if notes is String else "")
+		var assets = data.get("assets")
+		if assets is Array:
+			for asset in assets:
+				if asset is Dictionary and str(asset.get("name", "")).ends_with("-windows.zip"):
+					update_zip_url = str(asset.get("browser_download_url", ""))
+
+
+# Keeps only the "What's new" part of the release notes and removes Markdown symbols.
+func clean_notes(body: String) -> String:
+	var cut := body.find("**How to play")
+	if cut >= 0:
+		body = body.substr(0, cut)
+	var lines := PackedStringArray()
+	for line in body.replace("\r", "").split("\n"):
+		line = line.replace("**", "").replace("`", "").strip_edges()
+		if line == "" or line.to_lower().begins_with("what's new"):
+			continue
+		if line.begins_with("- "):
+			line = "•  " + line.substr(2)
+		lines.append(line)
+	return "\n".join(lines)
+
+
+func game_exe_path() -> String:
+	return OS.get_executable_path()
+
+
+func start_update() -> void:
+	# Running from the Godot editor (or no .zip in the release): open the download page instead.
+	if not OS.has_feature("template") or update_zip_url == "":
+		OS.shell_open(update_url)
+		update_dialog = ""
+		return
+	download_update()
+
+
+func download_update() -> void:
+	update_dialog = "downloading"
+	var zip_path := OS.get_user_data_dir().path_join("update.zip")
+	update_http = HTTPRequest.new()
+	update_http.download_file = zip_path
+	add_child(update_http)
+	update_http.request_completed.connect(_on_update_downloaded.bind(zip_path))
+	if update_http.request(update_zip_url, ["User-Agent: GetticsFirstTD"]) != OK:
+		update_failed("Could not start the download.")
+
+
+func _on_update_downloaded(result: int, code: int, _headers: PackedStringArray, _body: PackedByteArray, zip_path: String) -> void:
+	update_http.queue_free()
+	update_http = null
+	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
+		update_failed("The download failed. Check your internet connection.")
+		return
+	var err := install_update(zip_path, game_exe_path())
+	DirAccess.remove_absolute(zip_path)
+	if err != "":
+		update_failed(err)
+		return
+	restart_game()
+
+
+# Puts the new game file in place of the old one. Returns an error message, or "" if it worked.
+# Windows won't let a running program be overwritten, but it can be renamed,
+# so the old file is renamed to .old and deleted the next time the game starts.
+func install_update(zip_path: String, exe: String) -> String:
+	var zip := ZIPReader.new()
+	if zip.open(zip_path) != OK:
+		return "The downloaded file is damaged."
+	var new_exe := PackedByteArray()
+	for file in zip.get_files():
+		if file.to_lower().ends_with(".exe"):
+			new_exe = zip.read_file(file)
+			break
+	zip.close()
+	if new_exe.is_empty():
+		return "The download doesn't contain the game."
+	var old := exe + ".old"
+	DirAccess.remove_absolute(old)
+	if DirAccess.rename_absolute(exe, old) != OK:
+		return "Could not replace the game file."
+	var f := FileAccess.open(exe, FileAccess.WRITE)
+	if f == null:
+		DirAccess.rename_absolute(old, exe)
+		return "Could not write the new game file."
+	f.store_buffer(new_exe)
+	f.close()
+	return ""
+
+
+func restart_game() -> void:
+	OS.create_process(game_exe_path(), [])
+	get_tree().quit()
+
+
+func update_failed(message: String) -> void:
+	update_dialog = "failed"
+	update_error = message
 
 
 # Compares versions like "v1.10" and "1.2" number by number.
@@ -591,7 +703,7 @@ func spawn_enemy(kind: String) -> void:
 # ---------------------------------------------------------------- update
 
 func _process(delta: float) -> void:
-	if paused:
+	if paused or update_dialog != "":
 		update_visuals(0.0)
 		hud.queue_redraw()
 		return
@@ -824,6 +936,9 @@ func update_effects(delta: float) -> void:
 # ---------------------------------------------------------------- input
 
 func _unhandled_input(event: InputEvent) -> void:
+	if update_dialog != "":
+		dialog_input(event)
+		return
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
 		toggle_pause()
 		return
@@ -868,7 +983,8 @@ func on_click(p: Vector2) -> void:
 		if SPEED_RECT.has_point(p):
 			toggle_speed()
 		if update_version != "" and UPDATE_RECT.has_point(p):
-			OS.shell_open(update_url)
+			update_dialog = "ask"
+			build_type = ""
 		return
 	var c := mouse_cell()
 	if towers.has(c):
@@ -878,6 +994,23 @@ func on_click(p: Vector2) -> void:
 		try_build(c)
 	else:
 		selected = null
+
+
+func dialog_input(event: InputEvent) -> void:
+	if update_dialog == "downloading":
+		return
+	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
+		update_dialog = ""
+	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		var p := get_viewport().get_mouse_position()
+		if DIALOG_YES_RECT.has_point(p):
+			if update_dialog == "ask":
+				start_update()
+			else:
+				OS.shell_open(update_url)
+				update_dialog = ""
+		elif DIALOG_NO_RECT.has_point(p):
+			update_dialog = ""
 
 
 func choose_build(type: String) -> void:
@@ -955,6 +1088,41 @@ func draw_hud() -> void:
 		draw_end_screen()
 	elif paused:
 		draw_pause_screen()
+	if update_dialog != "":
+		draw_update_dialog()
+
+
+func draw_update_dialog() -> void:
+	var d := DIALOG_RECT
+	var left := d.position.x + 30
+	hud.draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(0, 0, 0, 0.6))
+	hud.draw_rect(d, Color(0.12, 0.13, 0.17))
+	hud.draw_rect(d, Color(0.45, 0.48, 0.55), false, 2.0)
+	text(Vector2(left, d.position.y + 50), "New version %s is out!" % update_version, 28, Color(1, 0.85, 0.3))
+	text(Vector2(left, d.position.y + 76), "You have v%s" % version, 15, Color(0.6, 0.6, 0.65))
+	match update_dialog:
+		"ask":
+			text(Vector2(left, d.position.y + 116), "What's new", 18)
+			var notes := update_notes if update_notes != "" else "No details for this update."
+			hud.draw_multiline_string(font, Vector2(left, d.position.y + 146), notes, HORIZONTAL_ALIGNMENT_LEFT, d.size.x - 60, 16, 9, Color(0.85, 0.85, 0.9))
+			text(Vector2(left, DIALOG_YES_RECT.position.y - 20), "Do you want to update now?", 18)
+			button(DIALOG_YES_RECT, "Yes, update", true, true)
+			button(DIALOG_NO_RECT, "No, not now")
+		"downloading":
+			var done := 0.0
+			if update_http != null and update_http.get_body_size() > 0:
+				done = float(update_http.get_downloaded_bytes()) / update_http.get_body_size()
+			text(Vector2(left, d.position.y + 160), "Downloading update... %d%%" % int(done * 100), 20)
+			var bar := Rect2(left, d.position.y + 185, d.size.x - 60, 20)
+			hud.draw_rect(bar, Color(0.2, 0.2, 0.25))
+			hud.draw_rect(Rect2(bar.position, Vector2(bar.size.x * done, bar.size.y)), Color(0.3, 0.75, 0.4))
+			text(Vector2(left, d.position.y + 240), "The game will restart by itself when it's done.", 16, Color(0.7, 0.7, 0.75))
+		"failed":
+			text(Vector2(left, d.position.y + 150), "The update didn't work.", 20, Color(1, 0.45, 0.45))
+			hud.draw_multiline_string(font, Vector2(left, d.position.y + 185), update_error, HORIZONTAL_ALIGNMENT_LEFT, d.size.x - 60, 16, 4, Color(0.85, 0.85, 0.9))
+			text(Vector2(left, d.position.y + 260), "You can download it from GitHub instead.", 16, Color(0.7, 0.7, 0.75))
+			button(DIALOG_YES_RECT, "Open download page", true, true)
+			button(DIALOG_NO_RECT, "Close")
 
 
 func draw_health_bars() -> void:
@@ -1023,7 +1191,7 @@ func draw_panel() -> void:
 		text(Vector2(PANEL_X, 430), "Click a tower to upgrade or sell it.", 14, Color(0.6, 0.6, 0.65))
 
 	if update_version != "":
-		button(UPDATE_RECT, "New version %s - Download" % update_version, true, true)
+		button(UPDATE_RECT, "New version %s - Update" % update_version, true, true)
 
 	if message_time > 0.0:
 		text(Vector2(PANEL_X, 590), message, 16, Color(1, 1, 0.6, minf(message_time, 1.0)))
