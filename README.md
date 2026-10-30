@@ -10,7 +10,7 @@ The 3D world is built from simple shapes in code, so the game has no image, mode
 
 ## Download
 
-**Windows:** download the latest `.zip` from the [Releases page](https://github.com/gettic/Gettics-first-TD/releases/latest), unzip it, and run the game (for example `Gettic's first TD v1.6.exe`). No install needed.
+**Windows:** download the latest `.zip` from the [Releases page](https://github.com/gettic/Gettics-first-TD/releases/latest), unzip it, and run the game (for example `Gettic's first TD v1.8.exe`). No install needed.
 
 When the game starts, it checks GitHub for a newer version. If one is out, a **New version – Update** button appears in the side panel. Click it to see what's new and update with one click: the game downloads the new version and restarts by itself.
 
@@ -36,7 +36,7 @@ godot --path path/to/this/folder
 | **U** | Upgrade the selected tower |
 | **X** / **Delete** | Sell the selected tower (70% refund) |
 | **W A S D** | Move the camera |
-| **Space** | Start the game / send the next wave early (bonus gold) |
+| **Space** | Start the game / send the next wave early (bonus gold, once the current wave has fully spawned) |
 | **F** | Change game speed (1×, 2×, 3×) |
 | **Right-click** | Cancel |
 | **Esc** | Pause / continue |
@@ -57,7 +57,7 @@ Each tower has 4 levels.
 
 - **30 waves.** Monsters get tougher every wave.
 - Press **Space** to start. After that, a new wave comes every **25 seconds**, whether you're ready or not.
-- Press **Space** to send the next wave early and get **1 bonus gold for every second** you skip.
+- Press **Space** to send the next wave early and get **1 bonus gold for every second** you skip. You can only do this once every monster of the current wave has spawned.
 - Every **3rd** wave is **armored**: armor reduces the damage of each hit.
 - Every **5th** wave is **fast**.
 - Every **10th** wave is a **boss**. A boss counts as 5 monsters toward the limit.

@@ -695,6 +695,15 @@ func start_wave() -> void:
 		spawn_queue.append(kind)
 
 
+# The player calling a wave (Space or the button). Not allowed until every enemy
+# of the current wave has spawned.
+func call_wave() -> void:
+	if not spawn_queue.is_empty():
+		flash("Wait until the whole wave has spawned!")
+		return
+	start_wave()
+
+
 func spawn_enemy(kind: String) -> void:
 	var e := Enemy.new()
 	e.pos = path_points[0]
@@ -998,7 +1007,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_1, KEY_2, KEY_3, KEY_4:
 				choose_build(TOWER_TYPES[event.keycode - KEY_1])
 			KEY_SPACE:
-				start_wave()
+				call_wave()
 			KEY_U:
 				upgrade_selected()
 			KEY_X, KEY_DELETE:
@@ -1022,7 +1031,7 @@ func on_click(p: Vector2) -> void:
 		if selected != null and SELL_RECT.has_point(p):
 			sell_selected()
 		if WAVE_RECT.has_point(p):
-			start_wave()
+			call_wave()
 		if SPEED_RECT.has_point(p):
 			toggle_speed()
 		if update_version != "" and UPDATE_RECT.has_point(p):
@@ -1254,11 +1263,13 @@ func draw_panel() -> void:
 	var wave_label: String
 	if wave == 0:
 		wave_label = "Start (SPACE)"
+	elif wave < MAX_WAVE and not spawn_queue.is_empty():
+		wave_label = "Spawning... (%d left)" % spawn_queue.size()
 	elif wave < MAX_WAVE:
 		wave_label = "Send now +%dg (SPACE)" % int(maxf(next_wave_timer, 0.0))
 	else:
 		wave_label = "No more waves"
-	button(WAVE_RECT, wave_label, wave < MAX_WAVE and state == "playing")
+	button(WAVE_RECT, wave_label, wave < MAX_WAVE and state == "playing" and spawn_queue.is_empty())
 	button(SPEED_RECT, "x%d (F)" % game_speed, true, game_speed > 1)
 	text(Vector2(PANEL_X, 676), "WASD: move camera", 13, Color(0.55, 0.55, 0.6))
 	text(Vector2(PANEL_X, 696), "Right-click: cancel   Esc: pause", 13, Color(0.55, 0.55, 0.6))
