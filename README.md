@@ -4,7 +4,7 @@ A small 3D tower defense game made with [Godot 4](https://godotengine.org/), ins
 
 ![Screenshot of the game](screenshot.png)
 
-Enemies walk a spiral path toward a portal in the middle of the map. Build towers on the grass beside the path, upgrade them, and stop the enemies before they get through. Survive all 30 waves to win.
+Monsters come out of a portal in the middle of the map, walk out to a square path and walk around it clockwise, forever, until your towers kill them. Build towers on the grass, upgrade them, and don't let too many monsters pile up: if 50 are alive at the same time, you lose. Survive all 30 waves to win.
 
 The 3D world is built from simple shapes in code, so the game has no image, model or sound files.
 
@@ -36,7 +36,7 @@ godot --path path/to/this/folder
 | **U** | Upgrade the selected tower |
 | **X** / **Delete** | Sell the selected tower (70% refund) |
 | **W A S D** | Move the camera |
-| **Space** | Start the next wave |
+| **Space** | Start the game / send the next wave early (bonus gold) |
 | **F** | Change game speed (1×, 2×, 3×) |
 | **Right-click** | Cancel |
 | **Esc** | Pause / continue |
@@ -55,20 +55,22 @@ Each tower has 4 levels.
 
 ## Waves
 
-- **30 waves.** Enemies get tougher every wave.
+- **30 waves.** Monsters get tougher every wave.
+- Press **Space** to start. After that, a new wave comes every **25 seconds**, whether you're ready or not.
+- Press **Space** to send the next wave early and get **1 bonus gold for every second** you skip.
 - Every **3rd** wave is **armored**: armor reduces the damage of each hit.
 - Every **5th** wave is **fast**.
-- Every **10th** wave is a **boss**. A boss that reaches the portal costs 5 lives.
+- Every **10th** wave is a **boss**. A boss counts as 5 monsters toward the limit.
 
-You start with 150 gold and 20 lives. You earn gold for each kill and a bonus for each wave you clear.
+You start with 150 gold. You earn gold for each kill and a bonus at the start of each wave. The side panel shows how many monsters are alive: you lose if it reaches **50**. You win when all 30 waves are out and every monster is dead.
 
 ## Changing the game
 
 All the game code is in `main.gd`. Good places to start:
 
 - `TOWERS` at the top sets each tower's cost, damage, range and fire rate.
-- `START_GOLD`, `START_LIVES` and `MAX_WAVE` set the starting values and the number of waves.
-- `WAYPOINTS` sets the shape of the path.
+- `START_GOLD`, `MAX_ALIVE`, `WAVE_INTERVAL` and `MAX_WAVE` set the starting gold, the monster limit, the time between waves and the number of waves.
+- `SPAWN_PATH` and `LOOP` set the shape of the path: from the portal out to the square, and the square itself.
 - `start_wave()` controls how much health enemies get each wave.
 - `build_world()` sets up the 3D scene: camera angle, lighting and map colors.
 - `build_tower_node()` builds each tower's 3D model.

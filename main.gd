@@ -15,15 +15,13 @@ const CAMERA_SPEED := 12.0  # tiles per second
 const CAMERA_LIMIT := Vector2(9.0, 7.0)  # how far the camera can move from its start
 const MAX_WAVE := 30
 const START_GOLD := 150
-const START_LIVES := 20
+const MAX_ALIVE := 50  # you lose when this many monsters are alive at once (a boss counts as 5)
+const WAVE_INTERVAL := 25.0  # seconds between waves once the game has started
 
-# Corners of the path in grid coordinates. The first point is off-screen (spawn),
-# the last point is the portal.
-const WAYPOINTS := [
-	Vector2i(-1, 1), Vector2i(22, 1), Vector2i(22, 16), Vector2i(1, 16),
-	Vector2i(1, 4), Vector2i(19, 4), Vector2i(19, 13), Vector2i(4, 13),
-	Vector2i(4, 7), Vector2i(16, 7), Vector2i(16, 10), Vector2i(8, 10),
-]
+# The path in grid coordinates. Monsters come out of the portal in the middle,
+# walk out to the square, then walk around the square clockwise forever.
+const SPAWN_PATH := [Vector2i(12, 9), Vector2i(12, 15)]
+const LOOP := [Vector2i(12, 15), Vector2i(2, 15), Vector2i(2, 2), Vector2i(21, 2), Vector2i(21, 15)]
 
 # Tower stats per level (index 0 = level 1). "cost"[0] is the build price,
 # the rest are upgrade prices.
@@ -91,7 +89,7 @@ class Enemy:
 	var speed := 55.0
 	var armor := 0.0
 	var bounty := 1
-	var leak := 1
+	var weight := 1  # how much this monster counts toward MAX_ALIVE
 	var radius := 10.0
 	var color := Color.WHITE
 	var slow_factor := 1.0
@@ -128,15 +126,15 @@ class Shot:
 
 var path_cells := {}
 var path_points: Array[Vector2] = []
+var loop_start := 0  # index in path_points where the square loop starts
 var enemies: Array[Enemy] = []
 var towers := {}  # Vector2i -> Tower
 var shots: Array[Shot] = []
 var effects := []  # Dictionaries: bolts and explosions
 
 var gold := 0
-var lives := 0
+var next_wave_timer := 0.0
 var wave := 0
-var wave_running := false
 var spawn_queue: Array[String] = []
 var spawn_timer := 0.0
 var spawn_hp := 0.0
@@ -176,19 +174,22 @@ var shot_mats := {}
 
 func _ready() -> void:
 	font = ThemeDB.fallback_font
-	for i in range(WAYPOINTS.size() - 1):
-		var a: Vector2i = WAYPOINTS[i]
-		var b: Vector2i = WAYPOINTS[i + 1]
+	var corners: Array = SPAWN_PATH + LOOP.slice(1)
+	for w in corners:
+		path_points.append(cell_center(w))
+	loop_start = SPAWN_PATH.size() - 1
+	# Mark the path tiles, including the side that closes the square
+	corners.append(LOOP[0])
+	for i in range(corners.size() - 1):
+		var a: Vector2i = corners[i]
+		var b: Vector2i = corners[i + 1]
 		var step := Vector2i(signi(b.x - a.x), signi(b.y - a.y))
 		var c := a
 		while true:
-			if c.x >= 0:
-				path_cells[c] = true
+			path_cells[c] = true
 			if c == b:
 				break
 			c += step
-	for w in WAYPOINTS:
-		path_points.append(cell_center(w))
 	build_world()
 	new_game()
 	check_for_update()
@@ -381,15 +382,14 @@ func new_game() -> void:
 	effects.clear()
 	spawn_queue.clear()
 	gold = START_GOLD
-	lives = START_LIVES
 	wave = 0
-	wave_running = false
+	next_wave_timer = 0.0
 	build_type = ""
 	selected = null
 	game_speed = 1
 	state = "playing"
 	paused = false
-	flash("Build towers, then press SPACE")
+	flash("Build towers, then press SPACE to start")
 
 
 func cell_center(c: Vector2i) -> Vector2:
@@ -509,7 +509,7 @@ func build_world() -> void:
 
 	# Portal at the end of the path
 	portal = Node3D.new()
-	portal.position = to3d(path_points[path_points.size() - 1])
+	portal.position = to3d(path_points[0])
 	add_child(portal)
 	var ring := TorusMesh.new()
 	ring.inner_radius = 0.28
@@ -672,11 +672,20 @@ func kind_for_wave(w: int) -> String:
 	return "normal"
 
 
+# Starts the next wave. Called by the wave timer, or early by the player (Space),
+# which gives 1 bonus gold for every second skipped.
 func start_wave() -> void:
-	if wave_running or state != "playing":
+	if state != "playing" or wave >= MAX_WAVE:
 		return
+	var early_bonus := int(maxf(next_wave_timer, 0.0)) if wave > 0 else 0
 	wave += 1
-	wave_running = true
+	var income := 10 + wave * 2
+	gold += income + early_bonus
+	if early_bonus > 0:
+		flash("Wave %d! +%d gold (+%d for calling early)" % [wave, income, early_bonus])
+	else:
+		flash("Wave %d! +%d gold" % [wave, income])
+	next_wave_timer = WAVE_INTERVAL
 	spawn_hp = 25.0 * pow(1.17, wave - 1)
 	var kind := kind_for_wave(wave)
 	var count := 8 + wave
@@ -684,7 +693,6 @@ func start_wave() -> void:
 		count = 1 + int(wave / 10.0)
 	for i in count:
 		spawn_queue.append(kind)
-	spawn_timer = 0.0
 
 
 func spawn_enemy(kind: String) -> void:
@@ -709,7 +717,7 @@ func spawn_enemy(kind: String) -> void:
 			e.speed *= 0.7
 			e.radius = 18.0
 			e.bounty = 40 + wave * 4
-			e.leak = 5
+			e.weight = 5
 			e.color = Color(0.9, 0.15, 0.15)
 	e.hp = e.max_hp
 
@@ -742,22 +750,19 @@ func _process(delta: float) -> void:
 	update_effects(delta)
 	if state == "playing":
 		var dt := delta * game_speed
+		if wave > 0 and wave < MAX_WAVE:
+			next_wave_timer -= dt
+			if next_wave_timer <= 0.0:
+				start_wave()
 		update_spawning(dt)
 		update_enemies(dt)
 		update_towers(dt)
 		update_shots(dt)
 		remove_dead()
-		if lives <= 0:
-			lives = 0
+		if alive_count() >= MAX_ALIVE:
 			state = "lost"
-		elif wave_running and spawn_queue.is_empty() and enemies.is_empty():
-			wave_running = false
-			var bonus := 10 + wave * 2
-			gold += bonus
-			if wave >= MAX_WAVE:
-				state = "won"
-			else:
-				flash("Wave %d cleared! +%d gold" % [wave, bonus])
+		elif wave >= MAX_WAVE and spawn_queue.is_empty() and enemies.is_empty():
+			state = "won"
 	update_camera(delta)
 	update_visuals(delta)
 	hud.queue_redraw()
@@ -781,6 +786,13 @@ func update_camera(delta: float) -> void:
 	camera.position.z = clampf(camera.position.z + move.y, camera_home.z - CAMERA_LIMIT.y, camera_home.z + CAMERA_LIMIT.y)
 
 
+func alive_count() -> int:
+	var n := 0
+	for e in enemies:
+		n += e.weight
+	return n
+
+
 func update_spawning(dt: float) -> void:
 	if spawn_queue.is_empty():
 		return
@@ -801,7 +813,7 @@ func update_enemies(dt: float) -> void:
 			if e.slow_time <= 0.0:
 				e.slow_factor = 1.0
 		var move := e.speed * e.slow_factor * dt
-		while move > 0.0 and e.wp < path_points.size():
+		while move > 0.0:
 			var target := path_points[e.wp]
 			var d := e.pos.distance_to(target)
 			if d <= move:
@@ -809,13 +821,13 @@ func update_enemies(dt: float) -> void:
 				e.traveled += d
 				move -= d
 				e.wp += 1
+				# After the last corner, go around the square again
+				if e.wp >= path_points.size():
+					e.wp = loop_start
 			else:
 				e.pos += (target - e.pos) / d * move
 				e.traveled += move
 				move = 0.0
-		if e.wp >= path_points.size() and not e.dead:
-			e.dead = true
-			lives -= e.leak
 
 
 func update_towers(dt: float) -> void:
@@ -1187,10 +1199,22 @@ func draw_panel() -> void:
 	hud.draw_rect(Rect2(PANEL_LEFT, 0, SCREEN_W - PANEL_LEFT, SCREEN_H), Color(0.09, 0.09, 0.12))
 	text(Vector2(PANEL_X, 36), "WAVE %d / %d" % [wave, MAX_WAVE], 26)
 	text(Vector2(PANEL_X + 250, 34), "v" + version, 13, Color(0.5, 0.5, 0.55))
-	text(Vector2(PANEL_X, 70), "Lives: %d" % lives, 20, Color(1, 0.45, 0.45))
-	text(Vector2(PANEL_X + 150, 70), "Gold: %d" % gold, 20, Color(1, 0.85, 0.3))
-	if wave < MAX_WAVE:
-		text(Vector2(PANEL_X, 104), "Next wave: %s" % kind_for_wave(wave + 1).capitalize(), 16, Color(0.75, 0.75, 0.8))
+	# How close you are to losing: green when few monsters are alive, red near the limit
+	var alive := alive_count()
+	var danger := clampf(float(alive) / MAX_ALIVE, 0.0, 1.0)
+	var danger_col := Color(0.4, 0.9, 0.4).lerp(Color(1, 0.3, 0.3), danger)
+	text(Vector2(PANEL_X, 66), "Alive: %d / %d" % [alive, MAX_ALIVE], 20, danger_col)
+	text(Vector2(PANEL_X + 170, 66), "Gold: %d" % gold, 20, Color(1, 0.85, 0.3))
+	hud.draw_rect(Rect2(PANEL_X, 74, 288, 6), Color(0.2, 0.2, 0.25))
+	hud.draw_rect(Rect2(PANEL_X, 74, 288 * danger, 6), danger_col)
+	var next_text: String
+	if wave == 0:
+		next_text = "First wave: %s" % kind_for_wave(1).capitalize()
+	elif wave < MAX_WAVE:
+		next_text = "Next wave: %s in %ds" % [kind_for_wave(wave + 1).capitalize(), ceili(next_wave_timer)]
+	else:
+		next_text = "Last wave! Kill them all"
+	text(Vector2(PANEL_X, 104), next_text, 16, Color(0.75, 0.75, 0.8))
 	text(Vector2(PANEL_X, 136), "Build (keys 1-4)", 14, Color(0.6, 0.6, 0.65))
 
 	for i in TOWER_TYPES.size():
@@ -1227,8 +1251,14 @@ func draw_panel() -> void:
 	if message_time > 0.0:
 		text(Vector2(PANEL_X, 590), message, 16, Color(1, 1, 0.6, minf(message_time, 1.0)))
 
-	var wave_label := "Wave running..." if wave_running else "Next wave (SPACE)"
-	button(WAVE_RECT, wave_label, not wave_running and state == "playing")
+	var wave_label: String
+	if wave == 0:
+		wave_label = "Start (SPACE)"
+	elif wave < MAX_WAVE:
+		wave_label = "Send now +%dg (SPACE)" % int(maxf(next_wave_timer, 0.0))
+	else:
+		wave_label = "No more waves"
+	button(WAVE_RECT, wave_label, wave < MAX_WAVE and state == "playing")
 	button(SPEED_RECT, "x%d (F)" % game_speed, true, game_speed > 1)
 	text(Vector2(PANEL_X, 676), "WASD: move camera", 13, Color(0.55, 0.55, 0.6))
 	text(Vector2(PANEL_X, 696), "Right-click: cancel   Esc: pause", 13, Color(0.55, 0.55, 0.6))
@@ -1245,7 +1275,7 @@ func draw_pause_screen() -> void:
 func draw_end_screen() -> void:
 	hud.draw_rect(Rect2(0, 0, PANEL_LEFT, SCREEN_H), Color(0, 0, 0, 0.6))
 	var title := "VICTORY!" if state == "won" else "GAME OVER"
-	var sub := "You survived all %d waves." % MAX_WAVE if state == "won" else "You reached wave %d." % wave
+	var sub := "You survived all %d waves." % MAX_WAVE if state == "won" else "Too many monsters! You reached wave %d." % wave
 	var size := font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 64)
 	text(Vector2((PANEL_LEFT - size.x) / 2.0, 320), title, 64, Color(1, 0.85, 0.3) if state == "won" else Color(1, 0.35, 0.35))
 	size = font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 22)
