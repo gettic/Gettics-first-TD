@@ -157,6 +157,10 @@ class RelayPeer extends MultiplayerPeerExtension:
 
 var relay: RelayPeer  # the connection when it goes through the game server
 
+# Most monsters per snapshot message on the local network: 120 x 9 bytes plus
+# the rest stays well under the 1392 bytes ENet sends in one piece.
+const SNAPSHOT_MONSTERS := 120
+
 
 # The game rules are in main.gd, which replaces these. They are here so this
 # file can call them.
@@ -510,19 +514,45 @@ func send_tower(t: Tower) -> void:
 	send_all("net_tower", [t.cell, t.type, t.level, t.owner, t.spent])
 
 
+# Where every monster is, 9 bytes each (see net_snapshot). On the local network
+# the monsters are split over several messages, so each one fits in a single
+# network packet (ENet sends at most 1392 bytes at once; bigger messages get
+# cut up and are lost when any piece is). Each message says which monster ids
+# it covers, so the players can tell which monsters are gone even when one of
+# the messages doesn't arrive. The game server has no such limit: one message.
 func send_snapshot() -> void:
-	var ids := PackedInt32Array()
-	var kinds := PackedByteArray()
-	var data := PackedFloat32Array()
-	for e in enemies:
-		ids.append(e.id)
-		kinds.append(ENEMY_KINDS.find(e.kind))
-		data.append_array(PackedFloat32Array([e.pos.x, e.pos.y, e.hp, e.max_hp, e.slow_time]))
 	var golds := []
 	for p in players:
 		golds.append(p.gold if p != null else 0)
 	var info := [wave, next_wave_timer, state, game_speed, monsters_left_to_spawn(), golds, wave_votes]
-	send_all("net_snapshot", [info, ids, kinds, data])
+	var most := SNAPSHOT_MONSTERS if relay == null else 1 << 20
+	var start := 0
+	while true:
+		# enemies is in id order (new monsters get the next id and go last)
+		var base: int = enemies[start].id if start < enemies.size() else 0
+		var end := start
+		while end < enemies.size() and end - start < most and enemies[end].id - base < 65536:
+			end += 1
+		var data := PackedByteArray()
+		data.resize(8 + (end - start) * 9)
+		data.encode_u32(0, base)
+		# Covers the ids up to the next message's first monster (0: all the rest)
+		data.encode_u32(4, enemies[end].id if end < enemies.size() else 0)
+		var at := 8
+		for i in range(start, end):
+			var e := enemies[i]
+			data.encode_u16(at, e.id - base)
+			# Positions in 1/32 pixels, health as a share of full health
+			data.encode_u16(at + 2, clampi(roundi(e.pos.x * 32.0), 0, 65535))
+			data.encode_u16(at + 4, clampi(roundi(e.pos.y * 32.0), 0, 65535))
+			data.encode_u16(at + 6, clampi(roundi(e.hp / e.max_hp * 65535.0), 0, 65535))
+			data[at + 8] = ENEMY_KINDS.find(e.kind) | (128 if e.slow_time > 0.0 else 0)
+			at += 9
+		# The wave, timer and gold only go with the first message
+		send_all("net_snapshot", [info if start == 0 else [], data])
+		start = end
+		if start >= enemies.size():
+			break
 
 
 # ----- messages from a player to the host
@@ -668,41 +698,51 @@ func net_boom(pos: Vector2, r: float) -> void:
 	add_boom(pos, r)
 
 
-# Where every monster is, plus the wave, timer and everyone's gold.
+# Where the monsters are (some or all of them, see send_snapshot). The first
+# message of each update also has the wave, timer and everyone's gold.
+# data: the first monster's id (u32), the id after the last one this message
+# covers (u32, 0: no end), then per monster 9 bytes: id minus the first id
+# (u16), x and y in 1/32 pixels (u16 each), health share of 65535 (u16), and
+# its kind with 128 added when it's slowed (u8).
 @rpc("authority", "call_remote", "unreliable_ordered")
-func net_snapshot(info: Array, ids: PackedInt32Array, kinds: PackedByteArray, data: PackedFloat32Array) -> void:
-	if net_mode != "client":
+func net_snapshot(info: Array, data: PackedByteArray) -> void:
+	if net_mode != "client" or data.size() < 8:
 		return
-	wave = info[0]
-	next_wave_timer = info[1]
-	state = info[2]
-	game_speed = info[3]
-	net_spawn_left = info[4]
-	wave_votes = info[6]
-	var golds: Array = info[5]
-	for slot in MAX_PLAYERS:
-		if players[slot] != null:
-			players[slot].gold = golds[slot]
+	if not info.is_empty():
+		wave = info[0]
+		next_wave_timer = info[1]
+		state = info[2]
+		game_speed = info[3]
+		net_spawn_left = info[4]
+		wave_votes = info[6]
+		var golds: Array = info[5]
+		for slot in MAX_PLAYERS:
+			if players[slot] != null:
+				players[slot].gold = golds[slot]
+	var base := data.decode_u32(0)
+	var end := data.decode_u32(4)
+	# The first message also covers every id before its first monster
+	var from := 0 if not info.is_empty() else base
 	var seen := {}
-	for i in ids.size():
-		var id := ids[i]
+	for at in range(8, data.size(), 9):
+		var id := base + data.decode_u16(at)
 		seen[id] = true
-		var p := Vector2(data[i * 5], data[i * 5 + 1])
+		var p := Vector2(data.decode_u16(at + 2), data.decode_u16(at + 4)) / 32.0
 		var e: Enemy = enemy_by_id.get(id)
 		if e == null:
-			e = make_enemy(ENEMY_KINDS[kinds[i]])
+			e = make_enemy(ENEMY_KINDS[data[at + 8] & 127])
 			e.id = id
 			e.pos = p
 			enemies.append(e)
 			enemy_by_id[id] = e
 		e.net_pos = p
-		e.hp = data[i * 5 + 2]
-		e.max_hp = data[i * 5 + 3]
-		e.slow_time = data[i * 5 + 4]
-	# Monsters the host no longer has were killed
+		e.max_hp = 1.0
+		e.hp = data.decode_u16(at + 6) / 65535.0
+		e.slow_time = 1.0 if data[at + 8] & 128 else 0.0
+	# Monsters in this message's id range that the host no longer has were killed
 	for i in range(enemies.size() - 1, -1, -1):
 		var e := enemies[i]
-		if not seen.has(e.id):
+		if e.id >= from and (end == 0 or e.id < end) and not seen.has(e.id):
 			e.dead = true
 			e.node.queue_free()
 			enemy_by_id.erase(e.id)

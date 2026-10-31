@@ -1,5 +1,5 @@
 extends "res://game_net.gd"
-## The 2D overlay: side panel, health bars, lightning, menus and popups.
+## The 2D overlay: bottom console, health bars, lightning, menus and popups.
 
 # Dark stone with gold edges
 const UI_GOLD := Color(0.86, 0.68, 0.32)
@@ -10,24 +10,34 @@ const UI_GREY := Color(0.72, 0.69, 0.63)
 const UI_DIM := Color(0.55, 0.52, 0.47)
 
 var title_font: Font  # big titles; the normal font unless a style says otherwise
-var map_hud: Node2D  # 2D layer under the panel: health bars, lightning, area labels
+var map_hud: Node2D  # 2D layer under the console: health bars, lightning, area labels
+var portrait_view: SubViewport  # a close-up of the selected tower, shown in the console
+var portrait_cam: Camera3D
 
 # ---------------------------------------------------------------- 2D overlay
 
 # Made right after the 3D world (see _ready).
 func build_hud() -> void:
 	title_font = make_title_font()
-	# 2D layer for the panel, health bars and lightning
+	# 2D layer for the console, health bars and lightning
 	var layer := CanvasLayer.new()
 	add_child(layer)
-	# Three layers: health bars and lightning at the bottom, then the panel's stone,
+	# Three layers: health bars and lightning at the bottom, then the console's stone,
 	# drawn only once since it never changes, then everything else on top
 	map_hud = Node2D.new()
 	layer.add_child(map_hud)
 	map_hud.draw.connect(draw_on.bind(map_hud, draw_map_overlays))
 	var stone := Node2D.new()
 	layer.add_child(stone)
-	stone.draw.connect(draw_on.bind(stone, ui_panel.bind(Rect2(PANEL_LEFT, 0, SCREEN_W - PANEL_LEFT, SCREEN_H))))
+	stone.draw.connect(draw_on.bind(stone, ui_console))
+	# The portrait: a second small camera in the same world, only drawn while a tower is selected
+	portrait_view = SubViewport.new()
+	portrait_view.size = Vector2i(PORTRAIT_RECT.size)
+	portrait_view.render_target_update_mode = SubViewport.UPDATE_DISABLED
+	add_child(portrait_view)
+	portrait_cam = Camera3D.new()
+	portrait_cam.fov = 30.0
+	portrait_view.add_child(portrait_cam)
 	hud = Node2D.new()
 	layer.add_child(hud)
 	hud.draw.connect(draw_hud)
@@ -68,11 +78,17 @@ func draw_on(node: Node2D, draw_func: Callable) -> void:
 func update_visuals(delta: float) -> void:
 	super(delta)
 	map_hud.queue_redraw()
+	if selected == null:
+		portrait_view.render_target_update_mode = SubViewport.UPDATE_DISABLED
+		return
+	portrait_view.render_target_update_mode = SubViewport.UPDATE_ALWAYS
+	# From the front and a little above, like the main camera but close
+	var p := selected.node.position
+	portrait_cam.position = p + Vector3(0, 2.2, 3.4)
+	portrait_cam.look_at(p + Vector3(0, 0.75, 0))
 
 
 func draw_hud() -> void:
-	if not asks.is_empty() and state == "playing":
-		draw_ask()
 	draw_panel()
 	if state != "playing":
 		draw_end_screen()
@@ -82,7 +98,7 @@ func draw_hud() -> void:
 		draw_update_dialog()
 
 
-# Health bars, lightning and area labels: under the side panel.
+# Health bars, lightning and area labels: under the console.
 func draw_map_overlays() -> void:
 	draw_health_bars()
 	for fx in effects:
@@ -113,7 +129,7 @@ func draw_area_labels() -> void:
 func outlined(center: Vector2, s: String, size: int, col: Color) -> void:
 	var w := font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
 	var pos := center - Vector2(w / 2.0, 0)
-	hud.draw_string_outline(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, 5, Color(0, 0, 0, 0.8))
+	hud.draw_string_outline(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, 5, Color(0, 0, 0, 0.8 * col.a))
 	hud.draw_string(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
 
 
@@ -130,6 +146,7 @@ func draw_ask() -> void:
 	if asks.size() > 1:
 		line += "  (+%d more)" % (asks.size() - 1)
 	text(r.position + Vector2(20, 32), line, 17, PLAYER_COLORS[from])
+	text(r.position + Vector2(20, 68), "The spot is marked with a ring on the map.", 14, UI_GREY)
 	button(ASK_YES_RECT, "Yes (Y)", true, true)
 	button(ASK_NO_RECT, "No (N)")
 	# Point at the spot with a pulsing ring
@@ -245,102 +262,388 @@ func gem(c: Vector2, radius: float, col: Color) -> void:
 
 
 func draw_panel() -> void:
-	# The panel's stone background is on its own layer (see build_hud)
-	ui_title(Rect2(PANEL_LEFT, 0, SCREEN_W - PANEL_LEFT, 46), Vector2(PANEL_X, 36), "WAVE %d / %d" % [wave, MAX_WAVE], 26)
-	text(Vector2(PANEL_X + 250, 34), "v" + version, 13, ui_title_dim())
-	if is_debug_game():
-		text(Vector2(PANEL_X + 196, 34), "DEBUG", 13, Color(1.0, 0.45, 0.4))
-	# How close you are to losing: green when few monsters are alive, red near the limit
-	var alive := alive_count()
-	var danger := clampf(float(alive) / max_alive(), 0.0, 1.0)
-	var danger_col := Color(0.4, 0.9, 0.4).lerp(Color(1, 0.3, 0.3), danger)
-	text(Vector2(PANEL_X, 66), "Alive: %d / %d" % [alive, max_alive()], 20, danger_col)
-	text(Vector2(PANEL_X + 170, 66), "Gold: %d" % gold, 20, Color(1, 0.85, 0.3))
-	ui_bar(Rect2(PANEL_X, 74, 288, 6), danger, danger_col)
-	var next_text: String
-	if wave == 0:
-		next_text = "First wave: %s" % kind_for_wave(1).capitalize()
-	elif wave < MAX_WAVE:
-		next_text = "Next wave: %s in %ds" % [kind_for_wave(wave + 1).capitalize(), ceili(next_wave_timer)]
+	# The console's stone is on its own layer (see build_hud)
+	draw_top_bar()
+	draw_minimap()
+	draw_wave_info()
+	# Another player's build request takes the middle until it's answered
+	if not asks.is_empty() and state == "playing":
+		draw_ask()
+	elif selected != null:
+		draw_selected()
 	else:
-		next_text = "Last wave! Kill them all"
-	text(Vector2(PANEL_X, 104), next_text, 16, UI_GREY)
+		draw_build_list()
+	draw_command_card()
+	var tip := hovered_card()
+	if tip >= 0:
+		draw_card_tip(tip)
+	if message_time > 0.0:
+		outlined(Vector2(SCREEN_W / 2.0, MESSAGE_Y), message, 18, Color(1, 1, 0.6, minf(message_time, 1.0)))
+
+
+# How close you are to losing: 0 with no monsters alive, 1 at the limit.
+func danger() -> float:
+	return clampf(float(alive_count()) / max_alive(), 0.0, 1.0)
+
+
+# Green when few monsters are alive, red near the limit.
+func danger_color() -> Color:
+	return Color(0.4, 0.9, 0.4).lerp(Color(1, 0.3, 0.3), danger())
+
+
+func next_wave_text() -> String:
+	if wave == 0:
+		return "First wave: %s" % kind_for_wave(1).capitalize()
+	if wave < MAX_WAVE:
+		return "Next wave: %s in %ds" % [kind_for_wave(wave + 1).capitalize(), ceili(next_wave_timer)]
+	return "Last wave! Kill them all"
+
+
+# Hints on the left, the update button in the middle, resources on the right.
+func draw_top_bar() -> void:
+	text(Vector2(14, 20), "WASD: move camera    Scroll: zoom    Right-click: cancel    Esc: menu & multiplayer", 13, UI_DIM)
+	if update_version != "":
+		button(UPDATE_RECT, "New version %s - Update" % update_version, true, true)
+	var x := SCREEN_W - 14.0
+	x = resource(x, "v" + version, 13, ui_title_dim(), "")
+	if is_debug_game():
+		x = resource(x, "DEBUG", 13, Color(1.0, 0.45, 0.4), "")
+	x = resource(x, "%d / %d" % [wave, MAX_WAVE], 18, UI_TEXT, "wave")
+	x = resource(x, "%d / %d" % [alive_count(), max_alive()], 18, danger_color(), "alive")
+	resource(x, str(gold), 18, Color(1, 0.85, 0.3), "gold")
+
+
+# A number with its icon in front, ending at x. Returns where the next one ends.
+func resource(x: float, s: String, size: int, col: Color, icon: String) -> float:
+	var w := font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	var y := TOP_BAR_H / 2.0
+	hud.draw_string(font, Vector2(x - w, y + size * 0.35 + 1), s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(0, 0, 0, 0.7))
+	text(Vector2(x - w, y + size * 0.35), s, size, col)
+	x -= w
+	if icon == "":
+		return x - 22
+	var c := Vector2(x - 14, y)
+	match icon:
+		"gold":
+			icon_coin(c, 8.0)
+		"alive":
+			icon_monster(c, 8.0)
+		"wave":
+			icon_flag(c, 9.0)
+	return x - 46
+
+
+# Towers, monsters, gates in use and the camera's view on the small map
+# (the ground and the path are on the stone layer).
+func draw_minimap() -> void:
+	var m := MINIMAP_RECT
+	var k := m.size.x / COLS  # pixels per tile
+	for g in GATES.size():
+		if players[g] != null:
+			hud.draw_rect(Rect2(m.position + Vector2(GATES[g]) * k, Vector2(k, k)).grow(1), PLAYER_COLORS[g])
+	for t: Tower in towers.values():
+		var r := Rect2(m.position + Vector2(t.cell) * k, Vector2(k, k)).grow(-1)
+		hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.8))
+		hud.draw_rect(r, TOWERS[t.type]["color"])
+	var monster := Color(1, 0.22, 0.15)
+	for e in enemies:
+		var p := m.position + e.pos / CELL * k
+		var h := maxf(1.5, e.radius / CELL * k * 0.8)
+		hud.draw_rect(Rect2(p - Vector2(h, h), Vector2(h, h) * 2), monster)
+	if selected != null:
+		hud.draw_rect(Rect2(m.position + Vector2(selected.cell) * k, Vector2(k, k)).grow(2), UI_GOLD_LIGHT, false, 1.5)
+	# What the camera sees, cut to the small map
+	var view := PackedVector2Array()
+	for s: Vector2 in [Vector2(0, TOP_BAR_H), Vector2(SCREEN_W, TOP_BAR_H), Vector2(SCREEN_W, BAR_TOP), Vector2(0, BAR_TOP)]:
+		view.append(m.position + screen_to_ground(s) * k)
+	var edge := PackedVector2Array([m.position, Vector2(m.end.x, m.position.y), m.end, Vector2(m.position.x, m.end.y)])
+	for poly: PackedVector2Array in Geometry2D.intersect_polygons(view, edge):
+		poly.append(poly[0])
+		hud.draw_polyline(poly, Color(1, 1, 1, 0.8), 1.0)
+
+
+# The spot on the ground under a screen point, in tiles.
+func screen_to_ground(p: Vector2) -> Vector2:
+	var from := camera.project_ray_origin(p)
+	var dir := camera.project_ray_normal(p)
+	dir.y = minf(dir.y, -0.02)  # above the horizon: just far away
+	var hit := from + dir * (-from.y / dir.y)
+	return Vector2(hit.x, hit.z)
+
+
+# Wave number, how close you are to losing, when the next wave comes, and the players.
+func draw_wave_info() -> void:
+	var x := float(INFO_X)
+	ui_title(Rect2(x - 14, BAR_TOP + 10, 236, 36), Vector2(x, BAR_TOP + 40), "WAVE %d / %d" % [wave, MAX_WAVE], 24)
+	text(Vector2(x, BAR_TOP + 70), next_wave_text(), 15, UI_GREY)
+	text(Vector2(x, BAR_TOP + 98), "Alive: %d / %d" % [alive_count(), max_alive()], 17, danger_color())
+	ui_bar(Rect2(x, BAR_TOP + 108, 204, 6), danger(), danger_color())
 	if net_mode == "host" or net_mode == "client":
 		# A dot per player in their color; yours has a ring
-		var x := PANEL_X
+		var px := x
 		for slot in MAX_PLAYERS:
 			if players[slot] == null:
 				continue
-			hud.draw_circle(Vector2(x + 6, 120), 6, PLAYER_COLORS[slot])
+			hud.draw_circle(Vector2(px + 6, BAR_TOP + 140), 6, PLAYER_COLORS[slot])
 			if slot == local_slot:
-				hud.draw_arc(Vector2(x + 6, 120), 9, 0, TAU, 20, UI_GOLD_LIGHT, 1.5)
-			x += 22
-		text(Vector2(x + 4, 125), "You: %s" % PLAYER_NAMES[local_slot], 14, PLAYER_COLORS[local_slot])
+				hud.draw_arc(Vector2(px + 6, BAR_TOP + 140), 9, 0, TAU, 20, UI_GOLD_LIGHT, 1.5)
+			px += 22
+		text(Vector2(px + 4, BAR_TOP + 145), "You: %s" % PLAYER_NAMES[local_slot], 14, PLAYER_COLORS[local_slot])
 	else:
-		text(Vector2(PANEL_X, 136), "Build (keys 1-4)", 14, UI_DIM)
+		text(Vector2(x, BAR_TOP + 145), "Build: keys 1-4   Upgrade: U   Sell: X", 13, UI_DIM)
 
+
+# The selected tower: its picture, level and stats.
+func draw_selected() -> void:
+	var data: Dictionary = TOWERS[selected.type]
+	var lv := selected.level
+	hud.draw_texture_rect(portrait_view.get_texture(), PORTRAIT_RECT, false)
+	inner_shadow(PORTRAIT_RECT, 6, 0.4)
+	var x := float(STATS_X)
+	text(Vector2(x, BAR_TOP + 42), "%s Tower" % data["name"], 22, data["color"])
+	# A gold diamond per level, filled up to this one
+	for i in 4:
+		var c := Vector2(x + 7 + i * 17, BAR_TOP + 59)
+		diamond(c, 6.0, UI_GOLD_DARK)
+		diamond(c, 4.5, data["color"] if i <= lv else Color(0.08, 0.08, 0.08))
+	text(Vector2(x + 78, BAR_TOP + 64), "Level %d" % (lv + 1), 15, UI_TEXT)
+	var mine := selected.owner == local_slot
+	var next := lv < 3 and mine
+	stat_row(Vector2(x, BAR_TOP + 96), "Damage", str(data["damage"][lv]), str(data["damage"][lv + 1]) if next else "")
+	stat_row(Vector2(x, BAR_TOP + 118), "Range", "%d" % data["range"][lv], "%d" % data["range"][lv + 1] if next else "")
+	stat_row(Vector2(x, BAR_TOP + 140), "Speed", "%.2fs" % data["cooldown"][lv], "")
+	var right := x + 196
+	hud.draw_multiline_string(font, Vector2(right, BAR_TOP + 96), data["desc"], HORIZONTAL_ALIGNMENT_LEFT, 130, 14, 2, UI_GREY)
+	if not mine:
+		text(Vector2(right, BAR_TOP + 140), "Built by %s" % PLAYER_NAMES[selected.owner], 14, PLAYER_COLORS[selected.owner])
+	elif lv == 3:
+		text(Vector2(right, BAR_TOP + 140), "Max level", 14, UI_GOLD_LIGHT)
+
+
+# "Damage  120  > 250": the value now and, in green, after the next upgrade.
+func stat_row(pos: Vector2, label: String, now: String, after: String) -> void:
+	text(pos, label, 14, UI_DIM)
+	text(pos + Vector2(64, 0), now, 16, UI_TEXT)
+	if after != "":
+		text(pos + Vector2(110, 0), "> " + after, 15, Color(0.6, 0.9, 0.6))
+
+
+# Nothing selected: the four towers with their price and what they do.
+func draw_build_list() -> void:
+	var p := PORTRAIT_RECT.get_center()
+	if build_type != "":
+		gem(p, 26.0, TOWERS[build_type]["color"])
+	else:
+		crest(p, UI_GOLD_DARK)
+	var x := float(STATS_X)
+	ui_heading(Vector2(x, BAR_TOP + 36), "BUILD A TOWER", 324)
 	for i in TOWER_TYPES.size():
 		var type: String = TOWER_TYPES[i]
 		var data: Dictionary = TOWERS[type]
+		var y := BAR_TOP + 62 + i * 24
+		var affordable: bool = gold >= data["cost"][0]
+		if build_type == type:
+			hud.draw_rect(Rect2(x - 6, y - 17, 330, 22), Color(1, 0.85, 0.3, 0.15))
+		gem(Vector2(x + 6, y - 6), 5.0, data["color"])
+		text(Vector2(x + 18, y), data["name"], 16, UI_TEXT if affordable else UI_DIM)
+		text(Vector2(x + 82, y), "%dg" % data["cost"][0], 15, Color(1, 0.85, 0.3) if affordable else Color(0.6, 0.4, 0.3))
+		text(Vector2(x + 130, y), data["desc"], 14, UI_GREY)
+	var hint := "Click the map to build. Right-click: cancel" if build_type != "" else "Click a tower to upgrade or sell it."
+	text(Vector2(x, BAR_TOP + 160), hint, 13, UI_DIM)
+
+
+# ---- Command card: square buttons with hotkeys
+
+func card_rects() -> Array:
+	var out := []
+	for i in TOWER_TYPES.size():
+		out.append(tower_button_rect(i))
+	out.append_array([UPGRADE_RECT, SELL_RECT, WAVE_RECT, SPEED_RECT])
+	return out
+
+
+# The command button under the mouse, or -1.
+func hovered_card() -> int:
+	if menu_open or update_dialog != "":
+		return -1
+	var p := get_viewport().get_mouse_position()
+	var rects := card_rects()
+	for i in rects.size():
+		if rects[i].has_point(p):
+			return i
+	return -1
+
+
+func draw_command_card() -> void:
+	for i in TOWER_TYPES.size():
+		var data: Dictionary = TOWERS[TOWER_TYPES[i]]
 		var r := tower_button_rect(i)
 		var affordable: bool = gold >= data["cost"][0]
-		ui_button_bg(r, true, build_type == type)
-		gem(r.position + Vector2(28, 28), 12.0, data["color"])
-		var name_col := UI_TEXT if affordable else UI_DIM
-		text(r.position + Vector2(52, 24), "%d. %s" % [i + 1, data["name"]], 18, name_col)
-		text(r.position + Vector2(220, 24), "%dg" % data["cost"][0], 18, Color(1, 0.85, 0.3) if affordable else Color(0.6, 0.4, 0.3))
-		text(r.position + Vector2(52, 46), data["desc"], 14, UI_GREY)
+		card_button(r, str(i + 1), data["name"], "%dg" % data["cost"][0], true, build_type == TOWER_TYPES[i], affordable)
+		gem(r.get_center() + Vector2(0, -2), 11.0, data["color"] if affordable else data["color"].darkened(0.4))
+	# Upgrade and Sell only work on your own selected tower
+	var mine := selected != null and selected.owner == local_slot
+	var up_label := "Upgrade"
+	var up_cost := ""
+	var can_up := false
+	if mine and selected.level < 3:
+		var cost: int = TOWERS[selected.type]["cost"][selected.level + 1]
+		up_cost = "%dg" % cost
+		can_up = gold >= cost
+	elif mine:
+		up_label = "Max"
+	card_button(UPGRADE_RECT, "U", up_label, up_cost, can_up, false, can_up)
+	icon_upgrade(UPGRADE_RECT.get_center() + Vector2(0, -2), UI_GOLD_LIGHT if can_up else UI_DIM)
+	card_button(SELL_RECT, "X", "Sell", "+%dg" % int(selected.spent * 0.7) if mine else "", mine, false, true)
+	icon_coin(SELL_RECT.get_center() + Vector2(0, -2), 10.0, mine)
+	var w := wave_button()
+	var can_wave := wave < MAX_WAVE and state == "playing" and monsters_left_to_spawn() == 0
+	card_button(WAVE_RECT, "Space", w[0], w[1], can_wave, local_slot in wave_votes, true)
+	icon_flag(WAVE_RECT.get_center() + Vector2(0, -2), 12.0, can_wave)
+	card_button(SPEED_RECT, "F", "x%d" % game_speed, "", net_mode != "client", game_speed > 1, true)
+	icon_speed(SPEED_RECT.get_center() + Vector2(0, -2), UI_GOLD_LIGHT if net_mode != "client" else UI_DIM)
 
-	if selected != null:
-		var data: Dictionary = TOWERS[selected.type]
-		var lv := selected.level
-		text(Vector2(PANEL_X, 428), "%s  -  Level %d" % [data["name"], lv + 1], 20, data["color"])
-		text(Vector2(PANEL_X, 450), "Damage %d   Range %d   Speed %.2fs" % [data["damage"][lv], data["range"][lv], data["cooldown"][lv]], 14, UI_TEXT)
-		if selected.owner != local_slot:
-			text(Vector2(PANEL_X, 470), "Built by %s" % PLAYER_NAMES[selected.owner], 14, PLAYER_COLORS[selected.owner])
-		elif lv < 3:
-			text(Vector2(PANEL_X, 470), "Next: Damage %d   Range %d" % [data["damage"][lv + 1], data["range"][lv + 1]], 14, Color(0.6, 0.9, 0.6))
-			var cost: int = data["cost"][lv + 1]
-			button(UPGRADE_RECT, "Upgrade %dg (U)" % cost, gold >= cost)
-		else:
-			button(UPGRADE_RECT, "Max level", false)
-		if selected.owner == local_slot:
-			button(SELL_RECT, "Sell %dg (X)" % int(selected.spent * 0.7))
-	else:
-		text(Vector2(PANEL_X, 440), "Click a tower to upgrade or sell it.", 14, UI_DIM)
 
-	if update_version != "":
-		button(UPDATE_RECT, "New version %s - Update" % update_version, true, true)
-
-	if message_time > 0.0:
-		text(Vector2(PANEL_X, 592), message, 16, Color(1, 1, 0.6, minf(message_time, 1.0)))
-
-	var wave_label: String
+# Short label and corner text for the wave button: [label, corner].
+func wave_button() -> Array:
 	if wave == 0:
-		wave_label = "Start (SPACE)"
-	elif wave < MAX_WAVE and monsters_left_to_spawn() > 0:
-		wave_label = "Spawning... (%d left)" % monsters_left_to_spawn()
-	elif wave < MAX_WAVE and player_count() > 1:
-		# A vote: the button shows how many agree and how many are needed
-		var votes := "%d/%d" % [wave_votes.size(), votes_needed()]
+		return ["Start", ""]
+	if wave < MAX_WAVE and monsters_left_to_spawn() > 0:
+		return ["%d left" % monsters_left_to_spawn(), ""]
+	var bonus := "+%dg" % int(maxf(next_wave_timer, 0.0))
+	var votes := "%d/%d" % [wave_votes.size(), votes_needed()]
+	if wave < MAX_WAVE and player_count() > 1:
+		return ["Voted " + votes, ""] if local_slot in wave_votes else ["Vote " + votes, bonus]
+	if wave < MAX_WAVE:
+		return ["Send", bonus]
+	return ["Done", ""]
+
+
+# The full wave button text, as the side panel used to show it.
+func wave_tip() -> String:
+	if wave == 0:
+		return "Start the first wave (SPACE)"
+	if wave < MAX_WAVE and monsters_left_to_spawn() > 0:
+		return "Spawning... (%d left)" % monsters_left_to_spawn()
+	var votes := "%d/%d" % [wave_votes.size(), votes_needed()]
+	if wave < MAX_WAVE and player_count() > 1:
 		if local_slot in wave_votes:
-			wave_label = "Voted %s (SPACE: undo)" % votes
+			return "Voted %s (SPACE: undo)" % votes
+		return "Vote to send it now: +%dg each, %s (SPACE)" % [int(maxf(next_wave_timer, 0.0)), votes]
+	if wave < MAX_WAVE:
+		return "Send the next wave now: +%dg (SPACE)" % int(maxf(next_wave_timer, 0.0))
+	return "No more waves"
+
+
+func card_button(r: Rect2, key: String, label: String, corner: String, enabled: bool, active: bool, affordable: bool) -> void:
+	ui_button_bg(r, enabled, active)
+	# Hotkey in the top-left corner, price or bonus in the top-right
+	text(r.position + Vector2(5, 13), key, 11, UI_GOLD_LIGHT if enabled else UI_DIM)
+	if corner != "":
+		var cw := font.get_string_size(corner, HORIZONTAL_ALIGNMENT_LEFT, -1, 11).x
+		text(Vector2(r.end.x - cw - 5, r.position.y + 13), corner, 11, Color(1, 0.85, 0.3) if affordable else Color(0.7, 0.42, 0.3))
+	var col := UI_TEXT if enabled and affordable else UI_DIM
+	if active and enabled:
+		col = UI_GOLD_LIGHT
+	var lw := font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
+	var pos := Vector2(r.get_center().x - lw / 2.0, r.end.y - 6)
+	hud.draw_string(font, pos + Vector2(0, 1), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0, 0, 0, 0.8))
+	text(pos, label, 13, col)
+
+
+# A box above the command card that explains the button under the mouse.
+func draw_card_tip(i: int) -> void:
+	var title := ""
+	var lines: Array = []
+	if i < TOWER_TYPES.size():
+		var data: Dictionary = TOWERS[TOWER_TYPES[i]]
+		title = "Build %s Tower (%d)  -  %dg" % [data["name"], i + 1, data["cost"][0]]
+		lines = [data["desc"], "Damage %d   Range %d   Speed %.2fs" % [data["damage"][0], data["range"][0], data["cooldown"][0]]]
+	elif i == 4:
+		title = "Upgrade (U)"
+		if selected == null or selected.owner != local_slot:
+			lines = ["Select one of your towers first."]
+		elif selected.level < 3:
+			var data: Dictionary = TOWERS[selected.type]
+			title = "Upgrade to level %d (U)  -  %dg" % [selected.level + 2, data["cost"][selected.level + 1]]
+			lines = ["Damage %d   Range %d" % [data["damage"][selected.level + 1], data["range"][selected.level + 1]]]
 		else:
-			wave_label = "Vote +%dg %s (SPACE)" % [int(maxf(next_wave_timer, 0.0)), votes]
-	elif wave < MAX_WAVE:
-		wave_label = "Send now +%dg (SPACE)" % int(maxf(next_wave_timer, 0.0))
+			lines = ["This tower is at its highest level."]
+	elif i == 5:
+		title = "Sell (X)"
+		lines = ["Get back %dg for this tower." % int(selected.spent * 0.7)] if selected != null and selected.owner == local_slot else ["Select one of your towers first."]
+	elif i == 6:
+		title = "Next wave (SPACE)"
+		lines = [wave_tip(), next_wave_text()]
 	else:
-		wave_label = "No more waves"
-	button(WAVE_RECT, wave_label, wave < MAX_WAVE and state == "playing" and monsters_left_to_spawn() == 0)
-	button(SPEED_RECT, "x%d (F)" % game_speed, net_mode != "client", game_speed > 1)
-	ui_divider(PANEL_X, PANEL_X + 288, 664)
-	text(Vector2(PANEL_X, 682), "WASD: move camera   Scroll: zoom", 13, UI_DIM)
-	text(Vector2(PANEL_X, 700), "Right-click: cancel   Esc: menu & multiplayer", 13, UI_DIM)
+		title = "Game speed x%d (F)" % game_speed
+		lines = ["Only the host can change the speed."] if net_mode == "client" else ["Switches between normal and double speed."]
+	var r := Rect2(SCREEN_W - 372, BAR_TOP - 24 - 34 - lines.size() * 20, 360, 34 + lines.size() * 20 + 10)
+	hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.9), false, 1.0)
+	hud.draw_rect(r, Color(0.05, 0.05, 0.055, 0.92))
+	hud.draw_rect(r, UI_GOLD_DARK, false, 1.0)
+	text(r.position + Vector2(12, 24), title, 16, Color(1, 0.85, 0.3))
+	for j in lines.size():
+		text(r.position + Vector2(12, 48 + j * 20), lines[j], 14, UI_TEXT)
+
+
+# ---- Small icons drawn with shapes
+
+func diamond(c: Vector2, s: float, col: Color) -> void:
+	quad(PackedVector2Array([c + Vector2(0, -s), c + Vector2(s, 0), c + Vector2(0, s), c + Vector2(-s, 0)]), col)
+
+
+func icon_coin(c: Vector2, radius: float, lit := true) -> void:
+	var a := 1.0 if lit else 0.4
+	hud.draw_circle(c, radius + 1.0, Color(0.25, 0.15, 0.03, a))
+	hud.draw_circle(c, radius, Color(0.95, 0.72, 0.2, a))
+	hud.draw_circle(c, radius * 0.7, Color(0.75, 0.52, 0.1, a))
+	hud.draw_circle(c, radius * 0.55, Color(1.0, 0.82, 0.3, a))
+	hud.draw_circle(c - Vector2(radius * 0.35, radius * 0.4), radius * 0.22, Color(1, 1, 0.9, 0.7 * a))
+
+
+func icon_monster(c: Vector2, radius: float) -> void:
+	hud.draw_circle(c, radius + 1.0, Color(0, 0, 0, 0.7))
+	hud.draw_circle(c, radius, Color(0.62, 0.14, 0.1))
+	hud.draw_circle(c + Vector2(0, -1), radius - 2.0, Color(0.85, 0.24, 0.16))
+	hud.draw_circle(c + Vector2(-3, -1), 1.8, Color(1, 0.95, 0.6))
+	hud.draw_circle(c + Vector2(3, -1), 1.8, Color(1, 0.95, 0.6))
+
+
+# A banner on a pole.
+func icon_flag(c: Vector2, s: float, lit := true) -> void:
+	var pole := Color(0.85, 0.7, 0.4) if lit else UI_DIM
+	var cloth := Color(0.85, 0.2, 0.15) if lit else Color(0.35, 0.18, 0.16)
+	hud.draw_line(c + Vector2(-s * 0.6, s), c + Vector2(-s * 0.6, -s), pole, 2.0)
+	quad(PackedVector2Array([c + Vector2(-s * 0.5, -s), c + Vector2(s * 0.8, -s * 0.75), c + Vector2(s * 0.3, -s * 0.3), c + Vector2(-s * 0.5, -s * 0.05)]), cloth)
+	quad(PackedVector2Array([c + Vector2(s * 0.8, -s * 0.75), c + Vector2(s * 0.8, -s * 0.75), c + Vector2(s * 0.75, -s * 0.05), c + Vector2(s * 0.3, -s * 0.3)]), cloth.darkened(0.3))
+
+
+# Two chevrons pointing up.
+func icon_upgrade(c: Vector2, col: Color) -> void:
+	for k in 2:
+		var y := c.y + 4 - k * 8
+		hud.draw_polyline(PackedVector2Array([Vector2(c.x - 9, y + 5), Vector2(c.x, y - 4), Vector2(c.x + 9, y + 5)]), col, 3.0)
+
+
+# Two triangles pointing right.
+func icon_speed(c: Vector2, col: Color) -> void:
+	for k in 2:
+		var x := c.x - 9 + k * 9
+		quad(PackedVector2Array([Vector2(x, c.y - 7), Vector2(x + 9, c.y), Vector2(x + 9, c.y), Vector2(x, c.y + 7)]), col)
+
+
+# An empty shield, shown in the portrait frame when nothing is selected.
+func crest(c: Vector2, col: Color) -> void:
+	var pts := PackedVector2Array([c + Vector2(-24, -28), c + Vector2(24, -28), c + Vector2(24, 4), c + Vector2(0, 30), c + Vector2(-24, 4)])
+	pts.append(pts[0])
+	hud.draw_polyline(pts, col, 3.0)
+	diamond(c + Vector2(0, -2), 9.0, col)
 
 
 func centered(y: float, s: String, size: int, col := Color.WHITE) -> void:
 	var w := font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
-	text(Vector2((PANEL_LEFT - w) / 2.0, y), s, size, col)
+	text(Vector2((SCREEN_W - w) / 2.0, y), s, size, col)
 
 
 # The Esc menu: pause, and host or join a multiplayer game.
@@ -348,11 +651,11 @@ func draw_menu() -> void:
 	var m := MENU_RECT
 	var left := HOST_RECT.position.x
 	var width := HOST_RECT.size.x
-	hud.draw_rect(Rect2(0, 0, PANEL_LEFT, SCREEN_H), Color(0, 0, 0, 0.5))
+	hud.draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(0, 0, 0, 0.5))
 	ui_box(m)
 	var title := "PAUSED" if net_mode == "" else "MENU"
 	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 40).x
-	ui_title(Rect2(m.position.x, m.position.y, m.size.x, 66), Vector2((PANEL_LEFT - tw) / 2.0, m.position.y + 50), title, 40)
+	ui_title(Rect2(m.position.x, m.position.y, m.size.x, 66), Vector2((SCREEN_W - tw) / 2.0, m.position.y + 50), title, 40)
 	var sub := "The game is paused." if net_mode == "" else "The game keeps running while this menu is open."
 	centered(m.position.y + 88, sub, 15, UI_GREY)
 	button(GRAPHICS_RECT, "Graphics: %s" % ("High" if graphics_high else "Low"), true, graphics_high)
@@ -513,14 +816,79 @@ func ui_title_dim() -> Color:
 	return UI_DIM
 
 
-func ui_panel(r: Rect2) -> void:
+# Everything about the console that never changes: drawn once, on its own layer.
+func ui_console() -> void:
+	# Resource bar along the top, with a gold strip under it
+	var top := Rect2(0, 0, SCREEN_W, TOP_BAR_H)
+	stone_blocks(top, UI_STONE, 30, 96)
+	vgrad(top, Color(1, 1, 1, 0.03), Color(0, 0, 0, 0.3))
+	hud.draw_rect(Rect2(0, TOP_BAR_H + 4, SCREEN_W, 2), Color(0, 0, 0, 0.5))
+	bevel(Rect2(-6, TOP_BAR_H, SCREEN_W + 12, 5), 2, UI_GOLD_LIGHT, UI_GOLD_DARK)
+	# A raised arch over the portrait, poking up into the map
+	var arch := Vector2(PORTRAIT_RECT.get_center().x, BAR_TOP + ARCH_DROP)
+	hud.draw_circle(arch, ARCH_R + 4, Color(0, 0, 0, 0.5))
+	hud.draw_circle(arch, ARCH_R + 2, UI_GOLD_DARK)
+	hud.draw_circle(arch, ARCH_R, UI_GOLD)
+	hud.draw_circle(arch, ARCH_R - 3, UI_GOLD_DARK)
+	hud.draw_circle(arch, ARCH_R - 5, UI_STONE)
+	# The console
+	var r := Rect2(0, BAR_TOP, SCREEN_W, SCREEN_H - BAR_TOP)
 	stone_blocks(r, UI_STONE, 36, 96)
-	# Darker toward the bottom
-	vgrad(r, Color(0, 0, 0, 0.0), Color(0, 0, 0, 0.35))
-	inner_shadow(Rect2(r.position.x + 6, r.position.y, r.size.x - 6, r.size.y), 10, 0.35)
-	# Beveled gold strip between the map and the panel
-	hud.draw_rect(Rect2(r.position.x - 1, r.position.y, 1, r.size.y), Color(0, 0, 0, 0.8))
-	bevel(Rect2(r.position.x, r.position.y - 6, 6, r.size.y + 12), 3, UI_GOLD_LIGHT, UI_GOLD_DARK)
+	vgrad(r, Color(1, 1, 1, 0.03), Color(0, 0, 0, 0.35))
+	# Gold strip along the top edge, stopping at the arch
+	var hw := sqrt(ARCH_R * ARCH_R - (ARCH_DROP + 6.0) * (ARCH_DROP + 6.0))
+	hud.draw_rect(Rect2(0, BAR_TOP - 8, arch.x - hw, 2), Color(0, 0, 0, 0.5))
+	hud.draw_rect(Rect2(arch.x + hw, BAR_TOP - 8, SCREEN_W, 2), Color(0, 0, 0, 0.5))
+	bevel(Rect2(-6, BAR_TOP - 6, arch.x - hw + 8, 6), 3, UI_GOLD_LIGHT, UI_GOLD_DARK)
+	bevel(Rect2(arch.x + hw - 2, BAR_TOP - 6, SCREEN_W, 6), 3, UI_GOLD_LIGHT, UI_GOLD_DARK)
+	stud(Vector2(arch.x - hw - 2, BAR_TOP - 3), 5.0)
+	stud(Vector2(arch.x + hw + 2, BAR_TOP - 3), 5.0)
+	# Sections, split by gold lines with studs
+	recess(MINIMAP_RECT.grow(4))
+	draw_minimap_ground()
+	vdivider(INFO_X - 12, BAR_TOP + 12, SCREEN_H - 10)
+	vdivider(PORTRAIT_RECT.position.x - 18, BAR_TOP + 12, SCREEN_H - 10)
+	vdivider(CARD_X - 24, BAR_TOP + 12, SCREEN_H - 10)
+	recess(Rect2(CARD_X - 8, CARD_Y - 8, CARD_SIZE * 4 + CARD_GAP * 3 + 16, CARD_SIZE * 2 + CARD_GAP + 16))
+	# The portrait's gold frame with a stud on each corner
+	recess(PORTRAIT_RECT)
+	hud.draw_rect(PORTRAIT_RECT.grow(7), Color(0, 0, 0, 0.8), false, 1.0)
+	bevel(PORTRAIT_RECT.grow(6), 6, UI_GOLD_LIGHT, UI_GOLD_DARK)
+	for c in [PORTRAIT_RECT.position, Vector2(PORTRAIT_RECT.end.x, PORTRAIT_RECT.position.y), PORTRAIT_RECT.end, Vector2(PORTRAIT_RECT.position.x, PORTRAIT_RECT.end.y)]:
+		stud(c, 6.0)
+
+
+# The small map's grass and path.
+func draw_minimap_ground() -> void:
+	var m := MINIMAP_RECT
+	var k := m.size.x / COLS
+	hud.draw_rect(m, Color(0.13, 0.27, 0.1))
+	for c: Vector2i in path_cells:
+		hud.draw_rect(Rect2(m.position + Vector2(c) * k, Vector2(k, k)), Color(0.4, 0.28, 0.16))
+
+
+# A dark sunken area, with light on its lower edges.
+func recess(r: Rect2) -> void:
+	hud.draw_rect(r, Color(0.05, 0.05, 0.055))
+	inner_shadow(r, 6, 0.5)
+	bevel(r.grow(2), 2, Color(0.08, 0.06, 0.03), UI_GOLD)
+
+
+# A thin upright gold line that fades out at both ends, with a stud on top.
+func vdivider(x: float, y0: float, y1: float) -> void:
+	var mid := (y0 + y1) / 2.0
+	var clear := Color(UI_GOLD, 0.0)
+	hud.draw_polyline_colors(PackedVector2Array([Vector2(x, y0), Vector2(x, mid), Vector2(x, y1)]), PackedColorArray([UI_GOLD, UI_GOLD, clear]), 1.0)
+	hud.draw_polyline_colors(PackedVector2Array([Vector2(x + 1, y0), Vector2(x + 1, mid), Vector2(x + 1, y1)]), PackedColorArray([Color(0, 0, 0, 0.6), Color(0, 0, 0, 0.6), Color(0, 0, 0, 0)]), 1.0)
+	stud(Vector2(x, y0), 4.0)
+
+
+# A round gold rivet.
+func stud(c: Vector2, radius: float) -> void:
+	hud.draw_circle(c, radius + 1.0, Color(0, 0, 0, 0.7))
+	hud.draw_circle(c, radius, UI_GOLD_DARK)
+	hud.draw_circle(c - Vector2(0.5, 0.5), radius - 1.2, UI_GOLD)
+	hud.draw_circle(c - Vector2(radius * 0.3, radius * 0.3), radius * 0.35, UI_GOLD_LIGHT)
 
 
 func ui_box(r: Rect2) -> void:
@@ -621,14 +989,14 @@ func menu_click(p: Vector2) -> void:
 
 
 func draw_end_screen() -> void:
-	hud.draw_rect(Rect2(0, 0, PANEL_LEFT, SCREEN_H), Color(0, 0, 0, 0.6))
+	hud.draw_rect(Rect2(0, TOP_BAR_H, SCREEN_W, BAR_TOP - TOP_BAR_H), Color(0, 0, 0, 0.6))
 	var title := "VICTORY!" if state == "won" else "GAME OVER"
 	var sub := "You survived all %d waves." % MAX_WAVE if state == "won" else "Too many monsters! You reached wave %d." % wave
 	var size := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 64)
-	var pos := Vector2((PANEL_LEFT - size.x) / 2.0, 320)
+	var pos := Vector2((SCREEN_W - size.x) / 2.0, END_Y)
 	hud.draw_string_outline(title_font, pos, title, HORIZONTAL_ALIGNMENT_LEFT, -1, 64, 6, Color(0, 0, 0, 0.8))
 	hud.draw_string(title_font, pos, title, HORIZONTAL_ALIGNMENT_LEFT, -1, 64, Color(1, 0.85, 0.3) if state == "won" else Color(1, 0.35, 0.35))
 	size = font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 22)
-	text(Vector2((PANEL_LEFT - size.x) / 2.0, 370), sub, 22, UI_TEXT)
+	text(Vector2((SCREEN_W - size.x) / 2.0, END_Y + 50), sub, 22, UI_TEXT)
 	size = font.get_string_size("Press R to play again", HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
-	text(Vector2((PANEL_LEFT - size.x) / 2.0, 410), "Press R to play again", 18, UI_GREY)
+	text(Vector2((SCREEN_W - size.x) / 2.0, END_Y + 90), "Press R to play again", 18, UI_GREY)

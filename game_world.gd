@@ -29,6 +29,8 @@ var graphics_high := true  # Low/High in the Esc menu: only switches effects
 var compat := false  # running on the Compatibility renderer (older PCs), which needs darker light
 var env: Environment
 var sun: DirectionalLight3D
+var ground_mats: Array[ShaderMaterial] = []  # grass and path
+var grid_fade := 0.0  # grid lines on the grass, shown while placing a tower
 
 
 func build_world() -> void:
@@ -87,41 +89,54 @@ func build_world() -> void:
 
 	camera = Camera3D.new()
 	camera.fov = 40.0
-	camera.position = Vector3(COLS / 2.0, 27.0, ROWS / 2.0 + 14.0)
+	camera.position = Vector3(COLS / 2.0, 26.5, ROWS / 2.0 + 19.4)
 	add_child(camera)
 	camera_focus = Vector3(COLS / 2.0, 0.0, ROWS / 2.0 + 0.3)
 	camera.look_at(camera_focus)
 	camera.h_offset = CAMERA_H_OFFSET
+	camera.v_offset = CAMERA_V_OFFSET
 	camera_home = camera.position
 
 	# Ground: grass tiles, with the path sunk a little lower.
 	# Tiles are slightly bigger than one unit so they overlap and no gaps show between them.
-	# The two grass colors sit at very slightly different heights so the overlaps don't flicker.
+	# All grass tiles share one height: the textures follow the world position,
+	# so where tiles overlap they draw the same pixels and nothing flickers.
 	var tile := BoxMesh.new()
 	tile.size = Vector3(1.01, 0.5, 1.01)
-	var grass_a := mat(Color(0.11, 0.24, 0.09))
-	var grass_b := mat(Color(0.13, 0.28, 0.11))
-	var dirt := mat(Color(0.3, 0.2, 0.12))
-	# One MultiMesh per color, so the whole ground is a few draw calls instead of 432
-	var spots := {dirt: [], grass_a: [], grass_b: []}
+	# Painted grass and dirt textures (see assets/shaders/ground.gdshader). A small
+	# image with one white pixel per path cell lets the shader blend the path's edge.
+	var mask := Image.create(COLS, ROWS, false, Image.FORMAT_L8)
+	for c: Vector2i in path_cells:
+		if in_map(c):
+			mask.set_pixel(c.x, c.y, Color.WHITE)
+	var grass := ShaderMaterial.new()
+	grass.shader = load("res://assets/shaders/ground.gdshader")
+	grass.set_shader_parameter("grass_tex", load("res://assets/terrain/grass.png"))
+	grass.set_shader_parameter("dirt_tex", load("res://assets/terrain/dirt.png"))
+	grass.set_shader_parameter("grass_nrm", load("res://assets/terrain/grass_normal.png"))
+	grass.set_shader_parameter("dirt_nrm", load("res://assets/terrain/dirt_normal.png"))
+	grass.set_shader_parameter("path_mask", ImageTexture.create_from_image(mask))
+	grass.set_shader_parameter("map_size", Vector2(COLS, ROWS))
+	var dirt: ShaderMaterial = grass.duplicate()
+	dirt.set_shader_parameter("is_path", 1.0)
+	ground_mats = [grass, dirt]
+	apply_graphics()
+	# One MultiMesh for the grass and one for the path, so the whole ground is 2 draw calls instead of 432
+	var spots := {-0.33: [], -0.25: []}
 	for x in COLS:
 		for y in ROWS:
-			if path_cells.has(Vector2i(x, y)):
-				spots[dirt].append(Vector3(x + 0.5, -0.33, y + 0.5))
-			elif (x + y) % 2 == 0:
-				spots[grass_a].append(Vector3(x + 0.5, -0.25, y + 0.5))
-			else:
-				spots[grass_b].append(Vector3(x + 0.5, -0.252, y + 0.5))
-	for m: Material in spots:
+			var h := -0.33 if path_cells.has(Vector2i(x, y)) else -0.25
+			spots[h].append(Vector3(x + 0.5, h, y + 0.5))
+	for h: float in spots:
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
 		mm.mesh = tile
-		mm.instance_count = spots[m].size()
+		mm.instance_count = spots[h].size()
 		for i in mm.instance_count:
-			mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, spots[m][i]))
+			mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, spots[h][i]))
 		var mmi := MultiMeshInstance3D.new()
 		mmi.multimesh = mm
-		mmi.material_override = m
+		mmi.material_override = dirt if h == -0.33 else grass
 		add_child(mmi)
 	var base := BoxMesh.new()
 	base.size = Vector3(COLS + 0.6, 1.0, ROWS + 0.6)
@@ -153,6 +168,9 @@ func apply_graphics() -> void:
 	sun.light_angular_distance = 1.5 if high else 0.0
 	RenderingServer.directional_shadow_atlas_set_size(4096 if high else 2048, true)
 	RenderingServer.directional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_SOFT_HIGH if high else RenderingServer.SHADOW_QUALITY_SOFT_LOW)
+	# The ground's normal maps (light catching the painted bumps) only on High
+	for m in ground_mats:
+		m.set_shader_parameter("use_normals", high and not compat)
 
 
 func load_settings() -> void:
@@ -357,12 +375,13 @@ var model_meshes := {}  # merged tower meshes by name
 var model_mats := {}  # their materials by color
 
 
-# Arrow tower: the KayKit stone towers as the pack has them (Kay Lousberg, CC0,
-# see assets/CREDITS.md). Level 1 is the open tower with a crossbow on top,
-# level 2 tower_A and levels 3 and 4 the bigger tower_B, with the crossbow out
-# on the balcony (two at level 4). The crossbows turn to aim (their front is -Z),
-# going round the balcony. The roof, banners and flag show the owner's color.
+# Arrow tower: the KayKit stone towers (Kay Lousberg, CC0, see assets/CREDITS.md).
+# Level 1 is the open tower with a crossbow on top, level 2 tower_A and levels
+# 3 and 4 the bigger tower_B, with the crossbow out on the balcony (two at level 4),
+# their roofs made lower and smaller (low_roof()). The crossbows turn to aim (their
+# front is -Z), going round the balcony. The roof, banners and flag show the owner's color.
 const PACK_SCALE := 0.65  # the pack is made for bigger hexagon tiles
+const PACK_MUTE := 0.4  # how much the owner color and orange trim are toned down (0-1)
 const ARROW_MODELS := ["tower_base", "tower_A", "tower_B", "tower_B"]
 const ARROW_HEAD_Y := [1.38, 1.5, 1.5, 1.5]  # where the crossbows sit, in pack units
 const ARROW_REACH := [0.0, 0.5, 0.62, 0.62]  # how far out on the balcony
@@ -375,7 +394,8 @@ func build_arrow_tower(root: Node3D, level: int, slot: int) -> Node3D:
 	var model := Node3D.new()
 	model.scale = Vector3.ONE * PACK_SCALE * (1.08 if level == 3 else 1.0)
 	root.add_child(model)
-	add_pack_model(model, "towers/building_%s_blue" % ARROW_MODELS[level], slot)
+	var shape := low_roof if level > 0 else Callable()
+	add_pack_model(model, "towers/building_%s_blue" % ARROW_MODELS[level], slot, shape)
 	if level == 0:
 		# The open tower only has small banners, so a flag shows whose it is
 		var flag := Node3D.new()
@@ -399,18 +419,64 @@ func build_arrow_tower(root: Node3D, level: int, slot: int) -> Node3D:
 	return head
 
 
+# A lower, smaller roof for levels 2-4: everything above the walls is pulled in
+# to 75% and the roof gets 35% of its height (the flagpole on top moves down with it).
+func low_roof(t: Array) -> bool:
+	for k in 3:
+		var p: Vector3 = t[k]
+		if p.y > 1.7:
+			var y := 1.7 + (minf(p.y, 2.3) - 1.7) * 0.35 + maxf(p.y - 2.3, 0.0)
+			t[k] = Vector3(p.x * 0.75, y, p.z * 0.75)
+	return true
+
+
 # Adds a pack model's meshes under parent in the owner's color. The meshes are
-# loaded once and shared by every model like it.
-func add_pack_model(parent: Node3D, file: String, slot: int) -> void:
-	if not pack_meshes.has(file):
+# loaded once and shared by every model like it. shape, if given, changes them
+# once when loaded (see remake_mesh()).
+func add_pack_model(parent: Node3D, file: String, slot: int, shape := Callable()) -> void:
+	var key := file if shape.is_null() else "%s %s" % [file, shape.get_method()]
+	if not pack_meshes.has(key):
 		var parts := []
 		var scene: Node = load("res://assets/%s.gltf" % file).instantiate()
 		collect_meshes(scene, Transform3D.IDENTITY, parts)
 		scene.free()
-		pack_meshes[file] = parts
-	for part: Array in pack_meshes[file]:
+		if not shape.is_null():
+			for part: Array in parts:
+				part[0] = remake_mesh(part[0], shape)
+		pack_meshes[key] = parts
+	for part: Array in pack_meshes[key]:
 		var mi := add_mesh(parent, part[0], pack_mat(part[0], slot))
 		mi.transform = part[1]
+
+
+# Rebuilds a pack mesh triangle by triangle: shape gets [a, b, c, uv_a, uv_b, uv_c]
+# (pack units), can change them, and returns false to drop the triangle.
+# Moved triangles get flat normals.
+func remake_mesh(mesh: Mesh, shape: Callable) -> ArrayMesh:
+	var arr := mesh.surface_get_arrays(0)
+	var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+	var n: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
+	var uv: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV]
+	var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in range(0, idx.size(), 3):
+		var c := [idx[i], idx[i + 1], idx[i + 2]]
+		var t := [v[c[0]], v[c[1]], v[c[2]], uv[c[0]], uv[c[1]], uv[c[2]]]
+		if not shape.call(t):
+			continue
+		var moved: bool = t[0] != v[c[0]] or t[1] != v[c[1]] or t[2] != v[c[2]]
+		var face: Vector3 = (t[1] - t[0]).cross(t[2] - t[0]).normalized()
+		if face.dot(n[c[0]] + n[c[1]] + n[c[2]]) < 0.0:
+			face = -face
+		for k in 3:
+			st.set_normal(face if moved else n[c[k]])
+			st.set_uv(t[3 + k])
+			st.add_vertex(t[k])
+	st.index()
+	var out := st.commit()
+	out.surface_set_material(0, mesh.surface_get_material(0))
+	return out
 
 
 func collect_meshes(n: Node, tr: Transform3D, out: Array) -> void:
@@ -434,6 +500,9 @@ func pack_mat(mesh: Mesh, slot: int) -> ShaderMaterial:
 		m.shader = pack_shader
 		m.set_shader_parameter("palette", tex)
 		m.set_shader_parameter("team", float(slot))
+		# Only the buildings' palette gets toned down, not the crossbow's texture
+		if tex.resource_path.contains("hexagons"):
+			m.set_shader_parameter("mute", PACK_MUTE)
 		pack_mats[key] = m
 	return pack_mats[key]
 
@@ -639,6 +708,8 @@ func merge_parts(parts: Node3D) -> ArrayMesh:
 
 func update_visuals(delta: float) -> void:
 	time += delta
+	# Keeps the map above the bottom console at every zoom
+	camera.v_offset = CAMERA_V_OFFSET * zoom
 	for g in gate_parts.size():
 		var in_use: bool = players[g] != null
 		for part in gate_parts[g].values():
@@ -669,6 +740,11 @@ func update_visuals(delta: float) -> void:
 		plane.visible = showing_areas() and players[slot] != null
 		var own := slot == local_slot
 		plane.material_override.albedo_color = Color(PLAYER_COLORS[slot], 0.22) if own else Color(0, 0, 0, 0.5)
+	# Grid lines fade in on the grass while placing a tower
+	var want := 1.0 if build_type != "" and state == "playing" else 0.0
+	if grid_fade != want:
+		grid_fade = move_toward(grid_fade, want, delta * 5.0)
+		ground_mats[0].set_shader_parameter("grid", grid_fade)
 	range_disc.visible = false
 	ghost.visible = false
 	if selected != null:

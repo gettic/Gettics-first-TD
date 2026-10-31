@@ -475,7 +475,7 @@ func on_click(p: Vector2) -> void:
 		if ASK_NO_RECT.has_point(p):
 			answer_ask(false)
 			return
-	if p.x >= PANEL_LEFT:
+	if over_panel(p):
 		for i in TOWER_TYPES.size():
 			if tower_button_rect(i).has_point(p):
 				choose_build(TOWER_TYPES[i])

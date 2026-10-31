@@ -4,7 +4,7 @@ extends Node3D
 ## Up to 4 players can play together over the network (see "multiplayer").
 ## The game logic runs on a flat map measured in pixels (CELL pixels per tile).
 ## to3d() turns those positions into the 3D world, where one tile is one unit.
-## The side panel, health bars and lightning are drawn in 2D on top (draw_hud).
+## The bottom console, health bars and lightning are drawn in 2D on top (draw_hud).
 ##
 ## The code is split over files that extend each other, so the game is still one
 ## node with every function and variable on it (main.tscn uses main.gd):
@@ -19,10 +19,10 @@ const COLS := 24
 const ROWS := 18
 const SCREEN_W := 1280
 const SCREEN_H := 720
-const PANEL_LEFT := 960
 const CAMERA_SPEED := 12.0  # tiles per second
 const CAMERA_LIMIT := Vector2(9.0, 7.0)  # how far the camera can move from its start
-const CAMERA_H_OFFSET := 4.4  # shifts the view so the map is centered left of the side panel
+const CAMERA_H_OFFSET := 0.0  # the map uses the full width now
+const CAMERA_V_OFFSET := -3.5  # shifts the view so the map sits above the bottom console
 const ZOOM_MIN := 0.35  # closest zoom (fraction of the starting distance)
 const ZOOM_MAX := 1.3   # furthest zoom
 const ZOOM_STEP := 0.1  # how much one scroll-wheel notch zooms
@@ -94,25 +94,41 @@ const TOWERS := {
 	},
 }
 
-# Panel layout (screen pixels)
-const PANEL_X := PANEL_LEFT + 16
-const UPGRADE_RECT := Rect2(PANEL_X, 480, 140, 40)
-const SELL_RECT := Rect2(PANEL_X + 148, 480, 140, 40)
-const WAVE_RECT := Rect2(PANEL_X, 610, 200, 44)
-const SPEED_RECT := Rect2(PANEL_X + 208, 610, 80, 44)
-const UPDATE_RECT := Rect2(PANEL_X, 532, 288, 36)
+# Interface layout (screen pixels): a resource bar along the top and a console along the bottom
+const TOP_BAR_H := 30
+const BAR_TOP := 548  # top of the bottom console
+const MINIMAP_RECT := Rect2(24, 566, 192, 144)  # 8 pixels per tile
+const INFO_X := 236  # wave info, right of the minimap
+const PORTRAIT_RECT := Rect2(474, 568, 120, 120)  # the selected tower's picture
+const STATS_X := 612
+const CARD_X := 972  # command card: 4 x 2 square buttons
+const CARD_Y := 568
+const CARD_SIZE := 64
+const CARD_GAP := 8
+const UPGRADE_RECT := Rect2(CARD_X, CARD_Y + CARD_SIZE + CARD_GAP, CARD_SIZE, CARD_SIZE)
+const SELL_RECT := Rect2(CARD_X + (CARD_SIZE + CARD_GAP), CARD_Y + CARD_SIZE + CARD_GAP, CARD_SIZE, CARD_SIZE)
+const WAVE_RECT := Rect2(CARD_X + (CARD_SIZE + CARD_GAP) * 2, CARD_Y + CARD_SIZE + CARD_GAP, CARD_SIZE, CARD_SIZE)
+const SPEED_RECT := Rect2(CARD_X + (CARD_SIZE + CARD_GAP) * 3, CARD_Y + CARD_SIZE + CARD_GAP, CARD_SIZE, CARD_SIZE)
+const UPDATE_RECT := Rect2(560, 3, 240, 24)  # in the top bar
+const ARCH_R := 92.0  # the round arch over the portrait
+const ARCH_DROP := 62.0  # how far below the console's top its center is
+const MESSAGE_Y := BAR_TOP - 46  # flash messages, centered over the console
+const END_Y := 290  # the win / lose title, centered over the map
+# Where the map can't be clicked
+const PANEL_RECTS := [Rect2(0, 0, SCREEN_W, TOP_BAR_H), Rect2(0, BAR_TOP, SCREEN_W, SCREEN_H - BAR_TOP),
+		Rect2(474, BAR_TOP - 32, 120, 32)]
 
 # Esc menu layout (screen pixels)
-const MENU_RECT := Rect2(230, 60, 500, 620)
-const HOST_RECT := Rect2(270, 198, 420, 44)
-const JOIN_INPUT_RECT := Rect2(270, 292, 290, 40)
-const JOIN_BUTTON_RECT := Rect2(570, 292, 120, 40)
-const COPY_RECT := Rect2(570, 226, 120, 40)
-const STOP_RECT := Rect2(270, 560, 420, 40)
-const RESUME_RECT := Rect2(270, 616, 420, 44)
-const PUBLIC_RECT := Rect2(270, 350, 420, 36)
-const REFRESH_RECT := Rect2(590, 408, 100, 28)
-const GRAPHICS_RECT := Rect2(596, 70, 124, 28)
+const MENU_RECT := Rect2(390, 60, 500, 620)
+const HOST_RECT := Rect2(430, 198, 420, 44)
+const JOIN_INPUT_RECT := Rect2(430, 292, 290, 40)
+const JOIN_BUTTON_RECT := Rect2(730, 292, 120, 40)
+const COPY_RECT := Rect2(730, 226, 120, 40)
+const STOP_RECT := Rect2(430, 560, 420, 40)
+const RESUME_RECT := Rect2(430, 616, 420, 44)
+const PUBLIC_RECT := Rect2(430, 350, 420, 36)
+const REFRESH_RECT := Rect2(750, 408, 100, 28)
+const GRAPHICS_RECT := Rect2(756, 70, 124, 28)
 const GAME_ROWS := 4  # public games shown in the menu
 
 # Update popup layout (screen pixels)
@@ -121,10 +137,11 @@ const DIALOG_YES_RECT := Rect2(380, 506, 250, 44)
 const DIALOG_NO_RECT := Rect2(650, 506, 250, 44)
 const CHOOSE_FOLDER_RECT := Rect2(370, 368, 250, 36)  # in the unpack warning
 
-# Box asking whether another player may build in your area (screen pixels)
-const ASK_RECT := Rect2(220, 16, 520, 100)
-const ASK_YES_RECT := Rect2(240, 64, 230, 38)
-const ASK_NO_RECT := Rect2(490, 64, 230, 38)
+# Box asking whether another player may build in your area: in the console's middle,
+# over the portrait and stats (screen pixels)
+const ASK_RECT := Rect2(456, 556, 484, 156)
+const ASK_YES_RECT := Rect2(480, 646, 212, 44)
+const ASK_NO_RECT := Rect2(704, 646, 212, 44)
 
 # Checked at startup to see if a newer release is on GitHub
 const RELEASES_API := "https://api.github.com/repos/gettic/Gettics-first-TD/releases/latest"
@@ -340,7 +357,14 @@ func to3d(p: Vector2, height := 0.0) -> Vector3:
 
 
 func mouse_over_panel() -> bool:
-	return get_viewport().get_mouse_position().x >= PANEL_LEFT
+	return over_panel(get_viewport().get_mouse_position())
+
+
+func over_panel(p: Vector2) -> bool:
+	for r: Rect2 in PANEL_RECTS:
+		if r.has_point(p):
+			return true
+	return false
 
 
 # Finds the map tile under the mouse by shooting a ray from the camera to the ground.
@@ -371,7 +395,7 @@ func flash(text: String) -> void:
 
 
 func tower_button_rect(i: int) -> Rect2:
-	return Rect2(PANEL_X, 150 + i * 64, 288, 56)
+	return Rect2(CARD_X + i * (CARD_SIZE + CARD_GAP), CARD_Y, CARD_SIZE, CARD_SIZE)
 
 
 func kind_for_wave(w: int) -> String:

@@ -12,7 +12,7 @@ Monsters come out of a green portal in a stone gate at a corner of the map, walk
 
 Play alone or with up to 4 players: each player gets their own gate at a corner of the square (see [Multiplayer](#multiplayer)).
 
-The 3D world is built mostly from simple shapes in code, plus a few free CC0 models from the KayKit packs by Kay Lousberg (see [assets/CREDITS.md](assets/CREDITS.md)). The game has no sound files.
+The 3D world is built mostly from simple shapes in code, plus a few free CC0 models from the KayKit packs by Kay Lousberg and painted CC0 grass and dirt textures by Cethiel (see [assets/CREDITS.md](assets/CREDITS.md)). The game has no sound files.
 
 ## Download
 
@@ -20,7 +20,7 @@ The 3D world is built mostly from simple shapes in code, plus a few free CC0 mod
 
 The first time it runs, the game warns you and then unpacks itself into a new **Gettic's first TD** folder next to the download (or click **Choose another folder...** to unpack it straight into a folder you pick), with two files named with the version, for example `Gettic's first TD v1.16.exe` (the Godot engine) and `Gettic's first TD v1.16.pck` (the game itself). The downloaded file is deleted afterwards. From then on, start the game from that folder. When the game updates, both files are renamed to the new version.
 
-When the game starts, it checks GitHub for a newer version. If one is out, a **New version – Update** button appears in the side panel. Click it to see what's new and update with one click: the game downloads the new version and restarts by itself. Usually only the small game file needs to be downloaded; the engine is only downloaded again when it changed.
+When the game starts, it checks GitHub for a newer version. If one is out, a **New version – Update** button appears at the top of the screen. Click it to see what's new and update with one click: the game downloads the new version and restarts by itself. Usually only the small game file needs to be downloaded; the engine is only downloaded again when it changed.
 
 ## Run from source
 
@@ -38,7 +38,7 @@ godot --path path/to/this/folder
 
 | Key / mouse | Action |
 |---|---|
-| **1–4** or click a tower button | Choose a tower to build |
+| **1–4** or click a tower button | Choose a tower to build (a grid shows on the grass while you place it) |
 | **Left-click** on grass | Build the chosen tower |
 | **Left-click** on a tower | Select it |
 | **U** | Upgrade the selected tower |
@@ -72,7 +72,7 @@ Each tower has 4 levels.
 - Every **5th** wave is **fast**.
 - Every **10th** wave is a **boss**. A boss counts as 5 monsters toward the limit.
 
-You start with 150 gold. You earn gold for each kill and a bonus at the start of each wave. The side panel shows how many monsters are alive: you lose if it reaches **50** (per player, see below). You win when all 30 waves are out and every monster is dead.
+You start with 150 gold. You earn gold for each kill and a bonus at the start of each wave. The console at the bottom shows how many monsters are alive: you lose if it reaches **50** (per player, see below). You win when all 30 waves are out and every monster is dead.
 
 ## Multiplayer
 
@@ -112,7 +112,7 @@ The game code is split into a few files, each building on the one before:
 | `game_updates.gd` | Checking for updates, unpacking the downloaded `.exe`, and the debug log window |
 | `game_world.gd` | The 3D world: map, gates, tower and monster models, shots and effects |
 | `game_net.gd` | Multiplayer: hosting, joining, invite codes, public games |
-| `game_ui.gd` | The side panel, menus and popups |
+| `game_ui.gd` | The bottom console (small map, tower portrait, command buttons), menus and popups |
 | `main.gd` | The game itself: waves, monsters walking, towers shooting, keys and clicks |
 
 Good places to start:
@@ -124,7 +124,7 @@ Good places to start:
 - `PLAYER_NAMES` and `PLAYER_COLORS` set each player's name and color.
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.
 - `start_wave()` in `main.gd` controls how much health enemies get each wave, and how many come out of each gate.
-- `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting and map colors. `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Model files (like the Arrow tower's) are in `assets/`, with their sources in `assets/CREDITS.md`.
+- `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting and the ground (painted grass and dirt, see `assets/shaders/ground.gdshader`). `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Model files (like the Arrow tower's) are in `assets/`, with their sources in `assets/CREDITS.md`.
 - `RELAY_URL` in `game_base.gd` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used for games on your own network.
 - `GAME_FOLDER` and `GAME_NAME` in `game_base.gd` set the names of the folder and files the downloaded `.exe` unpacks into.
 - The game server is a small Cloudflare Worker, kept outside this repository.
