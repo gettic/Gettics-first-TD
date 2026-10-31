@@ -25,10 +25,13 @@ const CAMERA_V_OFFSET := -3.5  # shifts the view so the map sits above the botto
 const ZOOM_MIN := 0.35  # closest zoom (fraction of the starting distance)
 const ZOOM_MAX := 1.3   # furthest zoom
 const ZOOM_STEP := 0.1  # how much one scroll-wheel notch zooms
-const MAX_WAVE := 30
+const MAX_WAVE := 300
+const MAX_LEVEL := 60  # endless in practice: level 30 already costs millions, level 60 about a trillion
+const WIN_TEXT := "GZ you have no life, go touch grass"  # shown when all waves are beaten
 const START_GOLD := 150
 const MAX_ALIVE := 50  # per player: you lose when this many monsters are alive at once (a boss counts as 5)
 const WAVE_INTERVAL := 25.0  # seconds between waves once the game has started
+const GAME_SPEEDS := [1, 2, 3, 5]  # the speed button (F) goes through these
 
 # The map is data (see read_map()): one letter per tile, . grass, # path,
 # 1-4 a player's gate (standing on a path tile), r rock, t tree, w water.
@@ -100,10 +103,11 @@ const CODE_LETTERS := "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # for invite codes (no
 # Start the game with "-- --relay=http://127.0.0.1:8787" to use a test server.
 const RELAY_URL := "https://gtd-relay.gtd-relay.workers.dev"
 
-# Tower stats per level (index 0 = level 1). "cost"[0] is the build price,
-# the rest are upgrade prices.
+# Tower stats for levels 1-4 (index 0 = level 1). "cost"[0] is the build price,
+# the rest are upgrade prices. Levels go on after 4 (see make_towers()): the
+# game uses TOWERS, which has every level up to MAX_LEVEL.
 const TOWER_TYPES := ["arrow", "cannon", "frost", "spark"]
-const TOWERS := {
+const TOWER_BASE := {
 	"arrow": {
 		"name": "Arrow", "color": Color(0.35, 0.85, 0.35),
 		"desc": "Fast single-target shots",
@@ -140,6 +144,20 @@ const TOWERS := {
 		"chain": [3, 4, 5, 6],
 	},
 }
+# Levels after 4. Each one adds LEVEL_GAIN damage plus a bit more (0 to
+# LEVEL_GAIN_SPREAD), different for every level and tower but the same in every
+# game. Every 5th level (5, 10, 15...) is a big one. Upgrades cost LEVEL_COST
+# times the last one (LEVEL_COST_BIG for the big levels), so damage per gold
+# slowly drops and very high levels price themselves out.
+const LEVEL_GAIN := 0.28  # +28% damage a level...
+const LEVEL_GAIN_SPREAD := 0.08  # ...plus 0-8%
+const LEVEL_GAIN_BIG := 0.62  # every 5th level: +62% (plus the spread)
+const LEVEL_COST := 1.38
+const LEVEL_COST_BIG := 1.8
+const LEVEL_RANGE := 3.0  # range added a level, up to LEVEL_RANGE_MAX in all
+const LEVEL_RANGE_MAX := 60.0
+# Every tower level up to MAX_LEVEL, built from TOWER_BASE (same keys and shape)
+var TOWERS := make_towers()
 
 # Interface layout (screen pixels): a resource bar along the top and a console along the bottom
 const TOP_BAR_H := 30
@@ -173,7 +191,7 @@ const JOIN_BUTTON_RECT := Rect2(730, 350, 120, 40)
 const COPY_RECT := Rect2(730, 242, 120, 40)
 const NAME_INPUT_RECT := Rect2(530, 210, 320, 36)  # above the host button
 const STOP_RECT := Rect2(430, 580, 420, 40)
-const RESUME_RECT := Rect2(430, 640, 420, 44)
+const RESUME_RECT := Rect2(430, 640, 270, 44)  # the Leaderboard button is next to it
 const PUBLIC_RECT := Rect2(430, 366, 420, 36)
 const REFRESH_RECT := Rect2(750, 472, 100, 28)
 const GRAPHICS_RECT := Rect2(756, 50, 124, 28)
@@ -679,6 +697,80 @@ func kind_for_wave(w: int) -> String:
 	if w % 3 == 0:
 		return "armored"
 	return "normal"
+
+
+# A monster's health in wave w: +17% a wave up to wave 25, then +2.5% a wave.
+func wave_hp(w: int) -> float:
+	return 25.0 * pow(1.17, mini(w, 25) - 1) * pow(1.025, maxi(w - 25, 0))
+
+
+# Monsters out of each gate in wave w: one more each wave up to 32, bosses up to 5.
+func wave_count(w: int) -> int:
+	if kind_for_wave(w) == "boss":
+		return mini(1 + int(w / 10.0), 5)
+	return mini(8 + w, 32)
+
+
+# Gold every player gets when wave w starts.
+func wave_income(w: int) -> int:
+	return maxi(10 + w * 2, int(wave_hp(w) / 35.0))
+
+
+# Gold for killing a monster in wave w (a boss gives 40 + 12 times this).
+# Playing alone pays about 15% more later on, since nobody helps.
+func wave_bounty(w: int) -> int:
+	var hp_per_gold := 175.0 if player_count() < 2 else 200.0
+	return maxi(2 + int(mini(w, 30) / 4.0), int(wave_hp(w) / hp_per_gold))
+
+
+# All the gold a player who killed everything would have earned before wave w
+# (for players joining late).
+func gold_before_wave(w: int) -> int:
+	var total := START_GOLD
+	for i in range(1, mini(w, MAX_WAVE + 1)):
+		var bounty := wave_bounty(i)
+		if kind_for_wave(i) == "boss":
+			bounty = 40 + bounty * 12
+		total += wave_income(i) + bounty * wave_count(i)
+	return total
+
+
+# Every tower level up to MAX_LEVEL: levels 1-4 from TOWER_BASE, then each level
+# from the one before (see LEVEL_GAIN). Called once, to fill TOWERS.
+func make_towers() -> Dictionary:
+	var out := {}
+	for type: String in TOWER_BASE:
+		var d: Dictionary = TOWER_BASE[type].duplicate(true)
+		var top: int = d["cost"].size() - 1  # the last hand-made level
+		var damage: float = d["damage"][top]
+		var cost: float = d["cost"][top]
+		for lv in range(top + 1, MAX_LEVEL):
+			var n: int = lv - top  # levels past the hand-made ones
+			var big := (lv + 1) % 5 == 0
+			# A fixed "random" 0-8 for this level and tower
+			var bump := (lv * 37 + TOWER_TYPES.find(type) * 11) % 9 / 8.0
+			damage *= 1.0 + (LEVEL_GAIN_BIG if big else LEVEL_GAIN) + bump * LEVEL_GAIN_SPREAD
+			cost *= LEVEL_COST_BIG if big else LEVEL_COST
+			d["damage"].append(int(round_nicely(damage)))
+			d["cost"].append(int(round_nicely(cost)))
+			d["range"].append(d["range"][top] + minf(n * LEVEL_RANGE, LEVEL_RANGE_MAX))
+			d["cooldown"].append(snappedf(d["cooldown"][top] * maxf(pow(0.98, n), 0.75), 0.01))
+			if d.has("splash"):
+				d["splash"].append(d["splash"][top] + minf(n * 2.0, 40.0))
+			if d.has("slow"):
+				d["slow"].append(snappedf(0.15 + (d["slow"][top] - 0.15) * pow(0.95, n), 0.01))
+			if d.has("chain"):
+				d["chain"].append(mini(d["chain"][top] + n / 4, 12))
+		out[type] = d
+	return out
+
+
+# Rounds to 2 significant digits above 100 (1234 -> 1200), so prices stay readable.
+func round_nicely(x: float) -> float:
+	if x < 100.0:
+		return roundf(x)
+	var step := pow(10.0, floorf(log(x) / log(10.0)) - 1.0)
+	return roundf(x / step) * step
 
 
 # How many players must agree to send the next wave early.

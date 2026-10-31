@@ -9,6 +9,13 @@ const UI_TEXT := Color(0.95, 0.91, 0.82)
 const UI_GREY := Color(0.72, 0.69, 0.63)
 const UI_DIM := Color(0.55, 0.52, 0.47)
 
+# The leaderboard: its button next to Resume in the Esc menu, and its box
+const LEADERBOARD_RECT := Rect2(710, 640, 140, 44)
+const BOARD_RECT := Rect2(320, 50, 640, 620)
+const BOARD_REFRESH_RECT := Rect2(360, 606, 170, 40)
+const BOARD_BACK_RECT := Rect2(750, 606, 170, 40)
+const BOARD_ROW_H := 34
+
 var title_font: Font  # big titles; the normal font unless a style says otherwise
 var map_hud: Node2D  # 2D layer under the console: health bars, lightning, area labels
 var console_layer: Node2D  # the console's stone, drawn once (and again when the map changes)
@@ -123,6 +130,7 @@ func draw_on(node: Node2D, draw_func: Callable) -> void:
 # The map layer redraws every frame along with the 3D world.
 func update_visuals(delta: float) -> void:
 	super(delta)
+	update_fireworks(delta)
 	map_hud.queue_redraw()
 	if selected == null:
 		portrait_view.render_target_update_mode = SubViewport.UPDATE_DISABLED
@@ -138,6 +146,7 @@ func draw_hud() -> void:
 	draw_panel()
 	if state != "playing":
 		draw_end_screen()
+		draw_fireworks()
 	draw_chat()
 	if menu_open:
 		draw_menu()
@@ -210,6 +219,7 @@ func wrap_words(s: String, first_width: float, width: float, size: int) -> Packe
 # Health bars, lightning and area labels: under the console.
 func draw_map_overlays() -> void:
 	draw_health_bars()
+	draw_level_badges()
 	for fx in effects:
 		if fx["kind"] == "bolt":
 			var pts := PackedVector2Array()
@@ -220,6 +230,22 @@ func draw_map_overlays() -> void:
 			hud.draw_polyline(pts, Color(0.95, 0.9, 1.0, a), 2.5)
 	if showing_areas():
 		draw_area_labels()
+
+
+# Towers above level 4 look like level 4, so their level shows on a small
+# badge at their foot: "Lv 12".
+func draw_level_badges() -> void:
+	for t: Tower in towers.values():
+		if t.level <= 3:
+			continue
+		var p := camera.unproject_position(t.node.position + Vector3(0, 0.05, 0.5))
+		var s := "Lv %d" % (t.level + 1)
+		var w := font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, 12).x
+		var r := Rect2(p.x - w / 2.0 - 4, p.y - 7, w + 8, 15)
+		hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.8))
+		hud.draw_rect(r, Color(0.12, 0.09, 0.05, 0.9))
+		hud.draw_rect(r, UI_GOLD_DARK, false, 1.0)
+		text(Vector2(r.position.x + 4, p.y + 5), s, 12, UI_GOLD_LIGHT)
 
 
 func draw_area_labels() -> void:
@@ -338,8 +364,12 @@ func fit_path(path: String, width: float, size: int) -> String:
 
 func draw_health_bars() -> void:
 	for e in enemies:
-		var r := e.radius / CELL
-		var p := camera.unproject_position(e.node.position + Vector3(0, r + 0.25, 0))
+		# Only hurt monsters show a bar, like in Warcraft III, so big waves stay readable
+		if e.hp >= e.max_hp:
+			continue
+		# Just above the monster's model (its height is the 4th part of its look)
+		var top: float = e.node.get_meta("mob")[3]
+		var p := camera.unproject_position(e.node.position + Vector3(0, top + 0.08, 0))
 		var w := e.radius * 2.4
 		var bar := Vector2(p.x - w / 2.0, p.y)
 		# Black edge so the bar reads on grass and path alike
@@ -350,6 +380,29 @@ func draw_health_bars() -> void:
 
 func text(pos: Vector2, s: String, size := 16, col := Color.WHITE) -> void:
 	hud.draw_string(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
+
+
+# Big numbers made short: 9500, 24k, 240k, 1.2M, 3.4B, 5T.
+func short(n: float) -> String:
+	if absf(n) < 10000.0:
+		return str(int(n))
+	for u: Array in [[1e12, "T"], [1e9, "B"], [1e6, "M"], [1e3, "k"]]:
+		if absf(n) >= u[0]:
+			var v: float = n / u[0]
+			if absf(v) < 10.0:
+				return ("%.1f" % (floorf(v * 10.0) / 10.0)).trim_suffix(".0") + u[1]
+			return str(int(v)) + u[1]
+	return str(int(n))
+
+
+# A gold amount: "950g", or short without the g when big ("240k", not "240kg").
+func gold_text(n: float) -> String:
+	return short(n) + ("g" if absf(n) < 10000.0 else "")
+
+
+# Bonus gold for sending the next wave now (the same sum start_wave() pays).
+func early_gold() -> int:
+	return int(maxf(next_wave_timer, 0.0)) * maxi(1, int(wave_income(wave + 1) / WAVE_INTERVAL))
 
 
 func button(r: Rect2, label: String, enabled := true, active := false) -> void:
@@ -421,7 +474,7 @@ func draw_top_bar() -> void:
 		x = resource(x, "DEBUG", 13, Color(1.0, 0.45, 0.4), "")
 	x = resource(x, "%d / %d" % [wave, MAX_WAVE], 18, UI_TEXT, "wave")
 	x = resource(x, "%d / %d" % [alive_count(), max_alive()], 18, danger_color(), "alive")
-	resource(x, str(gold), 18, Color(1, 0.85, 0.3), "gold")
+	resource(x, short(gold), 18, Color(1, 0.85, 0.3), "gold")
 
 
 # A number with its icon in front, ending at x. Returns where the next one ends.
@@ -512,22 +565,28 @@ func draw_selected() -> void:
 	inner_shadow(PORTRAIT_RECT, 6, 0.4)
 	var x := float(STATS_X)
 	text(Vector2(x, BAR_TOP + 42), "%s Tower" % data["name"], 22, data["color"])
-	# A gold diamond per level, filled up to this one
-	for i in 4:
-		var c := Vector2(x + 7 + i * 17, BAR_TOP + 59)
-		diamond(c, 6.0, UI_GOLD_DARK)
-		diamond(c, 4.5, data["color"] if i <= lv else Color(0.08, 0.08, 0.08))
-	text(Vector2(x + 78, BAR_TOP + 64), "Level %d" % (lv + 1), 15, UI_TEXT)
+	# A gold diamond per level up to 4, filled up to this one. After 4: one diamond and the number.
+	if lv <= 3:
+		for i in 4:
+			var c := Vector2(x + 7 + i * 17, BAR_TOP + 59)
+			diamond(c, 6.0, UI_GOLD_DARK)
+			diamond(c, 4.5, data["color"] if i <= lv else Color(0.08, 0.08, 0.08))
+		text(Vector2(x + 78, BAR_TOP + 64), "Level %d" % (lv + 1), 15, UI_TEXT)
+	else:
+		var c := Vector2(x + 7, BAR_TOP + 59)
+		diamond(c, 7.0, UI_GOLD_DARK)
+		diamond(c, 5.5, data["color"])
+		text(Vector2(x + 20, BAR_TOP + 65), "Level %d" % (lv + 1), 17, UI_GOLD_LIGHT)
 	var mine := selected.owner == local_slot
-	var next := lv < 3 and mine
-	stat_row(Vector2(x, BAR_TOP + 96), "Damage", str(data["damage"][lv]), str(data["damage"][lv + 1]) if next else "")
+	var next := lv < MAX_LEVEL - 1 and mine
+	stat_row(Vector2(x, BAR_TOP + 96), "Damage", short(data["damage"][lv]), short(data["damage"][lv + 1]) if next else "")
 	stat_row(Vector2(x, BAR_TOP + 118), "Range", "%d" % data["range"][lv], "%d" % data["range"][lv + 1] if next else "")
 	stat_row(Vector2(x, BAR_TOP + 140), "Speed", "%.2fs" % data["cooldown"][lv], "")
 	var right := x + 196
 	hud.draw_multiline_string(font, Vector2(right, BAR_TOP + 96), data["desc"], HORIZONTAL_ALIGNMENT_LEFT, 130, 14, 2, UI_GREY)
 	if not mine:
 		text(Vector2(right, BAR_TOP + 140), "Built by %s" % name_of(selected.owner), 14, PLAYER_COLORS[selected.owner])
-	elif lv == 3:
+	elif lv >= MAX_LEVEL - 1:
 		text(Vector2(right, BAR_TOP + 140), "Max level", 14, UI_GOLD_LIGHT)
 
 
@@ -557,7 +616,7 @@ func draw_build_list() -> void:
 			hud.draw_rect(Rect2(x - 6, y - 17, 330, 22), Color(1, 0.85, 0.3, 0.15))
 		gem(Vector2(x + 6, y - 6), 5.0, data["color"])
 		text(Vector2(x + 18, y), data["name"], 16, UI_TEXT if affordable else UI_DIM)
-		text(Vector2(x + 82, y), "%dg" % data["cost"][0], 15, Color(1, 0.85, 0.3) if affordable else Color(0.6, 0.4, 0.3))
+		text(Vector2(x + 82, y), gold_text(data["cost"][0]), 15, Color(1, 0.85, 0.3) if affordable else Color(0.6, 0.4, 0.3))
 		text(Vector2(x + 130, y), data["desc"], 14, UI_GREY)
 	var hint := "Click the map to build. Right-click: cancel" if build_type != "" else "Click a tower to upgrade or sell it."
 	text(Vector2(x, BAR_TOP + 160), hint, 13, UI_DIM)
@@ -590,22 +649,22 @@ func draw_command_card() -> void:
 		var data: Dictionary = TOWERS[TOWER_TYPES[i]]
 		var r := tower_button_rect(i)
 		var affordable: bool = gold >= data["cost"][0]
-		card_button(r, str(i + 1), data["name"], "%dg" % data["cost"][0], true, build_type == TOWER_TYPES[i], affordable)
+		card_button(r, str(i + 1), data["name"], gold_text(data["cost"][0]), true, build_type == TOWER_TYPES[i], affordable)
 		gem(r.get_center() + Vector2(0, -2), 11.0, data["color"] if affordable else data["color"].darkened(0.4))
 	# Upgrade and Sell only work on your own selected tower
 	var mine := selected != null and selected.owner == local_slot
 	var up_label := "Upgrade"
 	var up_cost := ""
 	var can_up := false
-	if mine and selected.level < 3:
+	if mine and selected.level < MAX_LEVEL - 1:
 		var cost: int = TOWERS[selected.type]["cost"][selected.level + 1]
-		up_cost = "%dg" % cost
+		up_cost = gold_text(cost)
 		can_up = gold >= cost
 	elif mine:
 		up_label = "Max"
 	card_button(UPGRADE_RECT, "U", up_label, up_cost, can_up, false, can_up)
 	icon_upgrade(UPGRADE_RECT.get_center() + Vector2(0, -2), UI_GOLD_LIGHT if can_up else UI_DIM)
-	card_button(SELL_RECT, "X", "Sell", "+%dg" % int(selected.spent * 0.7) if mine else "", mine, false, true)
+	card_button(SELL_RECT, "X", "Sell", "+" + gold_text(selected.spent * 0.7) if mine else "", mine, false, true)
 	icon_coin(SELL_RECT.get_center() + Vector2(0, -2), 10.0, mine)
 	var w := wave_button()
 	var can_wave := wave < MAX_WAVE and state == "playing" and monsters_left_to_spawn() == 0
@@ -621,7 +680,7 @@ func wave_button() -> Array:
 		return ["Start", ""]
 	if wave < MAX_WAVE and monsters_left_to_spawn() > 0:
 		return ["%d left" % monsters_left_to_spawn(), ""]
-	var bonus := "+%dg" % int(maxf(next_wave_timer, 0.0))
+	var bonus := "+" + gold_text(early_gold())
 	var votes := "%d/%d" % [wave_votes.size(), votes_needed()]
 	if wave < MAX_WAVE and player_count() > 1:
 		return ["Voted " + votes, ""] if local_slot in wave_votes else ["Vote " + votes, bonus]
@@ -640,9 +699,9 @@ func wave_tip() -> String:
 	if wave < MAX_WAVE and player_count() > 1:
 		if local_slot in wave_votes:
 			return "Voted %s (SPACE: undo)" % votes
-		return "Vote to send it now: +%dg each, %s (SPACE)" % [int(maxf(next_wave_timer, 0.0)), votes]
+		return "Vote to send it now: +%s gold each, %s (SPACE)" % [short(early_gold()), votes]
 	if wave < MAX_WAVE:
-		return "Send the next wave now: +%dg (SPACE)" % int(maxf(next_wave_timer, 0.0))
+		return "Send the next wave now: +%s gold (SPACE)" % short(early_gold())
 	return "No more waves"
 
 
@@ -668,27 +727,27 @@ func draw_card_tip(i: int) -> void:
 	var lines: Array = []
 	if i < TOWER_TYPES.size():
 		var data: Dictionary = TOWERS[TOWER_TYPES[i]]
-		title = "Build %s Tower (%d)  -  %dg" % [data["name"], i + 1, data["cost"][0]]
-		lines = [data["desc"], "Damage %d   Range %d   Speed %.2fs" % [data["damage"][0], data["range"][0], data["cooldown"][0]]]
+		title = "Build %s Tower (%d)  -  %s" % [data["name"], i + 1, gold_text(data["cost"][0])]
+		lines = [data["desc"], "Damage %s   Range %d   Speed %.2fs" % [short(data["damage"][0]), data["range"][0], data["cooldown"][0]]]
 	elif i == 4:
 		title = "Upgrade (U)"
 		if selected == null or selected.owner != local_slot:
 			lines = ["Select one of your towers first."]
-		elif selected.level < 3:
+		elif selected.level < MAX_LEVEL - 1:
 			var data: Dictionary = TOWERS[selected.type]
-			title = "Upgrade to level %d (U)  -  %dg" % [selected.level + 2, data["cost"][selected.level + 1]]
-			lines = ["Damage %d   Range %d" % [data["damage"][selected.level + 1], data["range"][selected.level + 1]]]
+			title = "Upgrade to level %d (U)  -  %s gold" % [selected.level + 2, short(data["cost"][selected.level + 1])]
+			lines = ["Damage %s   Range %d" % [short(data["damage"][selected.level + 1]), data["range"][selected.level + 1]]]
 		else:
 			lines = ["This tower is at its highest level."]
 	elif i == 5:
 		title = "Sell (X)"
-		lines = ["Get back %dg for this tower." % int(selected.spent * 0.7)] if selected != null and selected.owner == local_slot else ["Select one of your towers first."]
+		lines = ["Get back %s gold for this tower." % short(selected.spent * 0.7)] if selected != null and selected.owner == local_slot else ["Select one of your towers first."]
 	elif i == 6:
 		title = "Next wave (SPACE)"
 		lines = [wave_tip(), next_wave_text()]
 	else:
 		title = "Game speed x%d (F)" % game_speed
-		lines = ["Only the host can change the speed."] if net_mode == "client" else ["Switches between normal, double and triple speed."]
+		lines = ["Only the host can change the speed."] if net_mode == "client" else ["Switches between x1, x2, x3 and x5 speed."]
 	var r := Rect2(SCREEN_W - 372, BAR_TOP - 24 - 34 - lines.size() * 20, 360, 34 + lines.size() * 20 + 10)
 	hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.9), false, 1.0)
 	hud.draw_rect(r, Color(0.05, 0.05, 0.055, 0.92))
@@ -803,6 +862,77 @@ func draw_menu() -> void:
 			draw_player_list(Vector2(left, 266))
 			button(STOP_RECT, "Leave the game")
 	button(RESUME_RECT, "Resume (Esc)")
+	button(LEADERBOARD_RECT, "Leaderboard")
+
+
+# The top 10 from the game server (see open_board()), over the Esc menu.
+func draw_board() -> void:
+	var b := BOARD_RECT
+	hud.draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(0, 0, 0, 0.5))
+	ui_box(b)
+	var title := "LEADERBOARD"
+	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 36).x
+	ui_title(Rect2(b.position.x, b.position.y, b.size.x, 62), Vector2((SCREEN_W - tw) / 2.0, b.position.y + 46), title, 36)
+	centered(b.position.y + 86, "Default map, %d waves. Highest wave first, then the fastest game time." % MAX_WAVE, 15, UI_GREY)
+	var gold_col := Color(1, 0.85, 0.3)
+	var x_rank := b.position.x + 40
+	var x_names := b.position.x + 90
+	var x_wave := b.position.x + 470  # right edge of the wave column
+	var x_time := b.end.x - 40  # right edge of the time column
+	var y := b.position.y + 124
+	text(Vector2(x_rank, y), "#", 15, gold_col)
+	text(Vector2(x_names, y), "Players", 15, gold_col)
+	right_text(Vector2(x_wave, y), "Wave", 15, gold_col)
+	right_text(Vector2(x_time, y), "Time", 15, gold_col)
+	ui_divider(b.position.x + 24, b.end.x - 24, y + 10)
+	var top := b.position.y + 140
+	for i in BOARD_ROWS:
+		var row := Rect2(b.position.x + 24, top + i * BOARD_ROW_H, b.size.x - 48, BOARD_ROW_H - 2)
+		var e: Dictionary = board_top[i] if i < board_top.size() else {}
+		var mine: bool = not e.is_empty() and not board_me.is_empty() and e.names == board_me.names
+		hud.draw_rect(row, Color(0.55, 0.42, 0.15, 0.35) if mine else Color(0, 0, 0, 0.28 if i % 2 == 0 else 0.16))
+		var ty := row.position.y + 22
+		var rank_col: Color = [Color(1, 0.84, 0.3), Color(0.82, 0.84, 0.88), Color(0.85, 0.55, 0.3)][i] if i < 3 else UI_GREY
+		text(Vector2(x_rank, ty), str(i + 1), 17, rank_col)
+		if e.is_empty():
+			text(Vector2(x_names, ty), "-", 16, UI_DIM)
+			continue
+		text(Vector2(x_names, ty), fit_text(" + ".join(e.names), x_wave - x_names - 60, 16), 16, UI_GOLD_LIGHT if mine else UI_TEXT)
+		right_text(Vector2(x_wave, ty), str(e.wave), 17, UI_TEXT)
+		if e.won:
+			text(Vector2(x_wave + 8, ty), "won", 13, gold_col)
+		right_text(Vector2(x_time, ty), board_time_text(e.ms), 16, UI_TEXT)
+	var below := top + BOARD_ROWS * BOARD_ROW_H + 26
+	if board_status != "":
+		centered(below, board_status, 15, Color(1, 0.75, 0.5))
+	elif board_me.is_empty():
+		centered(below, "Finish a game on the Default map to get on the list.", 15, UI_GREY)
+	else:
+		var where := "#%d" % board_me.rank if board_me.rank > 0 else "not in the top 1000"
+		centered(below, "Your best: %s, wave %d%s, %s" % [where, board_me.wave, " (won)" if board_me.won else "", board_time_text(board_me.ms)], 15, gold_col)
+	button(BOARD_REFRESH_RECT, "Refresh", can_refresh_board())
+	button(BOARD_BACK_RECT, "Back (Esc)", true, true)
+
+
+func board_click(p: Vector2) -> void:
+	if BOARD_BACK_RECT.has_point(p):
+		board_open = false
+	elif BOARD_REFRESH_RECT.has_point(p):
+		refresh_board()
+
+
+# Text whose right edge is at pos.x.
+func right_text(pos: Vector2, s: String, size: int, col: Color) -> void:
+	text(pos - Vector2(font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x, 0), s, size, col)
+
+
+# s, cut short with "..." if it's wider than width.
+func fit_text(s: String, width: float, size: int) -> String:
+	if font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= width:
+		return s
+	while s.length() > 1 and font.get_string_size(s + "...", HORIZONTAL_ALIGNMENT_LEFT, -1, size).x > width:
+		s = s.left(-1)
+	return s + "..."
 
 
 func game_row_rect(i: int) -> Rect2:
@@ -1059,6 +1189,11 @@ func ui_bar(r: Rect2, frac: float, col: Color) -> void:
 
 
 func toggle_menu() -> void:
+	# Esc in the leaderboard goes back to the menu
+	if board_open and menu_open:
+		board_open = false
+		return
+	board_open = false
 	menu_open = not menu_open
 	build_type = ""
 	games_timer = 0.0  # fresh list of public games when the menu opens
@@ -1069,8 +1204,14 @@ func toggle_menu() -> void:
 
 
 func menu_click(p: Vector2) -> void:
+	if board_open:
+		board_click(p)
+		return
 	if RESUME_RECT.has_point(p):
 		toggle_menu()
+		return
+	if LEADERBOARD_RECT.has_point(p):
+		open_board()
 		return
 	if GRAPHICS_RECT.has_point(p):
 		graphics_high = not graphics_high
@@ -1111,14 +1252,326 @@ func menu_click(p: Vector2) -> void:
 
 
 func draw_end_screen() -> void:
-	hud.draw_rect(Rect2(0, TOP_BAR_H, SCREEN_W, BAR_TOP - TOP_BAR_H), Color(0, 0, 0, 0.6))
-	var title := "VICTORY!" if state == "won" else "GAME OVER"
-	var sub := "You survived all %d waves." % MAX_WAVE if state == "won" else "Too many monsters! You reached wave %d." % wave
-	var size := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 64)
+	var won := state == "won"
+	# Less dark when won, so the map shows under the fireworks
+	hud.draw_rect(Rect2(0, TOP_BAR_H, SCREEN_W, BAR_TOP - TOP_BAR_H), Color(0, 0, 0, 0.4 if won else 0.6))
+	var title := WIN_TEXT if won else "GAME OVER"
+	var sub := "You survived all %d waves." % MAX_WAVE if won else "Too many monsters! You reached wave %d." % wave
+	# The win text is long, so it's smaller (it fits FW_KEEP, where no fireworks burst)
+	var big := 48 if won else 64
+	var size := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, big)
 	var pos := Vector2((SCREEN_W - size.x) / 2.0, END_Y)
-	hud.draw_string_outline(title_font, pos, title, HORIZONTAL_ALIGNMENT_LEFT, -1, 64, 6, Color(0, 0, 0, 0.8))
-	hud.draw_string(title_font, pos, title, HORIZONTAL_ALIGNMENT_LEFT, -1, 64, Color(1, 0.85, 0.3) if state == "won" else Color(1, 0.35, 0.35))
+	hud.draw_string_outline(title_font, pos, title, HORIZONTAL_ALIGNMENT_LEFT, -1, big, 6, Color(0, 0, 0, 0.8))
+	hud.draw_string(title_font, pos, title, HORIZONTAL_ALIGNMENT_LEFT, -1, big, Color(1, 0.85, 0.3) if won else Color(1, 0.35, 0.35))
 	size = font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 22)
 	text(Vector2((SCREEN_W - size.x) / 2.0, END_Y + 50), sub, 22, UI_TEXT)
 	size = font.get_string_size("Press R to play again", HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
 	text(Vector2((SCREEN_W - size.x) / 2.0, END_Y + 90), "Press R to play again", 18, UI_GREY)
+
+
+# ---------------------------------------------------------------- fireworks
+
+# Silly fireworks over the win screen, drawn in 2D. Every player's game knows
+# it's won (the state comes with the host's updates), so each makes its own.
+# Sparks are one MultiMesh of glowing dots (one draw call), confetti another.
+const FW_KEEP := Rect2(230, 235, 820, 165)  # the win text: no bursts in here
+const FW_MOST := 500  # sparks at most, so it never gets too busy
+const FW_PARTY := [Color(1, 0.85, 0.35), Color(1, 0.45, 0.75), Color(0.45, 0.95, 1), Color(0.6, 1, 0.4),
+		Color(0.75, 0.5, 1), Color(1, 0.6, 0.25)]
+var fw_sparks := []  # [pos, vel, color, life, max life, drag, gravity, size]
+var fw_rockets := []  # Dictionaries: rising rockets
+var fw_confetti := []  # [pos, vel, color, life, angle, spin]
+var fw_words := []  # [pos, text, life]: "pfft"
+var fw_timer := 0.0
+var fw_glow: MultiMeshInstance2D
+var fw_paper: MultiMeshInstance2D
+
+
+# Made the first time a game is won, on top of the overlay.
+func build_fireworks() -> void:
+	var dot := GradientTexture2D.new()
+	dot.width = 32
+	dot.height = 32
+	dot.fill = GradientTexture2D.FILL_RADIAL
+	dot.fill_from = Vector2(0.5, 0.5)
+	dot.fill_to = Vector2(1.0, 0.5)
+	dot.gradient = Gradient.new()
+	dot.gradient.set_color(0, Color(1, 1, 1, 1))
+	dot.gradient.set_color(1, Color(1, 1, 1, 0))
+	dot.gradient.add_point(0.25, Color(1, 1, 1, 0.55))
+	var add := CanvasItemMaterial.new()
+	add.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+	fw_glow = fw_layer(dot, add, FW_MOST + 60)
+	fw_paper = fw_layer(null, null, 200)
+
+
+func fw_layer(tex: Texture2D, m: Material, most: int) -> MultiMeshInstance2D:
+	var quad := QuadMesh.new()
+	quad.size = Vector2.ONE
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_2D
+	mm.use_colors = true
+	mm.mesh = quad
+	mm.instance_count = most
+	mm.visible_instance_count = 0
+	var node := MultiMeshInstance2D.new()
+	node.multimesh = mm
+	node.texture = tex
+	node.material = m
+	hud.get_parent().add_child(node)
+	return node
+
+
+func update_fireworks(delta: float) -> void:
+	if state != "won":
+		# Cleared even while hidden (Esc menu or popup open), so no old sparks come back next win
+		fw_sparks.clear()
+		fw_rockets.clear()
+		fw_confetti.clear()
+		fw_words.clear()
+		if fw_glow != null and fw_glow.visible:
+			fw_glow.visible = false
+			fw_paper.visible = false
+		fw_timer = 0.3
+		return
+	if fw_glow == null:
+		build_fireworks()
+	# Not over the Esc menu or a popup
+	fw_glow.visible = not menu_open and update_dialog == ""
+	fw_paper.visible = fw_glow.visible
+	fw_timer -= delta
+	if fw_timer <= 0.0:
+		fw_timer = randf_range(0.35, 0.8)
+		if fw_sparks.size() < FW_MOST - 100:
+			if randf() < 0.1 and fw_confetti.size() < 100:
+				fw_confetti_pop()
+			else:
+				fw_launch()
+	for r: Dictionary in fw_rockets:
+		r.time += delta
+		r.pos += r.vel * delta
+		r.vel.y += 60.0 * delta
+		if r.kind == "fizzle":
+			r.pos.x += sin(r.time * 14.0) * 90.0 * delta  # wobbly
+		# A short trail of embers
+		if randf() < 0.6:
+			fw_sparks.append([r.pos, Vector2(randf_range(-15, 15), 20), Color(1, 0.6, 0.3), 0.35, 0.35, 2.0, 40.0, 6.0])
+		if r.pos.y <= r.top or r.vel.y >= 0.0:
+			fw_burst(r)
+			r.done = true
+	fw_rockets = fw_rockets.filter(func(r: Dictionary) -> bool: return not r.done)
+	var keep := []
+	for s: Array in fw_sparks:
+		s[3] -= delta
+		if s[3] <= 0.0:
+			continue
+		s[1] *= exp(-s[5] * delta)
+		s[1].y += s[6] * delta
+		s[0] += s[1] * delta
+		keep.append(s)
+	fw_sparks = keep
+	keep = []
+	for c: Array in fw_confetti:
+		c[3] -= delta
+		if c[3] <= 0.0 or c[0].y > BAR_TOP:
+			continue
+		c[1] *= exp(-1.6 * delta)
+		c[1].y += 70.0 * delta
+		c[0] += (c[1] + Vector2(sin(c[3] * 3.0 + c[5]) * 25.0, 0)) * delta
+		c[4] += c[5] * delta
+		keep.append(c)
+	fw_confetti = keep
+	for w: Array in fw_words:
+		w[2] -= delta
+		w[0].y -= 12.0 * delta
+	fw_words = fw_words.filter(func(w: Array) -> bool: return w[2] > 0.0)
+	fw_fill()
+
+
+# Hands the sparks and confetti to the two MultiMeshes in one go each.
+# Per dot: 8 numbers for its place, size and turn, then 4 for its color.
+func fw_fill() -> void:
+	var buf := PackedFloat32Array()
+	var mm := fw_glow.multimesh
+	buf.resize(mm.instance_count * 12)
+	var n := 0
+	var all := fw_sparks.duplicate()
+	for r: Dictionary in fw_rockets:
+		all.append([r.pos, r.vel, Color(1, 0.9, 0.7), 1.0, 1.0, 0.0, 0.0, 8.0])
+	for s: Array in all:
+		if n >= mm.instance_count:
+			break
+		var fade: float = s[3] / s[4]
+		var size: float = s[7]
+		var v: Vector2 = s[1]
+		var speed := v.length()
+		# Fast sparks are stretched along their flight, like a short trail
+		var x := v / speed if speed > 1.0 else Vector2.RIGHT
+		var y := Vector2(-x.y, x.x) * size
+		x *= size * (1.0 + speed * 0.03)
+		if size > 20.0:
+			x *= 1.6 - fade  # the flash grows as it fades
+			y *= 1.6 - fade
+		var c: Color = s[2]
+		var i := n * 12
+		buf[i] = x.x
+		buf[i + 1] = y.x
+		buf[i + 3] = s[0].x
+		buf[i + 4] = x.y
+		buf[i + 5] = y.y
+		buf[i + 7] = s[0].y
+		buf[i + 8] = c.r
+		buf[i + 9] = c.g
+		buf[i + 10] = c.b
+		buf[i + 11] = c.a * fade
+		n += 1
+	mm.buffer = buf
+	mm.visible_instance_count = n
+	mm = fw_paper.multimesh
+	buf = PackedFloat32Array()
+	buf.resize(mm.instance_count * 12)
+	n = 0
+	for c: Array in fw_confetti:
+		if n >= mm.instance_count:
+			break
+		# Flipping paper: thinner when seen edge-on
+		var x := Vector2.from_angle(c[4]) * 8.0
+		var y := Vector2(-x.y, x.x) * (0.1 + 0.5 * absf(sin(c[4] * 1.7)))
+		var col: Color = c[2]
+		var i := n * 12
+		buf[i] = x.x
+		buf[i + 1] = y.x
+		buf[i + 3] = c[0].x
+		buf[i + 4] = x.y
+		buf[i + 5] = y.y
+		buf[i + 7] = c[0].y
+		buf[i + 8] = col.r
+		buf[i + 9] = col.g
+		buf[i + 10] = col.b
+		buf[i + 11] = clampf(c[3], 0.0, 1.0)
+		n += 1
+	mm.buffer = buf
+	mm.visible_instance_count = n
+
+
+# Party colors and the colors of the players in the game.
+func fw_colors() -> Array:
+	var cols := FW_PARTY.duplicate()
+	for slot in MAX_PLAYERS:
+		if players[slot] != null:
+			cols.append(PLAYER_COLORS[slot].lerp(Color.WHITE, 0.2))
+	return cols
+
+
+# A rocket from the bottom of the map to a spot away from the text.
+func fw_launch() -> void:
+	# Left of the text, right of it, or above it
+	var top := Vector2(randf_range(80, FW_KEEP.position.x - 50), randf_range(TOP_BAR_H + 90, BAR_TOP - 150))
+	match randi() % 3:
+		1:
+			top.x = randf_range(FW_KEEP.end.x + 50, SCREEN_W - 80)
+		2:
+			top = Vector2(randf_range(110, SCREEN_W - 110), randf_range(TOP_BAR_H + 80, FW_KEEP.position.y - 75))
+	var kinds := ["ball", "ball", "ball", "ring", "ring", "smiley", "heart", "tower", "unicorn", "fizzle"]
+	var kind: String = kinds.pick_random()
+	var start := Vector2(top.x + randf_range(-60, 60), BAR_TOP)
+	# Fast enough to reach the top just as gravity stops it
+	var vel := Vector2((top.x - start.x) / 1.2, -sqrt(2.0 * 60.0 * (start.y - top.y)) - 30.0)
+	var cols := fw_colors()
+	fw_rockets.append({"pos": start, "vel": vel, "top": top.y, "kind": kind, "time": 0.0,
+			"color": cols.pick_random(), "color2": cols.pick_random(), "done": false})
+
+
+func fw_burst(r: Dictionary) -> void:
+	var p: Vector2 = r.pos
+	var col: Color = r.color
+	match r.kind:
+		"fizzle":
+			# Pfft: a few sad sparks and a word
+			for i in 6:
+				fw_sparks.append([p, Vector2(randf_range(-30, 30), randf_range(-30, 10)), Color(0.6, 0.6, 0.6), 0.9, 0.9, 1.0, 120.0, 6.0])
+			fw_words.append([p + Vector2(-14, -6), "pfft", 1.4])
+			return
+		"ball", "ring":
+			var n := 70
+			for i in n:
+				var a := TAU * i / n + randf() * 0.1
+				var speed := randf_range(220, 260) if r.kind == "ring" else randf_range(60, 260)
+				var c: Color = col if i % 2 == 0 or r.kind == "ring" else r.color2
+				fw_sparks.append([p, Vector2(cos(a), sin(a)) * speed, c, randf_range(1.3, 1.8), 1.8, 2.2, 45.0, 9.0])
+		_:
+			# A shape: every spark flies to its spot in the shape, hangs there, then droops
+			var pts := fw_shape(r.kind)
+			for i in pts.size():
+				var c := col
+				if r.kind == "unicorn":
+					c = Color.from_hsv(float(i) / pts.size(), 0.6, 1.0)  # rainbow, of course
+				elif r.kind == "heart":
+					c = Color(1, 0.4, 0.6)
+				fw_sparks.append([p, pts[i] * 70.0 * 3.0, c, randf_range(2.0, 2.4), 2.4, 3.0, 16.0, 9.0])
+	# A flash where it burst
+	fw_sparks.append([p, Vector2.ZERO, Color(col, 0.6), 0.25, 0.25, 0.0, 0.0, 90.0])
+
+
+# Points along a silly shape, about -1..1 in size (y down).
+func fw_shape(kind: String) -> PackedVector2Array:
+	var lines := []
+	match kind:
+		"smiley":
+			var face := PackedVector2Array()
+			for i in 25:
+				face.append(Vector2.from_angle(TAU * i / 24.0))
+			var mouth := PackedVector2Array()
+			for i in 9:
+				mouth.append(Vector2.from_angle(deg_to_rad(25 + 130 * i / 8.0)) * 0.6)
+			lines = [face, mouth, PackedVector2Array([Vector2(-0.35, -0.35), Vector2(-0.35, -0.2)]),
+					PackedVector2Array([Vector2(0.35, -0.35), Vector2(0.35, -0.2)])]
+		"heart":
+			var h := PackedVector2Array()
+			for i in 33:
+				var t := TAU * i / 32.0
+				h.append(Vector2(16 * pow(sin(t), 3), -(13 * cos(t) - 5 * cos(2 * t) - 2 * cos(3 * t) - cos(4 * t))) / 15.0)
+			lines = [h]
+		"tower":
+			# The arrow tower: walls, battlements and a door
+			lines = [PackedVector2Array([Vector2(-0.5, 1), Vector2(-0.5, -0.4), Vector2(-0.75, -0.4), Vector2(-0.75, -0.9),
+					Vector2(-0.45, -0.9), Vector2(-0.45, -0.7), Vector2(-0.15, -0.7), Vector2(-0.15, -0.9), Vector2(0.15, -0.9),
+					Vector2(0.15, -0.7), Vector2(0.45, -0.7), Vector2(0.45, -0.9), Vector2(0.75, -0.9), Vector2(0.75, -0.4),
+					Vector2(0.5, -0.4), Vector2(0.5, 1), Vector2(-0.5, 1)]),
+					PackedVector2Array([Vector2(-0.18, 1), Vector2(-0.18, 0.55), Vector2(0, 0.38), Vector2(0.18, 0.55), Vector2(0.18, 1)])]
+		"unicorn":
+			# A unicorn's head looking left, with its horn
+			lines = [PackedVector2Array([Vector2(0.65, 1), Vector2(0.6, 0.25), Vector2(0.4, -0.3), Vector2(0.38, -0.75),
+					Vector2(0.15, -0.42), Vector2(-0.15, -0.4), Vector2(-0.5, -0.05), Vector2(-0.85, 0.3), Vector2(-0.8, 0.52),
+					Vector2(-0.5, 0.55), Vector2(-0.2, 0.45), Vector2(0.0, 1)]),
+					PackedVector2Array([Vector2(-0.22, -0.42), Vector2(-0.55, -1.05), Vector2(-0.02, -0.45)]),
+					PackedVector2Array([Vector2(-0.18, -0.12), Vector2(-0.12, -0.08)])]
+	# Evenly spaced points along the lines
+	var out := PackedVector2Array()
+	for l: PackedVector2Array in lines:
+		for i in l.size() - 1:
+			var a := l[i]
+			var b := l[i + 1]
+			var steps := maxi(int(a.distance_to(b) / 0.13), 1)
+			for k in steps:
+				out.append(a.lerp(b, float(k) / steps))
+		out.append(l[l.size() - 1])
+	return out
+
+
+# Confetti popping up from a bottom corner.
+func fw_confetti_pop() -> void:
+	var left := randf() < 0.5
+	var from := Vector2(40 if left else SCREEN_W - 40, BAR_TOP)
+	var cols := fw_colors()
+	for i in 50:
+		var a := deg_to_rad(randf_range(-80, -40) if left else randf_range(-140, -100))
+		fw_confetti.append([from, Vector2.from_angle(a) * randf_range(250, 520), cols.pick_random(),
+				randf_range(3.5, 5.0), randf() * TAU, randf_range(-8, 8)])
+
+
+func draw_fireworks() -> void:
+	if state != "won":
+		return
+	for w: Array in fw_words:
+		text(w[0], w[1], 15, Color(0.85, 0.85, 0.85, clampf(w[2], 0.0, 1.0)))

@@ -455,6 +455,154 @@ func _on_games_listed(result: int, code: int, _headers: PackedStringArray, body:
 	games_status = "No public games right now. Host one and make it public!"
 
 
+# ----- leaderboard
+#
+# Everyone's best games, kept by the game server (/scores in relay/worker.js).
+# When a game on the Default map ends, the host (or a player alone) sends the
+# wave, whether it was won, the game time and every player's name, once. Game
+# time: how long the game ran from wave 1 on. Speeding up doesn't change it
+# (the monsters move faster too), calling waves early does, and pausing doesn't
+# count. The list goes by highest wave, then won before lost, then shortest time.
+
+# Each board is named after the last wave and this number: raise it after a
+# balance change, so new scores aren't mixed with ones from the old rules.
+const BOARD_SEASON := 1
+const BOARD_ROWS := 10
+
+var board_open := false  # the leaderboard box in the Esc menu
+var board_top: Array = []  # [{names, wave, won, ms}], best first
+var board_me := {}  # this player's best entry and its rank ({} if none)
+var board_status := ""
+var board_http: HTTPRequest
+var board_asked := -100.0  # when the list was last asked for, in seconds
+var run_time := 0.0  # host / alone: game seconds since wave 1 started
+var score_sent := false
+var score_http: HTTPRequest
+
+
+func board_id() -> String:
+	return "%dw-%d" % [MAX_WAVE, BOARD_SEASON]
+
+
+# Host / alone, every frame the game runs: counts the game time, and sends the
+# score once when the game is over.
+func track_score(dt: float) -> void:
+	if state == "playing":
+		# Playing again after a game that ended, or not started yet: a new game
+		if score_sent or wave == 0:
+			run_time = 0.0
+			score_sent = false
+		if wave > 0:
+			run_time += dt
+	elif not score_sent:
+		score_sent = true
+		submit_score()
+
+
+func submit_score() -> void:
+	# Only the Default map: on a map of your own the waves can be made easy
+	if relay_url == "" or map_rows_text != DEFAULT_MAP or score_http != null:
+		return
+	var names := []
+	for p in players:
+		if p != null:
+			names.append(my_name() if p.slot == local_slot else name_of(p.slot))
+	var body := JSON.stringify({"board": board_id(), "names": names, "wave": wave, "won": state == "won", "ms": int(run_time * 1000.0)})
+	score_http = HTTPRequest.new()
+	score_http.timeout = 10.0
+	add_child(score_http)
+	score_http.request_completed.connect(_on_score_sent)
+	if score_http.request(relay_url + "/scores", ["Content-Type: application/json"], HTTPClient.METHOD_POST, body) != OK:
+		score_http.queue_free()
+		score_http = null
+
+
+# Not reaching the server only means this game isn't on the list.
+func _on_score_sent(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	score_http.queue_free()
+	score_http = null
+	var r: Variant = JSON.parse_string(body.get_string_from_utf8()) if result == HTTPRequest.RESULT_SUCCESS and code == 200 else null
+	if not (r is Dictionary and r.get("best") == true and r.get("rank") is float and r.rank >= 1):
+		return
+	board_asked = -100.0  # show the new list next time
+	var text := "You're #%d on the leaderboard!" % int(r.rank)
+	if player_count() > 1:
+		text = "Your team is #%d on the leaderboard!" % int(r.rank)
+	flash(text)
+	send_all("net_message", [text])
+
+
+func open_board() -> void:
+	board_open = true
+	if Time.get_ticks_msec() / 1000.0 - board_asked > 30.0:
+		refresh_board()
+
+
+# Refresh waits a few seconds between asks.
+func can_refresh_board() -> bool:
+	return board_http == null and Time.get_ticks_msec() / 1000.0 - board_asked > 5.0
+
+
+func refresh_board() -> void:
+	if not can_refresh_board():
+		return
+	if relay_url == "":
+		board_status = "The leaderboard needs the game server, and this game only uses your network."
+		return
+	board_asked = Time.get_ticks_msec() / 1000.0
+	board_status = "Loading the leaderboard..."
+	board_http = HTTPRequest.new()
+	board_http.timeout = 8.0
+	add_child(board_http)
+	board_http.request_completed.connect(_on_board_loaded)
+	var url := relay_url + "/scores?board=%s&me=%s" % [board_id(), my_name().to_lower().uri_encode()]
+	if board_http.request(url) != OK:
+		_on_board_loaded(HTTPRequest.RESULT_CANT_CONNECT, 0, PackedStringArray(), PackedByteArray())
+
+
+func _on_board_loaded(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
+	board_http.queue_free()
+	board_http = null
+	var r: Variant = JSON.parse_string(body.get_string_from_utf8()) if result == HTTPRequest.RESULT_SUCCESS else null
+	if code == 429:
+		board_status = "The game server is busy. Try again in a minute."
+		return
+	if code != 200 or not (r is Dictionary and r.get("top") is Array):
+		board_status = "Couldn't reach the game server. Check your internet connection and try again."
+		return
+	board_top.clear()
+	for e: Variant in r.top:
+		var entry := board_entry(e)
+		if not entry.is_empty() and board_top.size() < BOARD_ROWS:
+			board_top.append(entry)
+	board_me = board_entry(r.get("me"))
+	if not board_me.is_empty():
+		board_me.rank = int(r.me.get("rank", 0)) if r.me.get("rank") is float else 0
+	board_status = "Nobody is on the leaderboard yet. Be the first!" if board_top.is_empty() else ""
+
+
+# An entry from the server, checked and cleaned like anything from the network, or {}.
+func board_entry(e: Variant) -> Dictionary:
+	if not (e is Dictionary and e.get("names") is Array and e.get("wave") is float and e.get("ms") is float):
+		return {}
+	var names: Array[String] = []
+	for n: Variant in e.names.slice(0, MAX_PLAYERS):
+		var s := clean_text(str(n), NAME_MAX)
+		if s != "":
+			names.append(s)
+	if names.is_empty():
+		return {}
+	return {"names": names, "wave": int(e.wave), "won": e.get("won") == true, "ms": maxi(int(e.ms), 0)}
+
+
+# Game time as "12:34", or "1:02:03" past an hour.
+func board_time_text(ms: int) -> String:
+	var s := int(ms / 1000.0)
+	if s >= 3600:
+		return "%d:%02d:%02d" % [int(s / 3600.0), int(s / 60.0) % 60, s % 60]
+	return "%d:%02d" % [int(s / 60.0), s % 60]
+
+
 func host_direct() -> void:
 	var peer := ENetMultiplayerPeer.new()
 	if peer.create_server(NET_PORT, MAX_PLAYERS - 1) != OK:
@@ -801,8 +949,8 @@ func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant) -
 	p.peer = peer
 	p.slot = slot
 	p.name = unique_name(their_name, slot)
-	# Joining late: some extra gold to catch up
-	p.gold = START_GOLD + wave * 20
+	# Joining late: half the gold the others could have earned by now (at least the start gold)
+	p.gold = maxi(START_GOLD, int(gold_before_wave(wave) / 2.0))
 	players[slot] = p
 	net_welcome.rpc_id(peer, slot, mine)
 	for t: Tower in towers.values():

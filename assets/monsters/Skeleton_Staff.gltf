@@ -15,12 +15,12 @@
     "nodes" : [
         {
             "mesh" : 0,
-            "name" : "building_tower_base_blue"
+            "name" : "Skeleton_Staff"
         }
     ],
     "materials" : [
         {
-            "name" : "hexagons_medieval",
+            "name" : "skeleton",
             "pbrMetallicRoughness" : {
                 "baseColorTexture" : {
                     "index" : 0
@@ -32,7 +32,7 @@
     ],
     "meshes" : [
         {
-            "name" : "building_tower_base_blue",
+            "name" : "Cylinder.004",
             "primitives" : [
                 {
                     "attributes" : {
@@ -55,69 +55,69 @@
     "images" : [
         {
             "mimeType" : "image/png",
-            "name" : "hexagons_medieval",
-            "uri" : "hexagons_medieval.png"
+            "name" : "skeleton_texture",
+            "uri" : "skeleton_texture.png"
         }
     ],
     "accessors" : [
         {
             "bufferView" : 0,
             "componentType" : 5126,
-            "count" : 2265,
+            "count" : 1879,
             "max" : [
-                0.4648962616920471,
-                1.5,
-                0.5800000429153442
+                0.14001762866973877,
+                1.255488395690918,
+                0.38485029339790344
             ],
             "min" : [
-                -0.4648962616920471,
-                0,
-                -0.5311260223388672
+                -0.4577472507953644,
+                -0.8462717533111572,
+                -0.36840343475341797
             ],
             "type" : "VEC3"
         },
         {
             "bufferView" : 1,
             "componentType" : 5126,
-            "count" : 2265,
+            "count" : 1879,
             "type" : "VEC2"
         },
         {
             "bufferView" : 2,
             "componentType" : 5126,
-            "count" : 2265,
+            "count" : 1879,
             "type" : "VEC3"
         },
         {
             "bufferView" : 3,
             "componentType" : 5123,
-            "count" : 4614,
+            "count" : 4557,
             "type" : "SCALAR"
         }
     ],
     "bufferViews" : [
         {
             "buffer" : 0,
-            "byteLength" : 27180,
+            "byteLength" : 22548,
             "byteOffset" : 0,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 18120,
-            "byteOffset" : 27180,
+            "byteLength" : 15032,
+            "byteOffset" : 22548,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 27180,
-            "byteOffset" : 45300,
+            "byteLength" : 22548,
+            "byteOffset" : 37580,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 9228,
-            "byteOffset" : 72480,
+            "byteLength" : 9114,
+            "byteOffset" : 60128,
             "target" : 34963
         }
     ],
@@ -129,8 +129,8 @@
     ],
     "buffers" : [
         {
-            "byteLength" : 81708,
-            "uri" : "building_tower_base_blue.bin"
+            "byteLength" : 69244,
+            "uri" : "Skeleton_Staff.bin"
         }
     ]
 }

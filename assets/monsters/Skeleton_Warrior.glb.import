@@ -3,13 +3,13 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://be4oj0fg5w8kk"
-path="res://.godot/imported/flag_blue.gltf-b080e52e5e0ad19edaaeb6d956b9a25a.scn"
+uid="uid://b1hm75dfjuefx"
+path="res://.godot/imported/Skeleton_Warrior.glb-915f9fe6d6b377e21c3831b736208787.scn"
 
 [deps]
 
-source_file="res://assets/towers/flag_blue.gltf"
-dest_files=["res://.godot/imported/flag_blue.gltf-b080e52e5e0ad19edaaeb6d956b9a25a.scn"]
+source_file="res://assets/monsters/Skeleton_Warrior.glb"
+dest_files=["res://.godot/imported/Skeleton_Warrior.glb-915f9fe6d6b377e21c3831b736208787.scn"]
 
 [params]
 
@@ -41,5 +41,5 @@ materials/extract_format=0
 materials/extract_path=""
 _subresources={}
 gltf/naming_version=2
-gltf/embedded_image_handling=1
+gltf/embedded_image_handling=0
 gltf/texture_map_mode=1

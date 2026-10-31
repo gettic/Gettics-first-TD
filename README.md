@@ -10,11 +10,11 @@ The code for this game was written by Claude. Gettic came up with the ideas, mad
 
 ![Screenshot of the game](screenshot.png)
 
-Monsters come out of a green portal in a stone gate at a corner of the map, walk onto a square path and walk around it clockwise, forever, until your towers kill them. Build towers on the grass, upgrade them, and don't let too many monsters pile up: if 50 are alive at the same time, you lose. Survive all 30 waves to win.
+Monsters come out of a green portal in a stone gate at a corner of the map, walk onto a square path and walk around it clockwise, forever, until your towers kill them. Build towers on the grass, upgrade them, and don't let too many monsters pile up: if 50 are alive at the same time, you lose. Survive all 300 waves to win.
 
 Play alone or with up to 4 players: each player gets their own gate at a corner of the square (see [Multiplayer](#multiplayer)). Or draw your own maps in the [Map editor](#map-editor).
 
-The 3D world is built mostly from simple shapes in code, plus a few free CC0 models from the KayKit packs by Kay Lousberg and painted CC0 grass and dirt textures by Cethiel (see [assets/CREDITS.md](assets/CREDITS.md)). The logo and the game icon are by Gettic. The game has no sound files.
+The 3D world is built mostly from simple shapes in code, plus free CC0 models from the KayKit packs by Kay Lousberg (trees, rocks and the skeleton monsters with their walk animations) and painted CC0 grass and dirt textures by Cethiel (see [assets/CREDITS.md](assets/CREDITS.md)). The Arrow tower model, the logo and the game icon are by Gettic. The game has no sound files.
 
 ## Download
 
@@ -48,16 +48,16 @@ godot --path path/to/this/folder
 | **W A S D** | Move the camera |
 | **Scroll wheel** | Zoom in and out |
 | **Space** | Start the game / send the next wave early (bonus gold, once the current wave has fully spawned; in multiplayer it's a vote, press again to take it back) |
-| **F** | Change game speed (1×, 2×, 3×; in multiplayer only the host can) |
+| **F** | Change game speed (1×, 2×, 3×, 5×; in multiplayer only the host can) |
 | **Y** / **N** | Say yes or no when another player asks to build in your area |
 | **Enter** | Chat: type a message and press **Enter** to send it (**Esc** cancels). Game keys are off while you type |
 | **Right-click** | Cancel |
-| **Esc** | Menu: pause / continue, open the **Map editor**, host or join a multiplayer game, and switch graphics between High and Low (Low is faster on older PCs; PCs with built-in graphics start on Low) |
+| **Esc** | Menu: pause / continue, see the **Leaderboard**, open the **Map editor**, host or join a multiplayer game, and switch graphics between High and Low (Low is faster on older PCs; PCs with built-in graphics start on Low) |
 | **R** | Restart after winning or losing |
 
 ## Towers
 
-Each tower has 4 levels.
+Towers can be upgraded up to level 60. Above level 4 a tower keeps its level-4 look and shows a small "Lv" badge, and big numbers are shortened (240k, 1.2M). From level 5 on, every level adds 28-36% damage (a bit different for each level and tower), and every 5th level (5, 10, 15...) is a big one with 62-70%. Range, fire rate, splash, slow and chain also grow a little, up to a limit. Each upgrade costs 38% more than the last (80% more for the big levels), so very high levels get too expensive to reach.
 
 | Tower | Cost | What it does |
 |---|---|---|
@@ -68,14 +68,19 @@ Each tower has 4 levels.
 
 ## Waves
 
-- **30 waves.** Monsters get tougher every wave.
+- **300 waves.** Monsters get tougher every wave: health grows fast up to wave 25, then by 2.5% a wave. Each gate sends one more monster per wave, up to 32.
 - Press **Space** to start. After that, a new wave comes every **25 seconds**, whether you're ready or not.
-- Press **Space** to send the next wave early and get **1 bonus gold for every second** you skip. You can only do this once every monster of the current wave has spawned.
-- Every **3rd** wave is **armored**: armor reduces the damage of each hit.
+- Press **Space** to send the next wave early and get **bonus gold for every second** you skip (the wave's gold spread over 25 seconds, at least 1 a second). You can only do this once every monster of the current wave has spawned.
+- Every **3rd** wave is **armored**: armor reduces the damage of each hit, and it grows with the monsters' health.
 - Every **5th** wave is **fast**.
-- Every **10th** wave is a **boss**. A boss counts as 5 monsters toward the limit.
+- Every **10th** wave is a **boss** wave (up to 5 bosses). A boss counts as 5 monsters toward the limit.
+- The monsters: wave 1 is **unicorns**, after that normal monsters are skeleton minions, armored ones are skeleton warriors with shields, fast ones are bone spiders and bosses are big skeleton mages. Health bars show once a monster is hurt.
 
-You start with 150 gold. You earn gold for each kill and a bonus at the start of each wave. The console at the bottom shows how many monsters are alive: you lose if it reaches **50** (per player, see below). You win when all 30 waves are out and every monster is dead.
+You start with 150 gold. You earn gold for each kill and a bonus at the start of each wave; both grow with the monsters' health (playing alone, kills pay about 15% more later on). The console at the bottom shows how many monsters are alive: you lose if it reaches **50** (per player, see below). You win when all 300 waves are out and every monster is dead (there are fireworks).
+
+## Leaderboard
+
+The **Leaderboard** button in the Esc menu shows the online top 10 for the Default map: the highest wave first, then won before lost, then the shortest game time. Each team (the same player names) has one entry, its best game. When a game on the Default map ends, the host sends the team's names, wave, result and game time to the game server, and nothing else. Custom maps don't count.
 
 ## Map editor
 
@@ -141,13 +146,15 @@ The game code is split into a few files, each building on the one before:
 
 Good places to start:
 
-- `TOWERS` in `game_base.gd` sets each tower's cost, damage, range and fire rate.
+- `TOWER_BASE` in `game_base.gd` sets each tower's cost, damage, range and fire rate for levels 1-4. `LEVEL_GAIN`, `LEVEL_COST` and the other `LEVEL_` values set how the levels after that grow (`make_towers()` works them out).
+- `GAME_SPEEDS` in `game_base.gd` are the speeds the **F** button goes through.
+- `wave_hp()`, `wave_count()`, `wave_income()` and `wave_bounty()` in `game_base.gd` set each wave's monster health, how many come out of each gate, the wave gold and the gold per kill.
 - `START_GOLD`, `MAX_ALIVE`, `WAVE_INTERVAL` and `MAX_WAVE` set the starting gold, the monster limit (per player), the time between waves and the number of waves.
 - `EARLY_VOTE` sets the share of players (0.75 = 75%) who must agree to send a wave early in multiplayer.
 - `DEFAULT_MAP` in `game_base.gd` is the map, one letter per tile: `.` grass, `#` path, `1`-`4` a player's gate, `r` rock, `t` tree, `w` water (nothing can be built on these). `read_map()` checks it: the path must be one closed loop, one tile wide, and each gate must stand at the end of its own road to the loop. Monsters walk from their gate to the loop and then around it clockwise. Each player's area is the part of the map nearest to where their gate's road joins the loop.
 - `PLAYER_COLORS` and `PLAYER_NAMES` set each player's color and its name (used when a player has no name), and `SILLY_NAMES` is the list of random names for players who leave the name box empty.
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.
-- `start_wave()` in `main.gd` controls how much health enemies get each wave, and how many come out of each gate.
+- `start_wave()` and `spawn_enemy()` in `main.gd` start each wave and give each monster kind its health, armor and gold.
 - `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting and the ground (painted grass and dirt, see `assets/shaders/ground.gdshader`). `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Model files (like the Arrow tower's) are in `assets/`, with their sources in `assets/CREDITS.md`.
 - `RELAY_URL` in `game_base.gd` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used for games on your own network.
 - `GAME_FOLDER` and `GAME_NAME` in `game_base.gd` set the names of the folder and files the downloaded `.exe` unpacks into.

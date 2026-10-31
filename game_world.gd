@@ -103,6 +103,7 @@ func build_world() -> void:
 	range_disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	build_markers_and_hud()
 	build_map()
+	build_monsters()  # at the start, so the first wave doesn't stutter
 
 
 const VIEW_TILES := Vector2(24, 18)  # the map size the camera's normal distance is made for
@@ -214,6 +215,9 @@ func apply_graphics() -> void:
 	# The ground's normal maps (light catching the painted bumps) only on High
 	for m in ground_mats:
 		m.set_shader_parameter("use_normals", high and not compat)
+	# Monsters cast shadows only on High (hundreds of them can be walking)
+	for e in enemies:
+		e.node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if high else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
 
 func load_settings() -> void:
@@ -457,13 +461,15 @@ func build_tower_node(t: Tower) -> void:
 	var root := Node3D.new()
 	root.position = to3d(t.pos)
 	add_child(root)
+	# Levels after 4 keep the level 4 look (the level shows on a badge, see draw_level_badges())
+	var look := mini(t.level, 3)
 	if t.type == "arrow" or t.type == "cannon":
 		var model_head: Node3D
 		if t.type == "arrow":
-			model_head = build_arrow_tower(root, t.level, t.owner)
+			model_head = build_arrow_tower(root, look, t.owner)
 		else:
-			model_head = build_cannon_tower(root, t.level, t.owner)
-		add_pips(root, t.level, Vector3(0, 0.06, 0.44))
+			model_head = build_cannon_tower(root, look, t.owner)
+		add_pips(root, look, Vector3(0, 0.06, 0.44))
 		t.node = root
 		t.head = model_head
 		return
@@ -472,7 +478,7 @@ func build_tower_node(t: Tower) -> void:
 	base.size = Vector3(0.8, 0.3, 0.8)
 	add_mesh(root, base, mat(stone_mat.albedo_color.lerp(PLAYER_COLORS[t.owner], 0.45)), Vector3(0, 0.15, 0))
 	# The tower gets taller with each level
-	var h := 0.35 + t.level * 0.2
+	var h := 0.35 + look * 0.2
 	var body := CylinderMesh.new()
 	body.top_radius = 0.2
 	body.bottom_radius = 0.28
@@ -502,7 +508,7 @@ func build_tower_node(t: Tower) -> void:
 			ring.inner_radius = 0.26
 			ring.outer_radius = 0.31
 			add_mesh(head, ring, dark_mat, Vector3(0, 0.1, 0)).rotation_degrees.x = 60
-	add_pips(root, t.level, Vector3(0, 0.32, 0.36))
+	add_pips(root, look, Vector3(0, 0.32, 0.36))
 	t.node = root
 	t.head = head
 
@@ -533,113 +539,128 @@ var model_meshes := {}  # merged tower meshes by name
 var model_mats := {}  # their materials by color
 
 
-# Arrow tower: the KayKit stone towers (Kay Lousberg, CC0, see assets/CREDITS.md).
-# Level 1 is the open tower with a crossbow on top, level 2 tower_A and levels
-# 3 and 4 the bigger tower_B, with the crossbow out on the balcony (two at level 4),
-# their roofs made lower and smaller (low_roof()). The crossbows turn to aim (their
-# front is -Z), going round the balcony. The roof, banners and flag show the owner's color.
-const PACK_SCALE := 0.65  # the pack is made for bigger hexagon tiles
-const PACK_MUTE := 0.4  # how much the owner color and orange trim are toned down (0-1)
-const ARROW_MODELS := ["tower_base", "tower_A", "tower_B", "tower_B"]
-const ARROW_HEAD_Y := [1.38, 1.5, 1.5, 1.5]  # where the crossbows sit, in pack units
-const ARROW_REACH := [0.0, 0.5, 0.62, 0.62]  # how far out on the balcony
+# Arrow tower: Gettic's archer tower (made by Gettic with an AI tool, see
+# assets/CREDITS.md), loaded once and shared by every arrow tower. The roof tiles,
+# the archer's cape, the banners and the flag show the owner's color. The archer
+# stands on the hoarding under the roof and walks round it to aim (the head turns,
+# its front is -Z). Levels: 2 adds two flag poles on the tile's front corners,
+# 3 four poles and a second archer, 4 three archers, lighter stone and glowing gold.
+const ARROW_FILE := "res://assets/towers/arrow/arrow_tower.glb"
+const ARROW_SCALE := 0.21  # the model is about 3.5 units wide, a tile is 1
+const ARROW_BOW_Y := 4.17  # where the archer's bow is, in model units (feet 3.3 + 0.87)
+const ARROW_REACH := 0.72  # how far out from the middle the archer stands
+const ARROW_ARCHERS := [1, 1, 2, 3]
+const ARROW_POLES := [0, 2, 4, 4]
+const ARROW_CORNERS := [Vector3(-1.8, 0, 1.8), Vector3(1.8, 0, 1.8), Vector3(-1.8, 0, -1.8), Vector3(1.8, 0, -1.8)]
+var arrow_parts := {}  # "Tower", "Archer", "Banner" -> [[mesh, transform], ...]
+var arrow_mats := {}  # recolored copies of the model's materials, by name, owner and level
 var pack_meshes := {}  # pack model -> [[mesh, transform], ...], loaded once
 var pack_mats := {}  # shared pack materials by texture and owner
 var pack_shader: Shader
 
 
 func build_arrow_tower(root: Node3D, level: int, slot: int) -> Node3D:
+	if arrow_parts.is_empty():
+		var scene: Node = load(ARROW_FILE).instantiate()
+		for n in ["Tower", "Archer", "Banner"]:
+			var parts := []
+			var found: Node3D = scene.find_child(n, true, false)
+			# The archer is placed by the code, the others keep their place
+			var tr: Transform3D = found.transform.affine_inverse() if n == "Archer" else Transform3D.IDENTITY
+			collect_meshes(found, tr, parts)
+			arrow_parts[n] = parts
+		scene.free()
 	var model := Node3D.new()
-	model.scale = Vector3.ONE * PACK_SCALE * (1.08 if level == 3 else 1.0)
+	model.scale = Vector3.ONE * ARROW_SCALE
 	root.add_child(model)
-	var shape := low_roof if level > 0 else Callable()
-	add_pack_model(model, "towers/building_%s_blue" % ARROW_MODELS[level], slot, shape)
-	if level == 0:
-		# The open tower only has small banners, so a flag shows whose it is
-		var flag := Node3D.new()
-		flag.position = Vector3(0.3, 1.45, 0.2)
-		flag.scale = Vector3.ONE * 1.8
-		model.add_child(flag)
-		add_pack_model(flag, "towers/flag_blue", slot)
+	add_arrow_part(model, "Tower", slot, level)
+	add_arrow_part(model, "Banner", slot, level)
 	var head := Node3D.new()
-	head.position = Vector3(0, ARROW_HEAD_Y[level], 0)
-	model.add_child(head)
-	var spots := [Vector3(0, 0, -ARROW_REACH[level])]
-	if level == 3:
-		spots = [Vector3(-0.3, 0, -0.55), Vector3(0.3, 0, -0.55)]
-	for p: Vector3 in spots:
-		var bow := Node3D.new()
-		bow.position = p + (Vector3(0, 0.2, 0.3) if level == 0 else Vector3(0, 0.12, 0))
-		bow.rotation_degrees.y = 180.0  # the pack's crossbow points at +Z
-		bow.scale = Vector3.ONE * 0.5
-		head.add_child(bow)
-		add_pack_model(bow, "towers/Skeleton_Crossbow", 0)
+	head.position = Vector3(0, ARROW_BOW_Y * ARROW_SCALE, 0)
+	root.add_child(head)
+	var n: int = ARROW_ARCHERS[level]
+	for i in n:
+		# More archers stand side by side round the hoarding
+		var turn := Node3D.new()
+		turn.scale = Vector3.ONE * ARROW_SCALE
+		turn.rotation.y = (i - (n - 1) / 2.0) * 0.75
+		head.add_child(turn)
+		var man := Node3D.new()
+		man.position = Vector3(0, 3.3 - ARROW_BOW_Y, -ARROW_REACH)
+		man.rotation_degrees.y = 180.0  # the model's archer looks at +Z
+		turn.add_child(man)
+		add_arrow_part(man, "Archer", slot, level)
+	if ARROW_POLES[level] > 0 and not model_meshes.has("arrow pole"):
+		var pole := CylinderMesh.new()
+		pole.top_radius = 0.06
+		pole.bottom_radius = 0.09
+		pole.height = 4.4
+		pole.radial_segments = 6
+		pole.rings = 1
+		model_meshes["arrow pole"] = pole
+	for i in ARROW_POLES[level]:
+		var c: Vector3 = ARROW_CORNERS[i]
+		add_mesh(model, model_meshes["arrow pole"], model_mat(DW_WOOD_DARK), c + Vector3(0, 2.2, 0))
+		var flag := Node3D.new()
+		flag.position = c + Vector3(0, 4.35, 0)
+		flag.rotation_degrees.y = 0.0 if c.x < 0 else 180.0  # the flags fly inward
+		flag.scale = Vector3.ONE * 1.3
+		model.add_child(flag)
+		add_arrow_part(flag, "Banner", slot, level, true)
 	return head
 
 
-# A lower, smaller roof for levels 2-4: everything above the walls is pulled in
-# to 75% and the roof gets 35% of its height (the flagpole on top moves down with it).
-func low_roof(t: Array) -> bool:
-	for k in 3:
-		var p: Vector3 = t[k]
-		if p.y > 1.7:
-			var y := 1.7 + (minf(p.y, 2.3) - 1.7) * 0.35 + maxf(p.y - 2.3, 0.0)
-			t[k] = Vector3(p.x * 0.75, y, p.z * 0.75)
-	return true
+# Adds one part of the arrow tower model under parent, with the owner's colors.
+# at_parent puts it at parent's origin instead of its place in the model.
+func add_arrow_part(parent: Node3D, part: String, slot: int, level: int, at_parent := false) -> void:
+	for p: Array in arrow_parts[part]:
+		var mesh: Mesh = p[0]
+		var mi := MeshInstance3D.new()
+		mi.mesh = mesh
+		mi.transform = p[1]
+		if at_parent:
+			mi.transform.origin = Vector3.ZERO
+		parent.add_child(mi)
+		for s in mesh.get_surface_count():
+			var m := arrow_mat(mesh.surface_get_material(s), slot, level)
+			if m != null:
+				mi.set_surface_override_material(s, m)
 
 
-# Adds a pack model's meshes under parent in the owner's color. The meshes are
-# loaded once and shared by every model like it. shape, if given, changes them
-# once when loaded (see remake_mesh()).
-func add_pack_model(parent: Node3D, file: String, slot: int, shape := Callable()) -> void:
-	for part: Array in pack_parts(file, shape):
-		var mi := add_mesh(parent, part[0], pack_mat(part[0], slot))
-		mi.transform = part[1]
+# The model's own material (null), or a shared copy: the roof, cape and flags in the
+# owner's color, and at level 4 lighter stone and glowing gold.
+func arrow_mat(m: Material, slot: int, level: int) -> Material:
+	var name := m.resource_name
+	var team := name == "TeamColor" or name == "RoofTiles"
+	var top := level == 3 and (name.begins_with("Stone") or name == "Gold")
+	if not (team or top):
+		return null
+	var key := "%s %d %d" % [name, slot, level if top else 0]
+	if not arrow_mats.has(key):
+		var c: StandardMaterial3D = m.duplicate()
+		if team:
+			var col: Color = PLAYER_COLORS[slot]
+			# The roof a little greyer, so it doesn't outshine the map
+			c.albedo_color = col.lerp(Color(0.5, 0.5, 0.5), 0.25) if name == "RoofTiles" else col
+		elif name == "Gold":
+			c.emission_enabled = true
+			c.emission = Color(1.0, 0.75, 0.3)
+			c.emission_energy_multiplier = 0.8
+		else:
+			c.albedo_color = Color(1.25, 1.2, 1.1)
+		arrow_mats[key] = c
+	return arrow_mats[key]
 
 
-# A pack model's meshes, [[mesh, transform], ...], loaded once.
-func pack_parts(file: String, shape := Callable()) -> Array:
-	var key := file if shape.is_null() else "%s %s" % [file, shape.get_method()]
-	if not pack_meshes.has(key):
+# A pack model's meshes (rocks and trees), [[mesh, transform], ...], loaded once.
+func pack_parts(file: String) -> Array:
+	if not pack_meshes.has(file):
 		var parts := []
 		var scene: Node = load("res://assets/%s.gltf" % file).instantiate()
 		collect_meshes(scene, Transform3D.IDENTITY, parts)
 		scene.free()
-		if not shape.is_null():
-			for part: Array in parts:
-				part[0] = remake_mesh(part[0], shape)
-		pack_meshes[key] = parts
-	return pack_meshes[key]
-
-
-# Rebuilds a pack mesh triangle by triangle: shape gets [a, b, c, uv_a, uv_b, uv_c]
-# (pack units), can change them, and returns false to drop the triangle.
-# Moved triangles get flat normals.
-func remake_mesh(mesh: Mesh, shape: Callable) -> ArrayMesh:
-	var arr := mesh.surface_get_arrays(0)
-	var v: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
-	var n: PackedVector3Array = arr[Mesh.ARRAY_NORMAL]
-	var uv: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV]
-	var idx: PackedInt32Array = arr[Mesh.ARRAY_INDEX]
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-	for i in range(0, idx.size(), 3):
-		var c := [idx[i], idx[i + 1], idx[i + 2]]
-		var t := [v[c[0]], v[c[1]], v[c[2]], uv[c[0]], uv[c[1]], uv[c[2]]]
-		if not shape.call(t):
-			continue
-		var moved: bool = t[0] != v[c[0]] or t[1] != v[c[1]] or t[2] != v[c[2]]
-		var face: Vector3 = (t[1] - t[0]).cross(t[2] - t[0]).normalized()
-		if face.dot(n[c[0]] + n[c[1]] + n[c[2]]) < 0.0:
-			face = -face
-		for k in 3:
-			st.set_normal(face if moved else n[c[k]])
-			st.set_uv(t[3 + k])
-			st.add_vertex(t[k])
-	st.index()
-	var out := st.commit()
-	out.surface_set_material(0, mesh.surface_get_material(0))
-	return out
+		pack_meshes[file] = parts
+	return pack_meshes[file]
 
 
 func collect_meshes(n: Node, tr: Transform3D, out: Array) -> void:
@@ -663,9 +684,6 @@ func pack_mat(mesh: Mesh, slot: int) -> ShaderMaterial:
 		m.shader = pack_shader
 		m.set_shader_parameter("palette", tex)
 		m.set_shader_parameter("team", float(slot))
-		# Only the buildings' palette gets toned down, not the crossbow's texture
-		if tex.resource_path.contains("hexagons"):
-			m.set_shader_parameter("mute", PACK_MUTE)
 		pack_mats[key] = m
 	return pack_mats[key]
 
@@ -884,11 +902,23 @@ func update_visuals(delta: float) -> void:
 		for part in gate_parts[g].values():
 			part.visible = in_use
 		gate_parts[g]["sparks"].rotation.z += delta * 2.0
+	var turn := minf(1.0, delta * 12.0)
 	for e in enemies:
-		var r := e.radius / CELL
-		e.node.position = to3d(e.pos, -0.08 + r + absf(sin(time * 8.0 + e.bob)) * 0.06)
-		# Slowed monsters use their kind's icy material
-		var m: Material = enemy_mats[e.kind][1] if e.slow_time > 0.0 else e.mat
+		var mob: Array = e.node.get_meta("mob")
+		# Turn toward the way it walks (not on a jump, like a new monster's first move)
+		var p := to3d(e.pos)
+		var d := p - e.node.position
+		var moved := d.x * d.x + d.z * d.z
+		if moved > 1e-7 and moved < 1.0:
+			e.node.rotation.y = lerp_angle(e.node.rotation.y, atan2(d.x, d.z), turn)
+		e.node.position = p
+		# The walk pose for this moment; bob puts each monster at its own point in the step
+		var poses: Array = mob[0]
+		var mesh: Mesh = poses[int((time / mob[2] + e.bob) * poses.size()) % poses.size()]
+		if e.node.mesh != mesh:
+			e.node.mesh = mesh
+		# Slowed monsters use their look's icy material
+		var m: Material = mob[1][1] if e.slow_time > 0.0 else mob[1][0]
 		if e.node.material_override != m:
 			e.node.material_override = m
 	for t: Tower in towers.values():
@@ -947,8 +977,6 @@ func show_range(p: Vector2, rng: float) -> void:
 	range_disc.scale = Vector3(s, 1, s)
 
 
-var enemy_meshes := {}  # monster kind -> its ball
-var enemy_mats := {}  # monster kind -> [normal, slowed] material
 var shot_meshes := {}  # tower type -> its shot's ball
 
 
@@ -969,30 +997,265 @@ func make_enemy(kind: String) -> Enemy:
 			e.weight = 5
 			e.color = Color(0.9, 0.15, 0.15)
 
-	var r := e.radius / CELL
-	# The ball and its two materials (normal and slowed) are shared by every monster of a kind
-	if not enemy_meshes.has(kind):
-		var ball := SphereMesh.new()
-		ball.radius = r
-		ball.height = r * 2.0
-		ball.radial_segments = 32
-		ball.rings = 16
-		enemy_meshes[kind] = ball
-		var mats := [mat(e.color), mat(e.color.lerp(Color(0.55, 0.9, 1.0), 0.55))]
-		if kind == "armored":
-			for m: StandardMaterial3D in mats:
-				m.metallic = 0.8
-				m.roughness = 0.3
-		enemy_mats[kind] = mats
-	e.mat = enemy_mats[kind][0]
-	e.node = add_mesh(self, enemy_meshes[kind], e.mat, to3d(e.pos, r))
-	if kind == "boss":
-		var crown := TorusMesh.new()
-		crown.inner_radius = 0.1
-		crown.outer_radius = 0.17
-		add_mesh(e.node, crown, gold_mat, Vector3(0, r * 0.95, 0))
-	e.bob = randf() * TAU
+	build_monsters()
+	var look: String = MONSTER_LOOKS[kind]
+	if kind == "normal" and wave <= 1:
+		look = "unicorn"
+	var mob: Array = mobs[look]
+	e.mat = mob[1][0]
+	e.node = add_mesh(self, mob[0][0], e.mat, to3d(e.pos))
+	e.node.set_meta("mob", mob)
+	if not graphics_high:
+		e.node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	e.bob = randf()
 	return e
+
+
+# ---------------------------------------------------------------- monster models
+
+# Monster kind -> its look. Skeletons are KayKit models (assets/monsters), the
+# others are built from simple shapes here.
+const MONSTER_LOOKS := {"normal": "minion", "armored": "warrior", "fast": "spider", "boss": "mage"}
+const SKELETON_SIZE := 0.31  # KayKit skeletons are about 2.2 tall: about 0.7 in the game
+const MOB_WHITE := Color(0.97, 0.96, 1.0)
+const RAINBOW := [Color(1.0, 0.55, 0.7), Color(1.0, 0.72, 0.4), Color(1.0, 0.93, 0.45), Color(0.55, 0.9, 0.6), Color(0.5, 0.75, 1.0), Color(0.75, 0.55, 1.0)]
+
+# Look -> [walk poses (one shared mesh each), [normal, slowed] material, seconds per step, height]
+var mobs := {}
+var walk_anims: AnimationLibrary
+var mob_ball: SphereMesh
+var mob_rod: CylinderMesh
+var mob_cone: CylinderMesh
+
+
+# Walking monsters stay cheap: each look's walk is posed a few times once, and
+# every monster just shows the pose for its moment in the step. Monsters with
+# the same pose share one mesh, so Godot draws them together.
+func build_monsters() -> void:
+	if not mobs.is_empty():
+		return
+	walk_anims = load("res://assets/monsters/monster_walks.res")
+	add_skeleton("minion", "Skeleton_Minion", "Walking_A", SKELETON_SIZE, [], Color.WHITE)
+	add_skeleton("warrior", "Skeleton_Warrior", "Walking_B", SKELETON_SIZE * 1.1,
+			[["Skeleton_Shield_Large_A", "handslot.l"], ["Skeleton_Axe", "handslot.r"]], Color(0.85, 0.9, 1.0))
+	add_skeleton("mage", "Skeleton_Mage", "Walking_C", SKELETON_SIZE * 1.8,
+			[["Skeleton_Staff", "handslot.r"]], Color(1.0, 0.75, 0.75))
+	mob_ball = SphereMesh.new()
+	mob_ball.radius = 0.5
+	mob_ball.height = 1.0
+	mob_ball.radial_segments = 12
+	mob_ball.rings = 6
+	mob_rod = CylinderMesh.new()
+	mob_rod.top_radius = 0.5
+	mob_rod.bottom_radius = 0.5
+	mob_rod.height = 1.0
+	mob_rod.radial_segments = 8
+	mob_rod.rings = 1
+	mob_cone = mob_rod.duplicate()
+	mob_cone.top_radius = 0.0
+	add_creature("unicorn", unicorn_pose, 0.7)
+	add_creature("spider", spider_pose, 0.35)
+
+
+# The two materials of a look: normal, and icy for slowed monsters
+func mob_mats(base: StandardMaterial3D) -> Array:
+	base.rim_enabled = true
+	base.rim = 0.4
+	var icy := base.duplicate() as StandardMaterial3D
+	icy.albedo_color = base.albedo_color * Color(0.6, 0.85, 1.3)
+	return [base, icy]
+
+
+# One mesh from the collected parts, with simpler versions for far away
+func pose_mesh(parts: Dictionary) -> ArrayMesh:
+	var a := []
+	a.resize(Mesh.ARRAY_MAX)
+	a[Mesh.ARRAY_VERTEX] = parts.v
+	a[Mesh.ARRAY_NORMAL] = parts.n
+	a[Mesh.ARRAY_TEX_UV] = parts.uv
+	a[Mesh.ARRAY_COLOR] = parts.c
+	a[Mesh.ARRAY_INDEX] = parts.i
+	var im := ImporterMesh.new()
+	im.add_surface(Mesh.PRIMITIVE_TRIANGLES, a)
+	im.generate_lods(25.0, 60.0, [])
+	return im.get_mesh()
+
+
+func new_parts() -> Dictionary:
+	return {"v": PackedVector3Array(), "n": PackedVector3Array(), "uv": PackedVector2Array(), "c": PackedColorArray(), "i": PackedInt32Array()}
+
+
+# Adds mesh to parts, moved by xf and colored col
+func add_part(parts: Dictionary, mesh: Mesh, xf: Transform3D, col := Color.WHITE) -> void:
+	var nb := xf.basis.inverse().transposed()
+	for s in mesh.get_surface_count():
+		var a := mesh.surface_get_arrays(s)
+		var base: int = parts.v.size()
+		var vs: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+		var ns: PackedVector3Array = a[Mesh.ARRAY_NORMAL]
+		var uvs = a[Mesh.ARRAY_TEX_UV]
+		for k in vs.size():
+			parts.v.append(xf * vs[k])
+			parts.n.append((nb * ns[k]).normalized())
+			parts.uv.append(uvs[k] if uvs != null else Vector2.ZERO)
+			parts.c.append(col)
+		for k: int in a[Mesh.ARRAY_INDEX]:
+			parts.i.append(base + k)
+
+
+# A KayKit skeleton walking: 16 poses of its walk, with weapons on the hand bones
+func add_skeleton(look: String, file: String, walk: String, size: float, weapons: Array, tint: Color) -> void:
+	var root: Node3D = load("res://assets/monsters/%s.glb" % file).instantiate()
+	add_child(root)
+	var skel: Skeleton3D = root.find_child("Skeleton3D")
+	var player := AnimationPlayer.new()
+	root.add_child(player)
+	player.add_animation_library("", walk_anims)
+	var anim := walk_anims.get_animation(walk)
+	var held := []
+	for w in weapons:
+		var scene: Node = load("res://assets/monsters/%s.gltf" % w[0]).instantiate()
+		for c in scene.get_children():
+			if c is MeshInstance3D:
+				held.append([c.mesh, c.transform, skel.find_bone(w[1])])
+		scene.free()
+	var top := Transform3D(Basis.from_scale(Vector3.ONE * size), Vector3.ZERO)
+	var base_mat: StandardMaterial3D
+	var poses := []
+	player.play(walk)
+	for f in 16:
+		player.seek(anim.length * f / 16.0, true)
+		var parts := new_parts()
+		for c in skel.get_children():
+			if c is MeshInstance3D:
+				if base_mat == null:
+					base_mat = c.get_active_material(0)
+				add_skinned(parts, c, skel, top)
+			elif c is BoneAttachment3D:
+				var bone := skel.find_bone(c.bone_name)
+				for m in c.get_children():
+					if m is MeshInstance3D:
+						add_part(parts, m.mesh, top * skel.get_bone_global_pose(bone) * m.transform)
+		for h in held:
+			add_part(parts, h[0], top * skel.get_bone_global_pose(h[2]) * h[1])
+		poses.append(pose_mesh(parts))
+	root.free()
+	var m := base_mat.duplicate() as StandardMaterial3D
+	# The .glb files' own copies of the texture aren't imported: all share this one
+	m.albedo_texture = load("res://assets/monsters/skeleton_texture.png")
+	m.albedo_color = tint
+	mobs[look] = [poses, mob_mats(m), anim.length, poses[0].get_aabb().end.y]
+
+
+# Adds a skinned mesh in the skeleton's current pose (the skinning is done here, once)
+func add_skinned(parts: Dictionary, mi: MeshInstance3D, skel: Skeleton3D, top: Transform3D) -> void:
+	var skin := mi.skin
+	var bind := []
+	for b in skin.get_bind_count():
+		var bone := skin.get_bind_bone(b)
+		if bone < 0:
+			bone = skel.find_bone(skin.get_bind_name(b))
+		bind.append(skel.get_bone_global_pose(bone) * skin.get_bind_pose(b))
+	for s in mi.mesh.get_surface_count():
+		var a := mi.mesh.surface_get_arrays(s)
+		var vs: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+		var ns: PackedVector3Array = a[Mesh.ARRAY_NORMAL]
+		var uvs: PackedVector2Array = a[Mesh.ARRAY_TEX_UV]
+		var bones: PackedInt32Array = a[Mesh.ARRAY_BONES]
+		var ws: PackedFloat32Array = a[Mesh.ARRAY_WEIGHTS]
+		var per := bones.size() / vs.size()
+		var base: int = parts.v.size()
+		for k in vs.size():
+			var v := Vector3.ZERO
+			var n := Vector3.ZERO
+			for j in per:
+				var w := ws[k * per + j]
+				if w > 0.0:
+					var t: Transform3D = bind[bones[k * per + j]]
+					v += (t * vs[k]) * w
+					n += (t.basis * ns[k]) * w
+			parts.v.append(top * v)
+			parts.n.append((top.basis * n).normalized())
+			parts.uv.append(uvs[k])
+			parts.c.append(Color.WHITE)
+		for k: int in a[Mesh.ARRAY_INDEX]:
+			parts.i.append(base + k)
+
+
+# A creature built from shapes: 8 poses of its walk, colored per part
+func add_creature(look: String, pose: Callable, step: float) -> void:
+	var poses := []
+	for f in 8:
+		var parts := new_parts()
+		pose.call(parts, TAU * f / 8.0)
+		poses.append(pose_mesh(parts))
+	var m := StandardMaterial3D.new()
+	m.vertex_color_use_as_albedo = true
+	m.vertex_color_is_srgb = true
+	m.roughness = 0.6
+	mobs[look] = [poses, mob_mats(m), step, poses[0].get_aabb().end.y]
+
+
+func shape(parts: Dictionary, mesh: Mesh, pos: Vector3, size: Vector3, col: Color, rot := Vector3.ZERO) -> void:
+	add_part(parts, mesh, Transform3D(Basis.from_euler(rot) * Basis.from_scale(size), pos), col)
+
+
+# A rod from a to b
+func rod(parts: Dictionary, a: Vector3, b: Vector3, r: float, col: Color) -> void:
+	var dir := b - a
+	var q := Quaternion(Vector3.UP, dir.normalized())
+	add_part(parts, mob_rod, Transform3D(Basis(q) * Basis.from_scale(Vector3(r * 2, dir.length(), r * 2)), (a + b) * 0.5), col)
+
+
+# Wave 1: a cute white unicorn with a golden horn and a rainbow mane, trotting
+func unicorn_pose(parts: Dictionary, ph: float) -> void:
+	var s := 1.3
+	var up := Vector3(0, absf(sin(ph)) * 0.03, 0)
+	for leg in [[-1, 1, 0.0], [1, -1, 0.0], [1, 1, PI], [-1, -1, PI]]:
+		var swing := sin(ph + leg[2]) * 0.55
+		var hip := Vector3(leg[0] * 0.08, 0.2, leg[1] * 0.12) * s
+		var foot := hip + Basis(Vector3.RIGHT, swing) * Vector3(0, -0.17 * s, 0)
+		rod(parts, hip + up, foot, 0.045 * s, MOB_WHITE)
+		shape(parts, mob_rod, foot + Vector3(0, 0.015, 0), Vector3(0.1, 0.04, 0.1) * s, Color(0.95, 0.75, 0.9))
+	shape(parts, mob_ball, Vector3(0, 0.26, -0.01) * s + up, Vector3(0.26, 0.24, 0.36) * s, MOB_WHITE)
+	shape(parts, mob_ball, Vector3(0, 0.38, 0.13) * s + up, Vector3(0.14, 0.18, 0.14) * s, MOB_WHITE)
+	shape(parts, mob_ball, Vector3(0, 0.5, 0.2) * s + up, Vector3(0.24, 0.22, 0.24) * s, MOB_WHITE)
+	shape(parts, mob_ball, Vector3(0, 0.46, 0.31) * s + up, Vector3(0.15, 0.12, 0.11) * s, Color(1.0, 0.82, 0.88))
+	for x in [-1, 1]:
+		shape(parts, mob_ball, Vector3(x * 0.085, 0.53, 0.29) * s + up, Vector3(0.055, 0.065, 0.04) * s, Color(0.12, 0.08, 0.2))
+		shape(parts, mob_ball, Vector3(x * 0.095, 0.55, 0.305) * s + up, Vector3(0.02, 0.02, 0.015) * s, Color.WHITE)
+		shape(parts, mob_cone, Vector3(x * 0.075, 0.63, 0.15) * s + up, Vector3(0.05, 0.09, 0.035) * s, MOB_WHITE, Vector3(-0.2, 0, -x * 0.35))
+		shape(parts, mob_ball, Vector3(x * 0.1, 0.475, 0.29) * s + up, Vector3(0.04, 0.025, 0.02) * s, Color(1.0, 0.6, 0.7))
+	shape(parts, mob_cone, Vector3(0, 0.67, 0.25) * s + up, Vector3(0.055, 0.2, 0.055) * s, Color(1.0, 0.82, 0.3), Vector3(0.4, 0, 0))
+	for i in 6:
+		var k := i / 5.0
+		shape(parts, mob_ball, Vector3(0, lerpf(0.64, 0.32, k), lerpf(0.14, -0.05, k)) * s + up, Vector3.ONE * 0.1 * s, RAINBOW[i])
+	for i in 5:
+		var sway := sin(ph - i * 0.7) * 0.025 * i
+		shape(parts, mob_ball, Vector3(sway, 0.31 - i * 0.04, -0.33 - i * 0.035) * s + up, Vector3.ONE * (0.1 - i * 0.01) * s, RAINBOW[i])
+
+
+# Fast monsters: a bone spider scuttling on 8 legs
+func spider_pose(parts: Dictionary, ph: float) -> void:
+	var s := 1.3
+	var bone := Color(0.92, 0.88, 0.78)
+	var dark := Color(0.35, 0.22, 0.4)
+	var up := Vector3(0, absf(sin(ph * 2.0)) * 0.015, 0)
+	shape(parts, mob_ball, Vector3(0, 0.2, -0.12) * s + up, Vector3(0.28, 0.22, 0.32) * s, bone)
+	shape(parts, mob_ball, Vector3(0, 0.28, -0.12) * s + up, Vector3(0.16, 0.08, 0.2) * s, dark)
+	shape(parts, mob_ball, Vector3(0, 0.17, 0.09) * s + up, Vector3(0.17, 0.14, 0.17) * s, bone)
+	for x in [-1, 1]:
+		shape(parts, mob_ball, Vector3(x * 0.04, 0.2, 0.17) * s + up, Vector3.ONE * 0.05 * s, Color(1.0, 0.15, 0.1))
+		shape(parts, mob_cone, Vector3(x * 0.035, 0.1, 0.19) * s + up, Vector3(0.03, 0.08, 0.03) * s, dark, Vector3(PI * 0.85, 0, 0))
+		for i in 4:
+			var p := ph + (PI if (i + (x + 1) / 2) % 2 == 0 else 0.0)
+			var lift := maxf(0.0, sin(p)) * 0.06
+			var hip := Vector3(x * 0.07, 0.18, 0.08 - i * 0.065) * s + up
+			var b := Basis(Vector3.UP, cos(p) * 0.3 * x + (i - 1.5) * -0.5 * x)
+			var knee := hip + b * Vector3(x * 0.17, 0.14 + lift, 0) * s
+			var foot := hip + b * Vector3(x * 0.32, -0.18 + lift, 0) * s
+			rod(parts, hip, knee, 0.024 * s, dark)
+			rod(parts, knee, foot, 0.018 * s, bone)
 
 
 # A shot flying from tower t to the target. A visual shot is the other players'

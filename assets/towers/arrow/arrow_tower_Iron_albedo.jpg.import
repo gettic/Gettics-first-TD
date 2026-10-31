@@ -2,20 +2,23 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://b5i4gutkyecep"
-path="res://.godot/imported/hexagons_medieval.png-da8dd3699438232fe99dcad36bf37613.ctex"
+uid="uid://dkcfs2dbtbqop"
+path="res://.godot/imported/arrow_tower_Iron_albedo.jpg-3ebc5af1c51812f030900c4fbd71a2bf.ctex"
 metadata={
 "vram_texture": false
+}
+generator_parameters={
+"md5": "f800a8311448b1db2ed99997a323361a"
 }
 
 [deps]
 
-source_file="res://assets/towers/hexagons_medieval.png"
-dest_files=["res://.godot/imported/hexagons_medieval.png-da8dd3699438232fe99dcad36bf37613.ctex"]
+source_file="res://assets/towers/arrow/arrow_tower_Iron_albedo.jpg"
+dest_files=["res://.godot/imported/arrow_tower_Iron_albedo.jpg-3ebc5af1c51812f030900c4fbd71a2bf.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=1
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -23,7 +26,7 @@ compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=false
+mipmaps/generate=true
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""

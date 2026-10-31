@@ -288,15 +288,6 @@ func draw_join_box() -> void:
 	button(JOIN_NO, "Cancel")
 
 
-# s, cut short with "..." if it's wider than width.
-func fit_text(s: String, width: float, size: int) -> String:
-	if font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x <= width:
-		return s
-	while s.length() > 1 and font.get_string_size(s + "...", HORIZONTAL_ALIGNMENT_LEFT, -1, size).x > width:
-		s = s.left(-1)
-	return s + "..."
-
-
 func join_box_click(p: Vector2) -> void:
 	if map_offer.accepted:
 		if JOIN_NO.has_point(p):
@@ -659,6 +650,8 @@ func draw_menu() -> void:
 		centered(ED_ASK_RECT.position.y + 84, "This ends the game you're playing.", 16, UI_TEXT)
 		button(ED_ASK_YES_RECT, "Open the editor", true, true)
 		button(ED_ASK_NO_RECT, "Keep playing")
+	if board_open:
+		draw_board()
 
 
 func menu_click(p: Vector2) -> void:
@@ -671,6 +664,9 @@ func menu_click(p: Vector2) -> void:
 			if not ed_changed:
 				menu_open = false
 			ed_leave()
+		return
+	if board_open:
+		super(p)  # the leaderboard box gets the click
 		return
 	if ed_ask_open:
 		if ED_ASK_YES_RECT.has_point(p):

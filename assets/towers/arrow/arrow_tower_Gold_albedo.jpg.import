@@ -2,20 +2,23 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://dflyd2mhxiiio"
-path="res://.godot/imported/skeleton_texture.png-b51f1ae10a83afa234ef9477eeae6328.ctex"
+uid="uid://1vwg5ycil8xl"
+path="res://.godot/imported/arrow_tower_Gold_albedo.jpg-2469fa0df3705bc204858dce1547a251.ctex"
 metadata={
 "vram_texture": false
+}
+generator_parameters={
+"md5": "38139a00ccbbd50797b20b7bb842ba58"
 }
 
 [deps]
 
-source_file="res://assets/towers/skeleton_texture.png"
-dest_files=["res://.godot/imported/skeleton_texture.png-b51f1ae10a83afa234ef9477eeae6328.ctex"]
+source_file="res://assets/towers/arrow/arrow_tower_Gold_albedo.jpg"
+dest_files=["res://.godot/imported/arrow_tower_Gold_albedo.jpg-2469fa0df3705bc204858dce1547a251.ctex"]
 
 [params]
 
-compress/mode=0
+compress/mode=1
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -23,7 +26,7 @@ compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=false
+mipmaps/generate=true
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""

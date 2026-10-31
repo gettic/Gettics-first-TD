@@ -49,29 +49,29 @@ func play_alone() -> void:
 # ---------------------------------------------------------------- waves
 
 # Starts the next wave. Called by the wave timer, or early by the player (Space),
-# which gives 1 bonus gold for every second skipped.
+# which gives bonus gold for every second skipped: the wave's income spread over
+# WAVE_INTERVAL (at least 1 gold a second).
 func start_wave() -> void:
 	if state != "playing" or wave >= MAX_WAVE:
 		return
-	var early_bonus := int(maxf(next_wave_timer, 0.0)) if wave > 0 else 0
+	var skipped := int(maxf(next_wave_timer, 0.0)) if wave > 0 else 0
 	wave += 1
 	wave_votes.clear()
-	var income := 10 + wave * 2
+	var income := wave_income(wave)
+	var early_bonus := skipped * maxi(1, int(income / WAVE_INTERVAL))
 	# Every player gets the wave income, and every player's gate sends a full wave
 	for p in players:
 		if p != null:
 			p.gold += income + early_bonus
-	var text := "Wave %d! +%d gold" % [wave, income]
+	var text := "Wave %d! +%s gold" % [wave, short(income)]
 	if early_bonus > 0:
-		text = "Wave %d! +%d gold (+%d for calling early)" % [wave, income, early_bonus]
+		text = "Wave %d! +%s gold (+%s for calling early)" % [wave, short(income), short(early_bonus)]
 	flash(text)
 	send_all("net_message", [text])
 	next_wave_timer = WAVE_INTERVAL
-	spawn_hp = 25.0 * pow(1.17, wave - 1)
+	spawn_hp = wave_hp(wave)
 	var kind := kind_for_wave(wave)
-	var count := 8 + wave
-	if kind == "boss":
-		count = 1 + int(wave / 10.0)
+	var count := wave_count(wave)
 	for g in MAX_PLAYERS:
 		if players[g] != null:
 			for i in count:
@@ -118,18 +118,19 @@ func spawn_enemy(kind: String, g: int) -> void:
 	e.loop_wp = loop_starts[g]
 	e.pos = e.route[0]
 	e.max_hp = spawn_hp
-	e.bounty = 2 + int(wave / 4.0)
+	e.bounty = wave_bounty(wave)
 	match kind:
 		"fast":
 			e.max_hp *= 0.6
 			e.speed *= 1.7
 		"armored":
 			e.max_hp *= 1.3
-			e.armor = 2.0 + wave * 0.6
+			# Later on, armor grows with the monsters' health
+			e.armor = maxf(2.0 + mini(wave, 30) * 0.6, spawn_hp * 0.0085)
 		"boss":
 			e.max_hp *= 15.0
 			e.speed *= 0.7
-			e.bounty = 40 + wave * 4
+			e.bounty = 40 + e.bounty * 12
 			e.weight = 5
 	e.hp = e.max_hp
 	enemies.append(e)
@@ -141,7 +142,7 @@ func spawn_enemy(kind: String, g: int) -> void:
 func _process(delta: float) -> void:
 	if debug_log:
 		update_log_window()
-	code_input.visible = menu_open and net_mode == "" and not editing and not ed_ask_open and not pick_open
+	code_input.visible = menu_open and net_mode == "" and not editing and not ed_ask_open and not pick_open and not board_open
 	name_input.visible = code_input.visible
 	if net_mode == "searching":
 		update_search(delta)
@@ -192,6 +193,8 @@ func _process(delta: float) -> void:
 			state = "lost"
 		elif wave >= MAX_WAVE and monsters_left_to_spawn() == 0 and enemies.is_empty():
 			state = "won"
+	if net_mode != "client":
+		track_score(dt)
 	if net_mode == "host":
 		snapshot_timer -= delta
 		if snapshot_timer <= 0.0:
@@ -279,7 +282,8 @@ func update_towers(dt: float) -> void:
 		if target == null:
 			continue
 		t.aim = (target.pos - t.pos).normalized()
-		t.cooldown = data["cooldown"][t.level]
+		# Keeps the time it was late by (up to one frame), so fast speeds don't slow towers down
+		t.cooldown = data["cooldown"][t.level] + maxf(t.cooldown, -dt)
 		if t.type == "spark":
 			fire_lightning(t, target)
 		else:
@@ -578,7 +582,7 @@ func perform(slot: int, action: String, args: Array) -> String:
 		"speed":
 			if slot != local_slot:
 				return "Only the host can change the speed"
-			game_speed = game_speed % 3 + 1
+			game_speed = GAME_SPEEDS[(GAME_SPEEDS.find(game_speed) + 1) % GAME_SPEEDS.size()]
 		"restart":
 			if state != "playing":
 				new_game()
@@ -688,7 +692,7 @@ func upgrade_tower(slot: int, c: Vector2i) -> String:
 		return ""
 	if t.owner != slot:
 		return "That's %s's tower" % name_of(t.owner)
-	if t.level >= 3:
+	if t.level >= MAX_LEVEL - 1:
 		return "Already max level"
 	var cost: int = TOWERS[t.type]["cost"][t.level + 1]
 	if players[slot].gold < cost:

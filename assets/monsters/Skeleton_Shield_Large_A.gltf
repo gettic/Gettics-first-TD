@@ -15,12 +15,12 @@
     "nodes" : [
         {
             "mesh" : 0,
-            "name" : "flag_blue"
+            "name" : "Skeleton_Shield_Large_A"
         }
     ],
     "materials" : [
         {
-            "name" : "hexagons_medieval",
+            "name" : "skeleton",
             "pbrMetallicRoughness" : {
                 "baseColorTexture" : {
                     "index" : 0
@@ -32,7 +32,7 @@
     ],
     "meshes" : [
         {
-            "name" : "flag_blue",
+            "name" : "Cylinder.001",
             "primitives" : [
                 {
                     "attributes" : {
@@ -55,69 +55,69 @@
     "images" : [
         {
             "mimeType" : "image/png",
-            "name" : "hexagons_medieval",
-            "uri" : "hexagons_medieval.png"
+            "name" : "skeleton_texture",
+            "uri" : "skeleton_texture.png"
         }
     ],
     "accessors" : [
         {
             "bufferView" : 0,
             "componentType" : 5126,
-            "count" : 68,
+            "count" : 923,
             "max" : [
-                0.027875661849975586,
-                0.27747058868408203,
-                0.02191011607646942
+                0.4408198893070221,
+                0.5674780011177063,
+                0.1931430995464325
             ],
             "min" : [
-                -0.027133483439683914,
-                0,
-                -0.24206775426864624
+                -0.43632492423057556,
+                -0.5675097703933716,
+                -0.16934584081172943
             ],
             "type" : "VEC3"
         },
         {
             "bufferView" : 1,
             "componentType" : 5126,
-            "count" : 68,
+            "count" : 923,
             "type" : "VEC2"
         },
         {
             "bufferView" : 2,
             "componentType" : 5126,
-            "count" : 68,
+            "count" : 923,
             "type" : "VEC3"
         },
         {
             "bufferView" : 3,
             "componentType" : 5123,
-            "count" : 144,
+            "count" : 1878,
             "type" : "SCALAR"
         }
     ],
     "bufferViews" : [
         {
             "buffer" : 0,
-            "byteLength" : 816,
+            "byteLength" : 11076,
             "byteOffset" : 0,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 544,
-            "byteOffset" : 816,
+            "byteLength" : 7384,
+            "byteOffset" : 11076,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 816,
-            "byteOffset" : 1360,
+            "byteLength" : 11076,
+            "byteOffset" : 18460,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 288,
-            "byteOffset" : 2176,
+            "byteLength" : 3756,
+            "byteOffset" : 29536,
             "target" : 34963
         }
     ],
@@ -129,8 +129,8 @@
     ],
     "buffers" : [
         {
-            "byteLength" : 2464,
-            "uri" : "flag_blue.bin"
+            "byteLength" : 33292,
+            "uri" : "Skeleton_Shield_Large_A.bin"
         }
     ]
 }
