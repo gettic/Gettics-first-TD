@@ -22,7 +22,7 @@ The 3D world is built mostly from simple shapes in code, plus free CC0 models fr
 
 The first time it runs, the game warns you and then unpacks itself into a new **Gettic's first TD** folder next to the download (or click **Choose another folder...** to unpack it straight into a folder you pick), with two files named with the version, for example `Gettic's first TD v1.16.exe` (the Godot engine) and `Gettic's first TD v1.16.pck` (the game itself). The downloaded file is deleted afterwards. From then on, start the game from that folder. When the game updates, both files are renamed to the new version.
 
-When the game starts, it checks GitHub for a newer version. If one is out, a **New version – Update** button appears at the top of the screen. Click it to see what's new and update with one click: the game downloads the new version and restarts by itself. Usually only the small game file needs to be downloaded; the engine is only downloaded again when it changed.
+When the game starts, it checks GitHub for a newer version. If one is out, a **New version – Update** button appears at the top of the screen. Click it to see what's new in every version since yours (scroll if it's long) and update with one click: the game downloads the new version and restarts by itself. Usually only the small game file needs to be downloaded; the engine is only downloaded again when it changed.
 
 ## Run from source
 
@@ -80,7 +80,7 @@ You start with 150 gold. You earn gold for each kill and a bonus at the start of
 
 ## Leaderboard
 
-The **Leaderboard** button in the Esc menu shows the online top 10 for the Default map: the highest wave first, then won before lost, then the shortest game time. Each team (the same player names) has one entry, its best game. When a game on the Default map ends, the host sends the team's names, wave, result and game time to the game server, and nothing else. Custom maps don't count.
+The **Leaderboard** button in the Esc menu shows the online top 10 for the Default map: the highest wave first, then won before lost, then the shortest game time. Each team (the same player names) has one entry, its best game. When a game on the Default map ends, the host sends the team's names and how the game went (wave, result, game time) to the game server. Only the released game sends scores: test runs and debug builds never do. Custom maps don't count.
 
 ## Map editor
 

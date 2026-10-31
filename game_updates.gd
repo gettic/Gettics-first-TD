@@ -1,6 +1,14 @@
 extends "res://game_base.gd"
 ## The debug log window, checking for and installing updates, and unpacking.
 
+# The update check reads the last releases, to show what's new since this version
+const RELEASES_PAGE := 30
+const RELEASES_LIST_API := "https://api.github.com/repos/gettic/Gettics-first-TD/releases?per_page=%d" % RELEASES_PAGE
+const NOTES_MOST := 20  # versions shown in the update popup, newest first
+
+var update_changes: Array = []  # [tag, "What's new"] of each newer version, newest first
+var update_more := false  # there are older updates than the ones in update_changes
+
 
 # Catches every error, warning and print in the debug build, for the log window.
 # Godot may call it from other threads, so lines wait in a list until the game takes them.
@@ -149,7 +157,7 @@ func check_for_update() -> void:
 	http.timeout = 10.0
 	add_child(http)
 	http.request_completed.connect(_on_update_checked.bind(http))
-	if http.request(RELEASES_API, ["User-Agent: GetticsFirstTD", "Accept: application/vnd.github+json"]) != OK:
+	if http.request(RELEASES_LIST_API, ["User-Agent: GetticsFirstTD", "Accept: application/vnd.github+json"]) != OK:
 		http.queue_free()
 
 
@@ -158,28 +166,49 @@ func _on_update_checked(result: int, code: int, _headers: PackedStringArray, bod
 	# No internet or GitHub not answering: just play without the update check.
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
 		return
-	var data = JSON.parse_string(body.get_string_from_utf8())
-	if not data is Dictionary:
+	var list = JSON.parse_string(body.get_string_from_utf8())
+	if not list is Array:
 		return
-	var tag := str(data.get("tag_name", ""))
-	if is_newer(tag, version):
-		update_version = tag
-		update_url = str(data.get("html_url", ""))
+	read_releases(list)
+
+
+# Finds the releases newer than this version: the newest one is the update,
+# and all of their "What's new" go in the popup, newest first.
+func read_releases(list: Array) -> void:
+	var newer: Array = []
+	for data in list:
+		if not data is Dictionary or data.get("draft", false) or data.get("prerelease", false):
+			continue
+		if is_newer(str(data.get("tag_name", "")), version):
+			newer.append(data)
+	if newer.is_empty():
+		return
+	newer.sort_custom(func(a, b): return is_newer(str(a["tag_name"]), str(b["tag_name"])))
+	# Too many to show: the newest ones, and a note about the rest. A full
+	# page means there may be even older ones GitHub didn't send.
+	update_changes = []
+	for data in newer.slice(0, NOTES_MOST):
 		var notes = data.get("body")
-		update_notes = clean_notes(notes if notes is String else "")
-		var assets = data.get("assets")
-		if assets is Array:
-			for asset in assets:
-				if not asset is Dictionary:
-					continue
-				var name := str(asset.get("name", ""))
-				var url := str(asset.get("browser_download_url", ""))
-				if name.ends_with("-windows.zip"):
-					update_zip_url = url
-				elif name.ends_with(".exe"):
-					update_exe_url = url
-				elif name.ends_with("-godot-%s.pck" % engine_tag()):
-					update_pck_url = url  # just the game, for this same engine
+		update_changes.append([str(data["tag_name"]), clean_notes(notes if notes is String else "")])
+	update_more = newer.size() > NOTES_MOST or (newer.size() == list.size() and list.size() >= RELEASES_PAGE)
+	# The download is the newest release's files, as before
+	var newest: Dictionary = newer[0]
+	update_version = str(newest["tag_name"])
+	update_url = str(newest.get("html_url", ""))
+	update_notes = update_changes[0][1]
+	var assets = newest.get("assets")
+	if assets is Array:
+		for asset in assets:
+			if not asset is Dictionary:
+				continue
+			var name := str(asset.get("name", ""))
+			var url := str(asset.get("browser_download_url", ""))
+			if name.ends_with("-windows.zip"):
+				update_zip_url = url
+			elif name.ends_with(".exe"):
+				update_exe_url = url
+			elif name.ends_with("-godot-%s.pck" % engine_tag()):
+				update_pck_url = url  # just the game, for this same engine
 
 
 # Keeps only the "What's new" part of the release notes and removes Markdown symbols.

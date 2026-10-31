@@ -16,11 +16,25 @@ const BOARD_REFRESH_RECT := Rect2(360, 606, 170, 40)
 const BOARD_BACK_RECT := Rect2(750, 606, 170, 40)
 const BOARD_ROW_H := 34
 
+# The update popup's "What's new" box, which scrolls when the notes don't fit
+const NOTES_RECT := Rect2(364, 244, 552, 208)
+const NOTES_PAD := 14.0  # space between the box's edge and the text
+const NOTES_BAR_W := 8.0
+const NOTES_STEP := 50.0  # pixels per mouse wheel notch or arrow key
+
 var title_font: Font  # big titles; the normal font unless a style says otherwise
 var map_hud: Node2D  # 2D layer under the console: health bars, lightning, area labels
 var console_layer: Node2D  # the console's stone, drawn once (and again when the map changes)
 var portrait_view: SubViewport  # a close-up of the selected tower, shown in the console
 var portrait_cam: Camera3D
+var notes_clip: Control  # cuts the update notes off at their box's edges
+var notes_layer: Node2D  # the update notes, drawn inside notes_clip
+var notes_lines: Array = []  # the notes laid out once: [y, x, width, text, size, color]
+var notes_for := ""  # which notes notes_lines was laid out for
+var notes_height := 0.0
+var notes_scroll := 0.0
+var notes_target := 0.0  # where the notes glide to
+var notes_drag := -1.0  # where the mouse holds the scrollbar's handle, or -1
 
 # ---------------------------------------------------------------- 2D overlay
 
@@ -49,6 +63,17 @@ func build_hud() -> void:
 	hud = Node2D.new()
 	layer.add_child(hud)
 	hud.draw.connect(draw_hud)
+	# The update notes go on top of the popup, cut off at their box
+	notes_clip = Control.new()
+	notes_clip.position = NOTES_RECT.position + Vector2(2, 2)
+	notes_clip.size = NOTES_RECT.size - Vector2(4, 4)
+	notes_clip.clip_contents = true
+	notes_clip.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	notes_clip.visible = false
+	layer.add_child(notes_clip)
+	notes_layer = Node2D.new()
+	notes_clip.add_child(notes_layer)
+	notes_layer.draw.connect(draw_on.bind(notes_layer, draw_notes))
 
 	# Text boxes: the invite code and the player's name in the Esc menu, and the chat
 	code_input = text_box(layer, JOIN_INPUT_RECT, "Invite code", 40, 18)
@@ -132,6 +157,7 @@ func update_visuals(delta: float) -> void:
 	super(delta)
 	update_fireworks(delta)
 	map_hud.queue_redraw()
+	update_notes_box()
 	if selected == null:
 		portrait_view.render_target_update_mode = SubViewport.UPDATE_DISABLED
 		return
@@ -300,12 +326,14 @@ func draw_update_dialog() -> void:
 		draw_unpack_dialog()
 		return
 	ui_title(Rect2(d.position.x, d.position.y, d.size.x, 66), Vector2(left, d.position.y + 46), "New version %s is out!" % update_version, 28)
-	text(Vector2(left, d.position.y + 90), "You have v%s" % version, 15, UI_DIM)
+	var mine := "You have v%s" % version
+	if update_dialog != "ask":
+		text(Vector2(left, d.position.y + 90), mine, 15, UI_DIM)
 	match update_dialog:
 		"ask":
-			text(Vector2(left, d.position.y + 126), "What's new", 18, UI_GOLD_LIGHT)
-			var notes := update_notes if update_notes != "" else "No details for this update."
-			hud.draw_multiline_string(font, Vector2(left, d.position.y + 154), notes, HORIZONTAL_ALIGNMENT_LEFT, d.size.x - 60, 16, 9, UI_TEXT)
+			text(Vector2(left, d.position.y + 94), "What's new", 18, UI_GOLD_LIGHT)
+			hud.draw_string(font, Vector2(d.end.x - 30 - 300, d.position.y + 94), mine, HORIZONTAL_ALIGNMENT_RIGHT, 300, 15, UI_DIM)
+			draw_notes_box()
 			text(Vector2(left, DIALOG_YES_RECT.position.y - 20), "Do you want to update now?", 18, UI_TEXT)
 			button(DIALOG_YES_RECT, "Yes, update", true, true)
 			button(DIALOG_NO_RECT, "No, not now")
@@ -322,6 +350,176 @@ func draw_update_dialog() -> void:
 			text(Vector2(left, d.position.y + 260), "You can download it from GitHub instead.", 16, UI_GREY)
 			button(DIALOG_YES_RECT, "Open download page", true, true)
 			button(DIALOG_NO_RECT, "Close")
+
+
+# ---- The update popup's "What's new" box
+
+# The sunken box and, when the notes don't fit, a scrollbar. The notes
+# themselves are drawn on notes_layer (draw_notes), cut off at the box.
+func draw_notes_box() -> void:
+	recess(NOTES_RECT)
+	if notes_max() <= 0.0:
+		return
+	var track := notes_track()
+	hud.draw_rect(track, Color(0, 0, 0, 0.55))
+	hud.draw_rect(track.grow(1), Color(0.3, 0.22, 0.1, 0.8), false, 1.0)
+	var thumb := notes_thumb()
+	var grabbed := notes_drag >= 0.0 or thumb.has_point(get_viewport().get_mouse_position())
+	vgrad(thumb, UI_GOLD_LIGHT if grabbed else UI_GOLD, UI_GOLD_DARK)
+	bevel(thumb, 1, UI_GOLD_LIGHT, Color(0.2, 0.13, 0.05))
+
+
+# Every newer version's notes, newest first, each under its version number.
+func draw_notes() -> void:
+	layout_notes()
+	var top := -roundf(notes_scroll)
+	for l: Array in notes_lines:
+		var y: float = l[0] + top
+		if y > notes_clip.size.y + 40.0 or y + 200.0 < 0.0:
+			continue
+		var s: String = l[3]
+		if s == "-":
+			# The thin gold line next to a version number
+			ui_divider(l[1], l[1] + l[2], y)
+		elif s == "•":
+			var c := Vector2(l[1], y)
+			quad(PackedVector2Array([c + Vector2(0, -3.5), c + Vector2(3.5, 0), c + Vector2(0, 3.5), c + Vector2(-3.5, 0)]), UI_GOLD)
+		else:
+			hud.draw_multiline_string(font, Vector2(l[1], y), s, HORIZONTAL_ALIGNMENT_LEFT, l[2], l[4], -1, l[5])
+	# Soft edges where more text is hidden above or below
+	var w := notes_clip.size.x
+	var h := notes_clip.size.y
+	var shade := Color(0.05, 0.05, 0.055)
+	if notes_scroll > 1.0:
+		vgrad(Rect2(0, 0, w, 18), shade, Color(shade, 0.0))
+	if notes_scroll < notes_max() - 1.0:
+		vgrad(Rect2(0, h - 18, w, 18), Color(shade, 0.0), shade)
+
+
+# Works out where every line of the notes goes, once per set of notes.
+func layout_notes() -> void:
+	var key := update_version + str(update_changes.size()) + str(update_more)
+	if key == notes_for:
+		return
+	notes_for = key
+	notes_lines = []
+	var x := NOTES_PAD
+	var width := notes_clip.size.x - NOTES_PAD * 2.0 - NOTES_BAR_W - 6.0
+	var y := 10.0
+	var changes := update_changes
+	if changes.is_empty():
+		changes = [[update_version, update_notes]]
+	for c: Array in changes:
+		# The version number, with a gold line after it
+		var tag := "v" + str(c[0]).trim_prefix("v")
+		y += font.get_ascent(18)
+		notes_lines.append([y, x, 0.0, tag, 18, UI_GOLD_LIGHT])
+		var after := x + font.get_string_size(tag, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x + 10.0
+		notes_lines.append([y - 6.0, after, x + width - after, "-", 0, UI_GOLD])
+		y += font.get_descent(18) + 6.0
+		var notes: String = c[1] if c[1] != "" else "No details for this update."
+		for line in notes.split("\n"):
+			# Bullets hang: the dot sits out on the left, the text lines up after it
+			var indent := 0.0
+			if line.begins_with("•"):
+				line = line.trim_prefix("•").strip_edges()
+				indent = 16.0
+				notes_lines.append([y + font.get_ascent(15) * 0.6, x + 5.0, 0.0, "•", 0, UI_GOLD])
+			var size := font.get_multiline_string_size(line, HORIZONTAL_ALIGNMENT_LEFT, width - indent, 15)
+			notes_lines.append([y + font.get_ascent(15), x + indent, width - indent, line, 15, UI_TEXT])
+			y += size.y + 4.0
+		y += 12.0
+	if update_more:
+		y += font.get_ascent(15)
+		notes_lines.append([y, x, width, "...and older updates (see all on GitHub)", 15, UI_DIM])
+		y += font.get_descent(15) + 8.0
+	notes_height = y
+
+
+# How far the notes can scroll (0 when they fit).
+func notes_max() -> float:
+	return maxf(notes_height - notes_clip.size.y, 0.0)
+
+
+func notes_track() -> Rect2:
+	return Rect2(NOTES_RECT.end.x - NOTES_BAR_W - 8, NOTES_RECT.position.y + 8, NOTES_BAR_W, NOTES_RECT.size.y - 16)
+
+
+func notes_thumb() -> Rect2:
+	var track := notes_track()
+	var h := maxf(track.size.y * notes_clip.size.y / maxf(notes_height, 1.0), 24.0)
+	var y := track.position.y + (track.size.y - h) * (notes_scroll / maxf(notes_max(), 1.0))
+	return Rect2(track.position.x, y, track.size.x, h)
+
+
+# Every frame: shows the notes with the popup and glides them to where they're scrolled.
+func update_notes_box() -> void:
+	var open := update_dialog == "ask"
+	if open and not notes_clip.visible:
+		notes_scroll = 0.0
+		notes_target = 0.0
+	notes_clip.visible = open
+	if not open:
+		notes_drag = -1.0
+		return
+	layout_notes()
+	notes_target = clampf(notes_target, 0.0, notes_max())
+	notes_scroll = lerpf(notes_scroll, notes_target, minf(get_process_delta_time() * 16.0, 1.0))
+	if absf(notes_scroll - notes_target) < 0.5:
+		notes_scroll = notes_target
+	notes_layer.queue_redraw()
+
+
+# Scrolling the notes: mouse wheel, arrow keys, Page Up/Down, Home/End, or the scrollbar.
+func _input(event: InputEvent) -> void:
+	if update_dialog != "ask" or notes_max() <= 0.0:
+		return
+	var max_y := notes_max()
+	var page := notes_clip.size.y - 40.0
+	var target := notes_target
+	if event is InputEventMouseButton and event.pressed:
+		var p := get_viewport().get_mouse_position()
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			target -= NOTES_STEP
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			target += NOTES_STEP
+		elif event.button_index == MOUSE_BUTTON_LEFT and notes_track().grow_individual(4, 0, 4, 0).has_point(p):
+			# Grab the handle where it was clicked, or jump it to the click
+			var thumb := notes_thumb()
+			notes_drag = p.y - thumb.position.y if thumb.has_point(p) else thumb.size.y / 2.0
+			drag_notes(p.y)
+			get_viewport().set_input_as_handled()
+			return
+		else:
+			return
+	elif event is InputEventMouseButton and not event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+		notes_drag = -1.0
+		return
+	elif event is InputEventMouseMotion and notes_drag >= 0.0:
+		drag_notes(get_viewport().get_mouse_position().y)
+		return
+	elif event is InputEventKey and event.pressed:
+		match event.keycode:
+			KEY_UP: target -= NOTES_STEP
+			KEY_DOWN: target += NOTES_STEP
+			KEY_PAGEUP: target -= page
+			KEY_PAGEDOWN: target += page
+			KEY_HOME: target = 0.0
+			KEY_END: target = max_y
+			_: return
+	else:
+		return
+	notes_target = clampf(target, 0.0, max_y)
+	get_viewport().set_input_as_handled()
+
+
+# Moves the notes so the scrollbar's handle sits under the mouse.
+func drag_notes(mouse_y: float) -> void:
+	var track := notes_track()
+	var room := track.size.y - notes_thumb().size.y
+	var f := clampf((mouse_y - notes_drag - track.position.y) / maxf(room, 1.0), 0.0, 1.0)
+	notes_target = f * notes_max()
+	notes_scroll = notes_target
 
 
 # First run of a fresh download: the game is about to unpack itself.

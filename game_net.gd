@@ -463,6 +463,12 @@ func _on_games_listed(result: int, code: int, _headers: PackedStringArray, body:
 # time: how long the game ran from wave 1 on. Speeding up doesn't change it
 # (the monsters move faster too), calling waves early does, and pausing doesn't
 # count. The list goes by highest wave, then won before lost, then shortest time.
+#
+# The same report also feeds Gettic's wave stats (for balancing, only readable
+# with the admin key, see relay/admin.mjs): the server counts, without names,
+# the wave each game ended at, the number of players and the game time, plus
+# the small "stats" part below. A game that is quit, left or restarted before
+# it ends sends nothing, so it isn't counted.
 
 # Each board is named after the last wave and this number: raise it after a
 # balance change, so new scores aren't mixed with ones from the old rules.
@@ -499,15 +505,40 @@ func track_score(dt: float) -> void:
 		submit_score()
 
 
+# Only the exported release game sends scores and stats, so tests never land on
+# the leaderboard: not headless, not from the editor or a debug build (also the
+# /debuggame build), and not with --no-scores. For tests against a local server,
+# --scores-test sends anyway, but only to a test server on this computer
+# (--relay=http://127.0.0.1:8787 or http://localhost:...), never the real one.
+func scores_allowed() -> bool:
+	var args := OS.get_cmdline_user_args()
+	if "--no-scores" in args:
+		return false
+	if "--scores-test" in args:
+		return not "@" in relay_url and (relay_url.begins_with("http://127.0.0.1:") or relay_url.begins_with("http://localhost:"))
+	return DisplayServer.get_name() != "headless" and not OS.is_debug_build()
+
+
 func submit_score() -> void:
 	# Only the Default map: on a map of your own the waves can be made easy
-	if relay_url == "" or map_rows_text != DEFAULT_MAP or score_http != null:
+	if relay_url == "" or map_rows_text != DEFAULT_MAP or score_http != null or not scores_allowed():
 		return
 	var names := []
 	for p in players:
 		if p != null:
 			names.append(my_name() if p.slot == local_slot else name_of(p.slot))
-	var body := JSON.stringify({"board": board_id(), "names": names, "wave": wave, "won": state == "won", "ms": int(run_time * 1000.0)})
+	# For the wave stats: the team's gold in towers and unspent, its highest tower level, the speed
+	var tower_gold := 0
+	var top_level := 0
+	for t in towers.values():
+		tower_gold += t.spent
+		top_level = maxi(top_level, t.level + 1)
+	var gold_left := 0
+	for p in players:
+		if p != null:
+			gold_left += p.gold
+	var stats := {"tower_gold": tower_gold, "gold_left": gold_left, "top_level": top_level, "speed": game_speed}
+	var body := JSON.stringify({"board": board_id(), "names": names, "wave": wave, "won": state == "won", "ms": int(run_time * 1000.0), "stats": stats})
 	score_http = HTTPRequest.new()
 	score_http.timeout = 10.0
 	add_child(score_http)
