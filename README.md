@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo/logo.png" width="560" alt="Gettic's first TD logo"></p>
+
 # Gettic's first TD
 
 A small 3D tower defense game made with [Godot 4](https://godotengine.org/), inspired by the classic Warcraft III custom tower defense maps.
@@ -10,9 +12,9 @@ The code for this game was written by Claude. Gettic came up with the ideas, mad
 
 Monsters come out of a green portal in a stone gate at a corner of the map, walk onto a square path and walk around it clockwise, forever, until your towers kill them. Build towers on the grass, upgrade them, and don't let too many monsters pile up: if 50 are alive at the same time, you lose. Survive all 30 waves to win.
 
-Play alone or with up to 4 players: each player gets their own gate at a corner of the square (see [Multiplayer](#multiplayer)).
+Play alone or with up to 4 players: each player gets their own gate at a corner of the square (see [Multiplayer](#multiplayer)). Or draw your own maps in the [Map editor](#map-editor).
 
-The 3D world is built mostly from simple shapes in code, plus a few free CC0 models from the KayKit packs by Kay Lousberg and painted CC0 grass and dirt textures by Cethiel (see [assets/CREDITS.md](assets/CREDITS.md)). The game has no sound files.
+The 3D world is built mostly from simple shapes in code, plus a few free CC0 models from the KayKit packs by Kay Lousberg and painted CC0 grass and dirt textures by Cethiel (see [assets/CREDITS.md](assets/CREDITS.md)). The logo and the game icon are by Gettic. The game has no sound files.
 
 ## Download
 
@@ -48,8 +50,9 @@ godot --path path/to/this/folder
 | **Space** | Start the game / send the next wave early (bonus gold, once the current wave has fully spawned; in multiplayer it's a vote, press again to take it back) |
 | **F** | Change game speed (1×, 2×, 3×; in multiplayer only the host can) |
 | **Y** / **N** | Say yes or no when another player asks to build in your area |
+| **Enter** | Chat: type a message and press **Enter** to send it (**Esc** cancels). Game keys are off while you type |
 | **Right-click** | Cancel |
-| **Esc** | Menu: pause / continue, host or join a multiplayer game, and switch graphics between High and Low (Low is faster on older PCs; PCs with built-in graphics start on Low) |
+| **Esc** | Menu: pause / continue, open the **Map editor**, host or join a multiplayer game, and switch graphics between High and Low (Low is faster on older PCs; PCs with built-in graphics start on Low) |
 | **R** | Restart after winning or losing |
 
 ## Towers
@@ -74,21 +77,41 @@ Each tower has 4 levels.
 
 You start with 150 gold. You earn gold for each kill and a bonus at the start of each wave. The console at the bottom shows how many monsters are alive: you lose if it reaches **50** (per player, see below). You win when all 30 waves are out and every monster is dead.
 
+## Map editor
+
+Playing alone, press **Esc** and click **Map editor** to make your own maps (if a game is going, it asks first, since the editor ends it). The map shows in 3D as you draw it:
+
+- **Path** paints path tiles, **Erase** (or the right mouse button) turns tiles back into grass. Hold the mouse button and drag to paint several tiles.
+- **Gate** places a gate: press **1-4** (or click the button again) to pick which one. A gate stands at the end of its own road to the loop.
+- **Rock**, **Tree** and **Water** block building (rocks and trees are 3D models, water is a lake with moving waves). **Areas** shows each player's area, **Clear** (click twice) makes the whole map grass.
+- **Width** and **Height**: from 12 x 9 up to 48 x 36 tiles.
+- **Check** shows whether the map works: the path must be one closed loop, one tile wide, that doesn't touch itself, with at least 8 tiles; gate 1 is needed and gates are numbered without gaps (up to 4, one per player). Monsters always walk the loop clockwise. Very uneven player areas only give a yellow warning.
+- **Save** keeps the map under its name (in the game's user folder, maps\<name>.txt), **Load...** opens a saved map or a copy of **Default** (which can't be changed), **New** starts over, **Play this map** starts a game on it, **Exit the editor** goes back to the map you played before. Only working maps can be saved or played.
+
+**Picking a map:** in the **Esc** menu, click the **Map:** button under the title to choose **Default** or one of your saved maps. You can do this playing alone or as the host, before wave 1. While hosting, the map can only change while nobody has joined yet. Saved maps are checked again every time they're loaded.
+
+The map also decides how many can play: **one player per gate** (a map with 2 gates is full with 2 players). Multiplayer games use the host's map; see [Multiplayer](#multiplayer) for how joining players get it.
+
 ## Multiplayer
 
-Up to 4 players can defend the square together.
+Up to 4 players can defend the map together: one player per gate on the map (the Default map has 4).
 
-- Each player has a **gate at their own corner** of the square: Blue bottom-left, Red top-left, Yellow top-right, Green bottom-right. Every player's gate sends a full wave, so **more players means more monsters**, and the loss limit grows with it: **50 alive monsters per player** (100 with 2 players, 200 with 4).
-- **Each player has their own area**: the quarter of the map around their gate. When you pick a tower to build, your area lights up and the other players' areas go dark. To build in someone else's area, they have to say yes: a box pops up for them (**Y** for yes, **N** for no). Areas of gates nobody plays are free for everyone.
+- Each player has **their own gate**: on the Default map one at each corner of the square, Blue bottom-left, Red top-left, Yellow top-right, Green bottom-right. Every player's gate sends a full wave, so **more players means more monsters**, and the loss limit grows with it: **50 alive monsters per player** (100 with 2 players, 200 with 4).
+- **Each player has their own area**: the part of the map nearest to where their gate's road joins the loop (on the Default map, the quarter around their gate). When you pick a tower to build, your own area goes dark and the other players' areas light up in their color. To build in someone else's area, they have to say yes: a box pops up for them (**Y** for yes, **N** for no). Areas of gates nobody plays are free for everyone.
 - **Sending a wave early is a vote**: pressing **Space** votes for it, and the wave comes once at least **75% of the players** agree (2 of 2, 3 of 3, or 3 of 4). The button shows the votes, like `2/3`. Press **Space** again to take your vote back. Starting the first wave doesn't need a vote.
 - **Everyone has their own gold.** Every player gets the wave bonus, and the gold for a kill goes to the player whose tower made it. Tower bases are tinted in the owner's color, and you can only upgrade or sell your own towers.
 - You can start hosting in the middle of a game and keep your towers. A player who joins late gets some extra gold to catch up. If a player leaves, their gate closes and their towers stay.
 - In multiplayer, **Esc doesn't pause** the game.
+- **Names and chat:** type your name in the **Your name** box in the **Esc** menu (up to 16 letters; the game remembers it). Leave it empty and you get a random silly name, like *Sir Wobbles* or *Captain Noodle*. Two players with the same name get a number added. Press **Enter** to chat: messages show above the small map in the bottom-left, in each player's color, and fade after a few seconds.
 
 **How to play together**
 
 1. The host presses **Esc** and clicks **Host a game and get an invite code**.
 2. The other players press **Esc**, type the code in the box and click **Join**.
+
+**Playing on your own map**
+
+The host picks the map in the **Esc** menu before inviting anyone (see [Map editor](#map-editor)); once someone has joined, the map stays until the game is over. A player who doesn't have the host's map yet gets a **Join game** box first: a preview of the map, its name, size, gates and trees, rocks and water. Nothing is downloaded into the game or saved until they click **Download and join**; **Cancel** (or **Esc**) leaves everything as it was. Only the map's tiles come over (under 2 KB), never files, and the game checks them just like the map editor does, so a broken or strange map is refused with a message. Tick **Keep this map in my map list** to save it among your own maps (a name you already use gets " (2)"). Players who already have the same map, and games on the Default map, skip the box. After leaving the game, you're back on your own map.
 
 The invite code is 5 letters and digits (like `JR61X`). It works for anyone, anywhere: the game connects through a small game server, so nobody has to change anything in their router.
 
@@ -113,6 +136,7 @@ The game code is split into a few files, each building on the one before:
 | `game_world.gd` | The 3D world: map, gates, tower and monster models, shots and effects |
 | `game_net.gd` | Multiplayer: hosting, joining, invite codes, public games |
 | `game_ui.gd` | The bottom console (small map, tower portrait, command buttons), menus and popups |
+| `map_editor.gd` | The map editor and saved maps |
 | `main.gd` | The game itself: waves, monsters walking, towers shooting, keys and clicks |
 
 Good places to start:
@@ -120,8 +144,8 @@ Good places to start:
 - `TOWERS` in `game_base.gd` sets each tower's cost, damage, range and fire rate.
 - `START_GOLD`, `MAX_ALIVE`, `WAVE_INTERVAL` and `MAX_WAVE` set the starting gold, the monster limit (per player), the time between waves and the number of waves.
 - `EARLY_VOTE` sets the share of players (0.75 = 75%) who must agree to send a wave early in multiplayer.
-- `LOOP` sets the square's corners, and `GATES` where each player's gate stands, just outside one corner.
-- `PLAYER_NAMES` and `PLAYER_COLORS` set each player's name and color.
+- `DEFAULT_MAP` in `game_base.gd` is the map, one letter per tile: `.` grass, `#` path, `1`-`4` a player's gate, `r` rock, `t` tree, `w` water (nothing can be built on these). `read_map()` checks it: the path must be one closed loop, one tile wide, and each gate must stand at the end of its own road to the loop. Monsters walk from their gate to the loop and then around it clockwise. Each player's area is the part of the map nearest to where their gate's road joins the loop.
+- `PLAYER_COLORS` and `PLAYER_NAMES` set each player's color and its name (used when a player has no name), and `SILLY_NAMES` is the list of random names for players who leave the name box empty.
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.
 - `start_wave()` in `main.gd` controls how much health enemies get each wave, and how many come out of each gate.
 - `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting and the ground (painted grass and dirt, see `assets/shaders/ground.gdshader`). `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Model files (like the Arrow tower's) are in `assets/`, with their sources in `assets/CREDITS.md`.

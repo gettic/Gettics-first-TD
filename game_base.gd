@@ -1,6 +1,6 @@
 extends Node3D
 ## Gettic's first TD - a small 3D tower defense game.
-## Monsters come out of a gate at each player's corner and walk around a square.
+## Monsters come out of each player's gate and walk around a loop (see DEFAULT_MAP).
 ## Up to 4 players can play together over the network (see "multiplayer").
 ## The game logic runs on a flat map measured in pixels (CELL pixels per tile).
 ## to3d() turns those positions into the 3D world, where one tile is one unit.
@@ -10,13 +10,12 @@ extends Node3D
 ## node with every function and variable on it (main.tscn uses main.gd):
 ## game_base.gd (constants, data, shared state and helpers) <- game_updates.gd
 ## (debug log, updates, unpacking) <- game_world.gd (3D world, models, effects)
-## <- game_net.gd (multiplayer) <- game_ui.gd (2D overlay and menus) <- main.gd
-## (waves, update loop, input, player actions). A file can only use what is in
-## its own file or the ones before it.
+## <- game_net.gd (multiplayer) <- game_ui.gd (2D overlay and menus) <-
+## map_editor.gd (the map editor, saved maps) <- main.gd (waves, update loop,
+## input, player actions). A file can only use what is in its own file or the
+## ones before it.
 
 const CELL := 40
-const COLS := 24
-const ROWS := 18
 const SCREEN_W := 1280
 const SCREEN_H := 720
 const CAMERA_SPEED := 12.0  # tiles per second
@@ -31,15 +30,63 @@ const START_GOLD := 150
 const MAX_ALIVE := 50  # per player: you lose when this many monsters are alive at once (a boss counts as 5)
 const WAVE_INTERVAL := 25.0  # seconds between waves once the game has started
 
-# The path in grid coordinates. The square's corners, clockwise. Monsters walk
-# around the square forever.
-const LOOP := [Vector2i(2, 15), Vector2i(2, 2), Vector2i(21, 2), Vector2i(21, 15)]
-# Each player has a gate just outside one corner of the square (player 1 uses
-# GATES[0]). Its monsters walk from the gate into that corner, then join the loop.
-const GATES := [Vector2i(2, 17), Vector2i(0, 2), Vector2i(21, 0), Vector2i(23, 15)]
+# The map is data (see read_map()): one letter per tile, . grass, # path,
+# 1-4 a player's gate (standing on a path tile), r rock, t tree, w water.
+# The same text is a saved map and what the host sends to joining players.
+# Monsters come out of their gate, walk its road to the loop and then around
+# the loop clockwise, forever. This is the normal map ("Default"): a square
+# loop with a gate just outside each corner (player 1 uses gate 1).
+const DEFAULT_MAP := [
+	".....................3..",
+	".....................#..",
+	"2#####################..",
+	"..#..................#..",
+	"..#..................#..",
+	"..#..................#..",
+	"..#..................#..",
+	"..#..................#..",
+	"..#..................#..",
+	"..#..................#..",
+	"..#..................#..",
+	"..#..................#..",
+	"..#..................#..",
+	"..#..................#..",
+	"..#..................#..",
+	"..#####################4",
+	"..#.....................",
+	"..1.....................",
+]
+const MAP_MIN := Vector2i(12, 9)  # smallest map in tiles
+const MAP_MAX := Vector2i(48, 36)  # biggest: monster positions are sent in 16 bits (up to 51 tiles)
+const MAP_LETTERS := ".#1234rtw"
+const MIN_LOOP := 8  # tiles
+const DIRS := [Vector2i(1, 0), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(0, -1)]
+const DEFAULT_SIZE := Vector2i(24, 18)  # the Default map's size in tiles
+const MAPS_DIR := "user://maps"  # saved maps: <name>.txt, the map's rows of letters
+const MAP_NAME_MAX := 24
+const MAP_FILE_MAX := 4096  # bytes: a 48 x 36 map is under 1800
 const MAX_PLAYERS := 4
 const PLAYER_NAMES := ["Blue", "Red", "Yellow", "Green"]
 const PLAYER_COLORS := [Color(0.3, 0.55, 1.0), Color(1.0, 0.3, 0.3), Color(1.0, 0.85, 0.2), Color(0.25, 0.8, 0.45)]
+# A player who hasn't typed a name gets one of these (a new one each time the game starts)
+const SILLY_NAMES := [
+	"Sir Wobbles", "Captain Noodle", "Lady Pickles", "Baron Fluff", "Duke Waffle",
+	"Mister Muffin", "Professor Puddle", "Count Crumpet", "Admiral Sprout", "Princess Pudding",
+	"Tiny Thunder", "Sneaky Biscuit", "Grumpy Turnip", "Jolly Bean", "Dizzy Pancake",
+	"Bumble Boots", "Wiggle Worm", "Snorty Pig", "Fuzzy Pebble", "Giggle Goose",
+	"Noodle Knight", "Toast Wizard", "Pickle Pirate", "Muffin Mage", "Bubble Bard",
+	"Captain Socks", "Sir Snorez", "Lord Doodle", "Queen Jellybean", "King Crouton",
+	"Wobbly Walrus", "Sleepy Llama", "Dancing Duck", "Happy Hamster", "Cheeky Cheese",
+	"Soggy Cereal", "Major Mallow", "Doctor Dumpling", "Banana Bandit", "Turbo Turtle",
+	"Spaghetti Yeti", "Mighty Mitten", "Rusty Spoon", "Gnome Nibbles", "Puddle Jumper",
+	"Sir Squeaks", "Fluffy Dragon", "Cosmic Cupcake", "Waddle Penguin", "Lumpy Potato",
+]
+const NAME_MAX := 16  # longest player name
+const CHAT_MAX := 120  # longest chat message
+const CHAT_LINES := 6  # chat lines shown at once
+const CHAT_SHOW := 10.0  # seconds a chat line stays (the last one fading out)
+const CHAT_BURST := 4.0  # chat messages a player may send at once...
+const CHAT_REFILL := 1.5  # ...and then one per this many seconds
 const ENEMY_KINDS := ["normal", "fast", "armored", "boss"]
 const EARLY_VOTE := 0.75  # with more players, this share of them must agree to send a wave early
 
@@ -119,17 +166,18 @@ const PANEL_RECTS := [Rect2(0, 0, SCREEN_W, TOP_BAR_H), Rect2(0, BAR_TOP, SCREEN
 		Rect2(474, BAR_TOP - 32, 120, 32)]
 
 # Esc menu layout (screen pixels)
-const MENU_RECT := Rect2(390, 60, 500, 620)
-const HOST_RECT := Rect2(430, 198, 420, 44)
-const JOIN_INPUT_RECT := Rect2(430, 292, 290, 40)
-const JOIN_BUTTON_RECT := Rect2(730, 292, 120, 40)
-const COPY_RECT := Rect2(730, 226, 120, 40)
-const STOP_RECT := Rect2(430, 560, 420, 40)
-const RESUME_RECT := Rect2(430, 616, 420, 44)
-const PUBLIC_RECT := Rect2(430, 350, 420, 36)
-const REFRESH_RECT := Rect2(750, 408, 100, 28)
-const GRAPHICS_RECT := Rect2(756, 70, 124, 28)
-const GAME_ROWS := 4  # public games shown in the menu
+const MENU_RECT := Rect2(390, 40, 500, 660)  # taller since step 4: room for "Map:" under the title
+const HOST_RECT := Rect2(430, 256, 420, 44)
+const JOIN_INPUT_RECT := Rect2(430, 350, 290, 40)
+const JOIN_BUTTON_RECT := Rect2(730, 350, 120, 40)
+const COPY_RECT := Rect2(730, 242, 120, 40)
+const NAME_INPUT_RECT := Rect2(530, 210, 320, 36)  # above the host button
+const STOP_RECT := Rect2(430, 580, 420, 40)
+const RESUME_RECT := Rect2(430, 640, 420, 44)
+const PUBLIC_RECT := Rect2(430, 366, 420, 36)
+const REFRESH_RECT := Rect2(750, 472, 100, 28)
+const GRAPHICS_RECT := Rect2(756, 50, 124, 28)
+const GAME_ROWS := 3  # public games shown in the menu
 
 # Update popup layout (screen pixels)
 const DIALOG_RECT := Rect2(340, 140, 600, 440)
@@ -142,6 +190,9 @@ const CHOOSE_FOLDER_RECT := Rect2(370, 368, 250, 36)  # in the unpack warning
 const ASK_RECT := Rect2(456, 556, 484, 156)
 const ASK_YES_RECT := Rect2(480, 646, 212, 44)
 const ASK_NO_RECT := Rect2(704, 646, 212, 44)
+
+# Chat: the typing box sits just above the minimap, the lines above it
+const CHAT_INPUT_RECT := Rect2(16, BAR_TOP - 44, 420, 28)
 
 # Checked at startup to see if a newer release is on GitHub
 const RELEASES_API := "https://api.github.com/repos/gettic/Gettics-first-TD/releases/latest"
@@ -160,8 +211,9 @@ class Enemy:
 	var kind := "normal"
 	var pos: Vector2
 	var net_pos: Vector2  # other players: latest position from the host, pos glides toward it
-	var route: Array[Vector2]  # this monster's gate, then the square's corners from where it joins
+	var route: Array[Vector2]  # this monster's gate, its road's corners, then the loop's corners from where it joins
 	var wp := 1
+	var loop_wp := 1  # where in route the loop starts again after its last point
 	var hp := 1.0
 	var max_hp := 1.0
 	var speed := 55.0
@@ -209,10 +261,20 @@ class Player:
 	var peer := 1  # network id; the host is always 1
 	var slot := 0  # 0-3: which gate and color
 	var gold := 0
+	var name := ""  # chosen by the player, checked by the host ("": not known yet)
 
 
-var path_cells := {}
-var routes: Array = []  # per gate: Array[Vector2] of points, gate first
+# The map being played (set by use_map())
+var map_name := "Default"
+var map_rows_text: Array = DEFAULT_MAP  # the map's letters, as read_map() got them
+var map_cols := DEFAULT_SIZE.x  # size in tiles
+var map_rows := DEFAULT_SIZE.y
+var path_cells := {}  # Vector2i -> true: the loop and the gates' roads (gate tiles too)
+var gate_cells: Array = []  # per player slot: the gate's Vector2i, or null if the map has fewer gates
+var routes: Array = []  # per gate: Array[Vector2] of points (pixels), gate first; [] if no gate
+var loop_starts: Array = []  # per gate: the index in its route where the loop begins
+var blocked := {}  # Vector2i -> "r", "t" or "w" (rock, tree, water): nothing can be built there
+var area_of := {}  # Vector2i -> the player slot whose area the tile is in
 var enemies: Array[Enemy] = []
 var enemy_by_id := {}
 var next_enemy_id := 1
@@ -265,6 +327,13 @@ var games_status := "Looking for public games..."
 var games_http: HTTPRequest
 var games_timer := 0.0
 var code_input: LineEdit
+var name_input: LineEdit  # in the Esc menu: this player's name ("": a silly one)
+var random_name := ""  # picked from SILLY_NAMES at startup, for when name_input is empty
+var chat_input: LineEdit  # shown while typing a chat message
+var chat_log: Array = []  # [slot (-1: the game), name, text, time it came]
+var chat_budget := [CHAT_BURST, CHAT_BURST, CHAT_BURST, CHAT_BURST]  # host: messages each player may still send
+var chat_budget_time := [0.0, 0.0, 0.0, 0.0]
+var bbcode_tag := RegEx.create_from_string("\\[/?[A-Za-z_]+[^\\]]*\\]")
 var message := ""
 var message_time := 0.0
 var font: Font
@@ -330,6 +399,29 @@ func clear_world() -> void:
 	selected = null
 
 
+# A player's name, or their color while the name isn't known.
+func name_of(slot: int) -> String:
+	if slot >= 0 and slot < MAX_PLAYERS and players[slot] != null and players[slot].name != "":
+		return players[slot].name
+	return PLAYER_NAMES[clampi(slot, 0, MAX_PLAYERS - 1)]
+
+
+# Makes text from another player safe to show: no control or invisible
+# characters, no [tags], no runs of spaces, and at most `most` characters.
+func clean_text(s: String, most: int) -> String:
+	var out := ""
+	for ch in s:
+		var c := ch.unicode_at(0)
+		if c < 32 or (c >= 127 and c < 160):
+			out += " "
+		elif not ((c >= 0x200B and c <= 0x200F) or (c >= 0x202A and c <= 0x202E) or (c >= 0x2060 and c <= 0x206F) or c == 0xFEFF):
+			out += ch
+	out = bbcode_tag.sub(out, "", true)
+	while out.contains("  "):
+		out = out.replace("  ", " ")
+	return out.strip_edges().left(most).strip_edges()
+
+
 func player_count() -> int:
 	return MAX_PLAYERS - players.count(null)
 
@@ -382,11 +474,192 @@ func screen_to_cell(mp: Vector2) -> Vector2i:
 
 
 func in_map(c: Vector2i) -> bool:
-	return c.x >= 0 and c.y >= 0 and c.x < COLS and c.y < ROWS
+	return c.x >= 0 and c.y >= 0 and c.x < map_cols and c.y < map_rows
 
 
 func can_build(c: Vector2i) -> bool:
-	return in_map(c) and not path_cells.has(c) and not towers.has(c)
+	return in_map(c) and not path_cells.has(c) and not blocked.has(c) and not towers.has(c)
+
+
+# How far WASD can move the camera from its start: more on bigger maps.
+func camera_limit() -> Vector2:
+	return CAMERA_LIMIT * Vector2(maxf(map_cols / float(DEFAULT_SIZE.x), 1.0), maxf(map_rows / float(DEFAULT_SIZE.y), 1.0))
+
+
+# ---------------------------------------------------------------- maps
+
+# How many of the 4 neighbor tiles are in cells.
+func count_near(c: Vector2i, cells: Dictionary) -> int:
+	var n := 0
+	for d: Vector2i in DIRS:
+		if cells.has(c + d):
+			n += 1
+	return n
+
+
+# Reads and checks a map: its rows of letters (see DEFAULT_MAP). Used for the
+# Default map, saved maps and maps from the host, so only plain text goes in and
+# anything unexpected is refused. Returns {"error": text} or the finished map
+# for use_map().
+func read_map(lines: Variant) -> Dictionary:
+	if not (lines is Array) or lines.size() < MAP_MIN.y or lines.size() > MAP_MAX.y:
+		return {"error": "The map must be %d to %d tiles high" % [MAP_MIN.y, MAP_MAX.y]}
+	if not (lines[0] is String):
+		return {"error": "Broken map"}
+	var cols: int = lines[0].length()
+	if cols < MAP_MIN.x or cols > MAP_MAX.x:
+		return {"error": "The map must be %d to %d tiles wide" % [MAP_MIN.x, MAP_MAX.x]}
+	var path := {}
+	var gates: Array = [null, null, null, null]
+	var block := {}
+	for y in lines.size():
+		if not (lines[y] is String) or lines[y].length() != cols:
+			return {"error": "Broken map: its rows aren't all as long"}
+		for x in cols:
+			var ch: String = lines[y][x]
+			var c := Vector2i(x, y)
+			if not MAP_LETTERS.contains(ch):
+				return {"error": "Broken map: unknown tile '%s'" % ch}
+			if ch == "#":
+				path[c] = true
+			elif ch in ["1", "2", "3", "4"]:
+				var g := int(ch) - 1
+				if gates[g] != null:
+					return {"error": "Gate %s is on the map twice" % ch}
+				gates[g] = c
+				path[c] = true
+			elif ch != ".":
+				block[c] = ch
+	# Gate 1 is needed (playing alone uses it), and the gates are numbered without gaps
+	for g in range(1, 4):
+		if gates[g] != null and gates[g - 1] == null:
+			return {"error": "Gate %d is missing (gates go 1, 2, 3, 4)" % g}
+	if gates[0] == null:
+		return {"error": "Place gate 1"}
+	# The loop is what's left after taking away dead ends again and again
+	var core := path.duplicate()
+	var changed := true
+	while changed:
+		changed = false
+		for c: Vector2i in core.keys():
+			if count_near(c, core) <= 1:
+				core.erase(c)
+				changed = true
+	if core.size() < MIN_LOOP:
+		return {"error": "The path needs a closed loop of at least %d tiles" % MIN_LOOP}
+	for c: Vector2i in core:
+		if count_near(c, core) != 2:
+			return {"error": "The loop must be one tile wide and can't touch itself (at %d, %d)" % [c.x, c.y]}
+	# Walk the loop from its first tile in reading order
+	var start: Vector2i = core.keys()[0]
+	for c: Vector2i in core:
+		if c.y < start.y or (c.y == start.y and c.x < start.x):
+			start = c
+	var ring: Array[Vector2i] = [start]
+	var prev := start
+	var cur := start
+	while true:
+		var nxt := cur
+		for d: Vector2i in DIRS:
+			if core.has(cur + d) and cur + d != prev:
+				nxt = cur + d
+				break
+		if nxt == start or nxt == cur:
+			break
+		ring.append(nxt)
+		prev = cur
+		cur = nxt
+	if ring.size() != core.size():
+		return {"error": "The path must be one single loop"}
+	# Monsters walk clockwise on screen: with y pointing down, that's a positive area
+	var area := 0
+	for i in ring.size():
+		var a := ring[i]
+		var b := ring[(i + 1) % ring.size()]
+		area += a.x * b.y - b.x * a.y
+	if area < 0:
+		ring.reverse()
+	# Each gate's road to the loop, then once around the loop from where it joins
+	var used := {}
+	var new_routes: Array = []
+	var starts: Array = []
+	for g in MAX_PLAYERS:
+		if gates[g] == null:
+			new_routes.append([])
+			starts.append(0)
+			continue
+		var gc: Vector2i = gates[g]
+		if core.has(gc) or count_near(gc, path) != 1:
+			return {"error": "Gate %d must be at the end of a road that leads to the loop" % (g + 1)}
+		var road: Array[Vector2i] = [gc]
+		prev = gc
+		cur = gc
+		while not core.has(cur):
+			used[cur] = true
+			var next_cells := []
+			for d: Vector2i in DIRS:
+				if path.has(cur + d) and cur + d != prev:
+					next_cells.append(cur + d)
+			if next_cells.size() != 1:
+				return {"error": "Gate %d's road must lead to the loop without splitting" % (g + 1)}
+			prev = cur
+			cur = next_cells[0]
+			road.append(cur)
+		var j := ring.find(cur)
+		var cells: Array[Vector2i] = road.duplicate()
+		for i in range(1, ring.size()):
+			cells.append(ring[(j + i) % ring.size()])
+		# Only the corners (and the gate and the joining tile) become route points
+		var pts: Array[Vector2] = []
+		var loop_at := 0
+		for i in cells.size():
+			var is_join := i == road.size() - 1
+			var keep := i == 0 or is_join
+			if not keep:
+				var after: Vector2i = cells[i + 1] if i + 1 < cells.size() else cur
+				keep = cells[i] - cells[i - 1] != after - cells[i]
+			if keep:
+				if is_join:
+					loop_at = pts.size()
+				pts.append(cell_center(cells[i]))
+		new_routes.append(pts)
+		starts.append(loop_at)
+	for c: Vector2i in path:
+		if not core.has(c) and not used.has(c):
+			return {"error": "The road at %d, %d doesn't lead from a gate to the loop" % [c.x, c.y]}
+	# Areas: each tile belongs to the gate whose road joins the loop nearest to it
+	# (on the Default map that's the quarter around each gate)
+	var areas := {}
+	for x in cols:
+		for y in lines.size():
+			var best := -1
+			var best_d := 0.0
+			for g in MAX_PLAYERS:
+				if gates[g] == null:
+					continue
+				var join: Vector2 = new_routes[g][starts[g]] / CELL - Vector2(0.5, 0.5)
+				var d := Vector2(x, y).distance_squared_to(join)
+				if best < 0 or d < best_d:
+					best = g
+					best_d = d
+			areas[Vector2i(x, y)] = best
+	return {"text": lines.duplicate(), "loop": ring.size(), "cols": cols, "rows": lines.size(), "path": path, "gates": gates,
+			"routes": new_routes, "loop_starts": starts, "blocked": block, "areas": areas}
+
+
+# Makes a map checked by read_map() the one being played. The 3D world has to be
+# built (again) after this.
+func use_map(m: Dictionary, title := "Default") -> void:
+	map_name = title
+	map_rows_text = m.text
+	map_cols = m.cols
+	map_rows = m.rows
+	path_cells = m.path
+	gate_cells = m.gates
+	routes = m.routes
+	loop_starts = m.loop_starts
+	blocked = m.blocked
+	area_of = m.areas
 
 
 func flash(text: String) -> void:
@@ -420,15 +693,12 @@ func alive_count() -> int:
 	return n
 
 
-# Each player has the quarter of the map around their gate. Returns the player
-# whose area a tile is in, or -1 if nobody plays that gate (then anyone can build).
+# Each player has the part of the map nearest to where their gate's road joins
+# the loop (see read_map()). Returns the player whose area a tile is in, or -1 if
+# nobody plays that gate (then anyone can build).
 func area_owner(c: Vector2i) -> int:
-	var slot := 0
-	if c.x < COLS / 2.0:
-		slot = 1 if c.y < ROWS / 2.0 else 0
-	else:
-		slot = 2 if c.y < ROWS / 2.0 else 3
-	return slot if players[slot] != null else -1
+	var slot: int = area_of.get(c, -1)
+	return slot if slot >= 0 and players[slot] != null else -1
 
 
 func close_ask(id: int) -> void:

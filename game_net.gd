@@ -42,7 +42,8 @@ class RelayPeer extends MultiplayerPeerExtension:
 			var packet := socket.get_packet()
 			if socket.was_string_packet():
 				server_message(JSON.parse_string(packet.get_string_from_utf8()))
-			elif packet.size() >= 6:
+			elif packet.size() >= 6 and peers.has(packet.decode_s32(0)):
+				# Only from players Godot knows: one who left (or was refused) would be an error
 				incoming.append([packet.decode_s32(0), packet[4], packet[5], packet.slice(6)])
 		var closed := socket.get_ready_state() == WebSocketPeer.STATE_CLOSED or error != ""
 		if closed and status != CONNECTION_DISCONNECTED:
@@ -69,14 +70,20 @@ class RelayPeer extends MultiplayerPeerExtension:
 			"left":
 				var id := int(m.id)
 				if peers.has(id):
-					peers.erase(id)
-					peer_disconnected.emit(id)
+					forget(id)
 			"error":
 				error = m.text
 				socket.close()
 
+	# A player is gone: drop their messages still waiting here, then tell Godot
+	func forget(id: int) -> void:
+		peers.erase(id)
+		incoming = incoming.filter(func(p: Array) -> bool: return p[0] != id)
+		peer_disconnected.emit(id)
+
 	func lost() -> void:
 		status = CONNECTION_DISCONNECTED
+		incoming.clear()
 		for id in peers.duplicate():
 			peer_disconnected.emit(id)
 		peers.clear()
@@ -145,8 +152,7 @@ class RelayPeer extends MultiplayerPeerExtension:
 	func _disconnect_peer(id: int, _force: bool) -> void:
 		send_text({"t": "kick", "id": id})
 		if peers.has(id):
-			peers.erase(id)
-			peer_disconnected.emit(id)
+			forget(id)
 
 	func _close() -> void:
 		socket.close()
@@ -176,6 +182,92 @@ func check_wave_votes() -> bool:
 	return false
 
 
+# map_editor.gd has the real one: saves a map from the host in the player's map list.
+func keep_map(_title: String, _rows: Array) -> void:
+	pass
+
+
+# ----- the host's map
+#
+# A player joining a game on another map gets the host's map as plain text
+# (its rows of letters, see read_map()), never files or objects. Their game
+# checks it like the map editor does, shows a preview, and only uses it once
+# the player says yes. Players who already have the map (same text, compared
+# by its sha256) or join a game on the Default map skip all that.
+
+const OFFER_MAX := 3  # map offers a joining player can get before the host stops answering
+
+var joining := {}  # host: peer -> map offers sent, for players whose version is fine but who have no slot yet
+var map_offer := {}  # player: the host's map while the preview is showing {name, host, rows, hash, check, keep, accepted}
+var own_map: Array = []  # player: [rows, name] of their own map while playing on the host's
+
+
+func map_hash(rows: Array) -> String:
+	return "\n".join(rows).sha256_text()
+
+
+# Players this map has room for: one per gate.
+func map_slots() -> int:
+	return MAX_PLAYERS - gate_cells.count(null)
+
+
+# Why a map from the host can't be used, or "" if it's fine. Only plain text
+# of the right size gets as far as read_map().
+func offer_problem(title: Variant, host_name: Variant, rows: Variant) -> String:
+	if not (title is String and host_name is String and rows is Array):
+		return "The host sent a broken map, so you didn't join."
+	if title.length() > 200 or host_name.length() > 200 or rows.size() < MAP_MIN.y or rows.size() > MAP_MAX.y:
+		return "The host's map is too big or broken, so you didn't join."
+	for r in rows:
+		if not (r is String) or r.length() > MAP_MAX.x:
+			return "The host's map is too big or broken, so you didn't join."
+	var check := read_map(rows)
+	if check.has("error"):
+		return "The host's map can't be used (%s), so you didn't join." % check.error
+	return ""
+
+
+# Player: stops joining without changing anything here.
+func stop_joining(text: String) -> void:
+	close_connection()
+	net_mode = ""
+	map_offer = {}
+	net_status = text
+	flash(text)
+
+
+# Player: "Download and join" in the preview.
+func accept_offer(keep: bool) -> void:
+	if net_mode != "map_offer" or map_offer.is_empty():
+		return
+	map_offer.keep = keep
+	map_offer.accepted = true
+	net_try_join.rpc_id(1, my_name(), map_offer.hash, true)
+
+
+func cancel_offer() -> void:
+	stop_joining("You didn't join. Nothing was saved or changed.")
+
+
+# Player: back to the map they had before joining.
+func back_to_own_map() -> void:
+	if own_map.is_empty():
+		return
+	var m := read_map(own_map[0])
+	if not m.has("error"):
+		use_map(m, own_map[1])
+		build_map()
+	own_map = []
+
+
+# Host: the first slot with a gate on this map that nobody uses, or -1.
+func free_slot() -> int:
+	for s in map_slots():
+		if players[s] == null:
+			return s
+	return -1
+
+
 # Host: sends a message to every player who has joined.
 func send_all(method: StringName, args: Array) -> void:
 	if net_mode != "host":
@@ -191,7 +283,107 @@ func send_all(method: StringName, args: Array) -> void:
 		callv("rpc_id", [p.peer, method] + args)
 
 
+# ----- player names
+
+# This player's name: what they typed in the menu, or their silly name.
+func my_name() -> String:
+	var typed := clean_text(name_input.text, NAME_MAX) if name_input != null else ""
+	return typed if typed != "" else random_name
+
+
+# At startup: the name typed last time, and a silly name for when there is none.
+func load_name() -> void:
+	random_name = SILLY_NAMES.pick_random()
+	var cfg := ConfigFile.new()
+	if cfg.load(SETTINGS_FILE) == OK:
+		name_input.text = clean_text(str(cfg.get_value("player", "name", "")), NAME_MAX)
+	name_input.placeholder_text = random_name
+
+
+# Keeps the typed name for next time (with the other settings in the file).
+func save_name() -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS_FILE)
+	var typed := clean_text(name_input.text, NAME_MAX)
+	if str(cfg.get_value("player", "name", "")) != typed:
+		cfg.set_value("player", "name", typed)
+		cfg.save(SETTINGS_FILE)
+
+
+# Host: the name a player asked for, cleaned up, with a number added when
+# another player already has it.
+func unique_name(wanted: String, slot: int) -> String:
+	var base := clean_text(wanted, NAME_MAX)
+	if base == "":
+		base = SILLY_NAMES.pick_random()
+	var result := base
+	var n := 2
+	while name_taken(result, slot):
+		result = base.left(NAME_MAX - 1 - str(n).length()).strip_edges() + " " + str(n)
+		n += 1
+	return result
+
+
+func name_taken(name: String, slot: int) -> bool:
+	for p in players:
+		if p != null and p.slot != slot and p.name.to_lower() == name.to_lower():
+			return true
+	return false
+
+
+# ----- chat
+# Players send their messages to the host, which checks them and sends them
+# to everyone (net_say), so every chat looks the same.
+
+func send_chat(typed: String) -> void:
+	var s := clean_text(typed, CHAT_MAX)
+	if s == "":
+		return
+	match net_mode:
+		"host":
+			host_chat(local_slot, s)
+		"client":
+			net_request.rpc_id(1, "chat", [s])
+		_:
+			add_chat(local_slot, my_name(), s)  # alone: just shows it
+
+
+# Host: a player's message. Too many in a short time and the rest are dropped.
+func host_chat(slot: int, typed: String) -> void:
+	var s := clean_text(typed, CHAT_MAX)
+	if s == "" or players[slot] == null:
+		return
+	var now := Time.get_ticks_msec() / 1000.0
+	var budget: float = minf(chat_budget[slot] + (now - chat_budget_time[slot]) / CHAT_REFILL, CHAT_BURST)
+	chat_budget_time[slot] = now
+	if budget < 1.0:
+		chat_budget[slot] = budget
+		var text := "Slow down, you're chatting too fast"
+		if slot == local_slot:
+			flash(text)
+		else:
+			net_message.rpc_id(players[slot].peer, text)
+		return
+	chat_budget[slot] = budget - 1.0
+	add_chat(slot, name_of(slot), s)
+	send_all("net_say", [slot, name_of(slot), s])
+
+
+# Host: a line from the game itself, like "Sir Wobbles joined the game".
+func chat_note(text: String) -> void:
+	add_chat(-1, "", text)
+	send_all("net_say", [-1, "", text])
+
+
+func add_chat(slot: int, who: String, text: String) -> void:
+	chat_log.append([slot, who, text, Time.get_ticks_msec() / 1000.0])
+	if chat_log.size() > 20:
+		chat_log.pop_front()
+
+
 func host_game() -> void:
+	save_name()
+	players[local_slot].name = my_name()
 	if relay_url == "":
 		host_direct()
 		return
@@ -334,6 +526,7 @@ func clean_code(typed: String) -> String:
 # Looks for the game on the local network first, then on the game server.
 func join_game() -> void:
 	code_input.release_focus()
+	save_name()
 	var code := clean_code(code_input.text)
 	if code.length() != 5:
 		net_status = "That invite code doesn't look right. It has 5 letters and digits."
@@ -447,6 +640,7 @@ func stop_hosting() -> void:
 	net_status = ""
 	requests.clear()
 	asks.clear()
+	joining.clear()
 	for slot in MAX_PLAYERS:
 		if slot != local_slot:
 			players[slot] = null
@@ -457,6 +651,7 @@ func stop_hosting() -> void:
 func leave_game(text: String) -> void:
 	close_connection()
 	net_mode = ""
+	back_to_own_map()
 	play_alone()
 	net_status = text
 	flash(text)
@@ -465,6 +660,9 @@ func leave_game(text: String) -> void:
 func _on_connected_to_host() -> void:
 	if net_mode == "connecting":
 		net_join.rpc_id(1, version)
+		# Separate from net_join, so a host with another version can still
+		# tell us the versions differ (it doesn't know this message)
+		net_try_join.rpc_id(1, my_name(), map_hash(map_rows_text), false)
 
 
 func _on_connection_failed() -> void:
@@ -479,6 +677,8 @@ func _on_connection_failed() -> void:
 func _on_host_left() -> void:
 	if net_mode == "client":
 		leave_game("The host left the game.")
+	elif net_mode == "map_offer":
+		stop_joining("The host left before you joined.")
 	elif net_mode == "connecting":
 		try_next_address()
 
@@ -490,15 +690,16 @@ func _on_peer_connected(_id: int) -> void:
 func _on_peer_disconnected(id: int) -> void:
 	if net_mode != "host":
 		return
+	joining.erase(id)
 	for slot in MAX_PLAYERS:
 		if players[slot] != null and players[slot].peer == id:
+			var p_name: String = players[slot].name
 			players[slot] = null
 			spawn_queues[slot].clear()
 			wave_votes.erase(slot)
 			send_players()
-			var text := "%s left the game" % PLAYER_NAMES[slot]
-			flash(text)
-			send_all("net_message", [text])
+			if p_name != "":
+				chat_note("%s left the game" % p_name)
 			check_wave_votes()
 
 
@@ -506,7 +707,7 @@ func send_players() -> void:
 	var list := []
 	for p in players:
 		if p != null:
-			list.append([p.peer, p.slot])
+			list.append([p.peer, p.slot, p.name])
 	send_all("net_players", [list])
 
 
@@ -565,23 +766,49 @@ func net_join(their_version: String) -> void:
 	if their_version != version:
 		net_refused.rpc_id(peer, "The host has version %s and you have %s. You both need the same version." % [version, their_version])
 		return
-	var slot := players.find(null)
-	if slot < 0:
-		net_refused.rpc_id(peer, "That game is full (4 players).")
+	# The same version: net_try_join comes next, with the player's name and map
+	joining[peer] = 0
+
+
+# After net_join: the player's name and which map they have (its sha256).
+# confirmed: they said yes to the map the host offered them. Its name sorts
+# after net_refused, like net_say (see there).
+@rpc("any_peer", "call_remote", "reliable")
+func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant) -> void:
+	if net_mode != "host":
 		return
+	var peer := multiplayer.get_remote_sender_id()
+	if not joining.has(peer) or not (their_name is String and their_map is String and confirmed is bool):
+		return
+	var slot := free_slot()
+	if slot < 0:
+		joining.erase(peer)
+		var n := map_slots()
+		net_refused.rpc_id(peer, "That game is full (%d player%s)." % [n, "" if n == 1 else "s"])
+		return
+	var mine := map_hash(map_rows_text)
+	# Players on another map get this one first, unless it's the Default map (everyone has that)
+	if their_map != mine and map_rows_text != DEFAULT_MAP:
+		if confirmed:
+			joining.erase(peer)
+			net_refused.rpc_id(peer, "The host changed the map. Try joining again.")
+		elif joining[peer] < OFFER_MAX:
+			joining[peer] += 1
+			net_show_map.rpc_id(peer, map_name, my_name(), map_rows_text)
+		return
+	joining.erase(peer)
 	var p := Player.new()
 	p.peer = peer
 	p.slot = slot
+	p.name = unique_name(their_name, slot)
 	# Joining late: some extra gold to catch up
 	p.gold = START_GOLD + wave * 20
 	players[slot] = p
-	net_welcome.rpc_id(peer, slot)
+	net_welcome.rpc_id(peer, slot, mine)
 	for t: Tower in towers.values():
 		net_tower.rpc_id(peer, t.cell, t.type, t.level, t.owner, t.spent)
 	send_players()
-	var text := "%s joined the game" % PLAYER_NAMES[slot]
-	flash(text)
-	send_all("net_message", [text])
+	chat_note("%s joined the game" % p.name)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -591,6 +818,10 @@ func net_request(action: String, args: Array) -> void:
 	var peer := multiplayer.get_remote_sender_id()
 	for p in players:
 		if p != null and p.peer == peer:
+			# Chat is for the network, not the game rules
+			if action == "chat" and args.size() == 1 and args[0] is String:
+				host_chat(p.slot, args[0])
+				return
 			var error := perform(p.slot, action, args)
 			if error != "":
 				net_message.rpc_id(peer, error)
@@ -599,17 +830,69 @@ func net_request(action: String, args: Array) -> void:
 
 # ----- messages from the host to the players
 
+# The host's map, for a player who doesn't have it. Nothing is used before the
+# player says yes in the preview (see accept_offer()).
 @rpc("authority", "call_remote", "reliable")
-func net_welcome(slot: int) -> void:
+func net_show_map(title: Variant, host_name: Variant, rows: Variant) -> void:
+	if net_mode != "connecting" and net_mode != "map_offer":
+		return
+	var problem := offer_problem(title, host_name, rows)
+	if problem != "":
+		stop_joining(problem)
+		return
+	var host_called := clean_text(host_name, NAME_MAX)
+	map_offer = {"name": clean_text(title, MAP_NAME_MAX), "host": host_called if host_called != "" else "The host",
+			"rows": rows.duplicate(), "hash": map_hash(rows), "check": read_map(rows), "keep": false, "accepted": false}
+	if map_offer.name == "":
+		map_offer.name = "Unnamed map"
+	net_mode = "map_offer"
+	menu_open = true
+	code_input.release_focus()
+	name_input.release_focus()
+
+
+# slot: our player slot. map: the sha256 of the host's map, which must be ours,
+# the Default map or the one we said yes to.
+@rpc("authority", "call_remote", "reliable")
+func net_welcome(slot: Variant, map: Variant) -> void:
+	if net_mode != "connecting" and net_mode != "map_offer":
+		return
+	if not (slot is int and slot >= 0 and slot < MAX_PLAYERS and map is String):
+		stop_joining("The host sent something broken, so you didn't join.")
+		return
+	var rows: Array = []
+	var title := ""
+	if map == map_hash(map_rows_text):
+		pass  # we have the host's map already
+	elif map == map_hash(DEFAULT_MAP):
+		rows = DEFAULT_MAP
+		title = "Default"
+	elif map_offer.get("accepted", false) and map == map_offer.hash:
+		rows = map_offer.rows
+		title = map_offer.name
+	else:
+		stop_joining("The host's map isn't the one you were shown, so you didn't join.")
+		return
+	var keep: bool = map_offer.get("keep", false) and rows == map_offer.get("rows")
+	map_offer = {}
 	net_mode = "client"
 	clear_world()
+	if not rows.is_empty():
+		if own_map.is_empty():
+			own_map = [map_rows_text, map_name]
+		use_map(read_map(rows), title)
+		build_map()
+		if keep:
+			keep_map(title, rows)
 	players = [null, null, null, null]
 	local_slot = slot
 	var me := Player.new()
 	me.slot = slot
+	me.name = my_name()  # until the host's list says which name we got
 	players[slot] = me
 	menu_open = false
 	code_input.release_focus()
+	name_input.release_focus()
 	net_status = ""
 	flash("You joined as %s!" % PLAYER_NAMES[slot])
 
@@ -618,7 +901,8 @@ func net_welcome(slot: int) -> void:
 func net_refused(reason: String) -> void:
 	close_connection()
 	net_mode = ""
-	net_status = reason
+	map_offer = {}
+	net_status = clean_text(reason, 300)
 
 
 @rpc("authority", "call_remote", "reliable")
@@ -633,6 +917,7 @@ func net_players(list: Array) -> void:
 		var p := Player.new()
 		p.peer = item[0]
 		p.slot = item[1]
+		p.name = clean_text(str(item[2]), NAME_MAX)
 		p.gold = golds[p.slot]
 		players[p.slot] = p
 
@@ -640,6 +925,14 @@ func net_players(list: Array) -> void:
 @rpc("authority", "call_remote", "reliable")
 func net_message(text: String) -> void:
 	flash(text)
+
+
+# A chat line for everyone (slot -1: from the game itself). Its name sorts after
+# net_refused, so the messages older versions use to check the version keep
+# their numbers (Godot numbers the @rpc functions alphabetically).
+@rpc("authority", "call_remote", "reliable")
+func net_say(slot: int, who: String, text: String) -> void:
+	add_chat(clampi(slot, -1, MAX_PLAYERS - 1), clean_text(who, NAME_MAX), clean_text(text, CHAT_MAX))
 
 
 # Another player asks to build in our area.

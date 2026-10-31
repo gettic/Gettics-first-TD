@@ -10,6 +10,9 @@ uniform float team = 0.0;
 // Tones down the bright parts (owner color and the orange trim) so they sit
 // better with the grass and stone: 0 as the pack has them, 1 grey
 uniform float mute = 0.0;
+// Rocks and trees: less color and darker, to sit with the painted grass
+uniform float saturation = 1.0;
+uniform vec3 tint : source_color = vec3(1.0);
 uniform vec3 rim_color : source_color = vec3(1.0, 0.92, 0.78);
 uniform float rim_strength = 0.3;
 uniform float rim_power = 3.0;
@@ -29,6 +32,7 @@ void fragment() {
 	vec3 col = texture(palette, UV).rgb;
 	float m = mute * bright;
 	col = mix(col, vec3(dot(col, vec3(0.299, 0.587, 0.114))), m) * (1.0 - 0.3 * m);
+	col = mix(vec3(dot(col, vec3(0.299, 0.587, 0.114))), col, saturation) * tint;
 	ALBEDO = col;
 	ROUGHNESS = 0.6;
 	float rim = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), rim_power);

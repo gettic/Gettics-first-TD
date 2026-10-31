@@ -89,13 +89,54 @@ func build_world() -> void:
 
 	camera = Camera3D.new()
 	camera.fov = 40.0
-	camera.position = Vector3(COLS / 2.0, 26.5, ROWS / 2.0 + 19.4)
 	add_child(camera)
-	camera_focus = Vector3(COLS / 2.0, 0.0, ROWS / 2.0 + 0.3)
-	camera.look_at(camera_focus)
 	camera.h_offset = CAMERA_H_OFFSET
 	camera.v_offset = CAMERA_V_OFFSET
-	camera_home = camera.position
+
+	# Range circle and build preview
+	var disc := CylinderMesh.new()
+	disc.top_radius = 1.0
+	disc.bottom_radius = 1.0
+	disc.height = 0.02
+	disc.radial_segments = 48
+	range_disc = add_mesh(self, disc, mat(Color.WHITE, 0.0, 0.07))
+	range_disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	build_markers_and_hud()
+	build_map()
+
+
+const VIEW_TILES := Vector2(24, 18)  # the map size the camera's normal distance is made for
+var view_scale := 1.0  # the camera's distance compared to the Default map's (see build_map())
+var map_root: Node3D  # the map's ground, base, gates and areas (see build_map())
+var area_centers: Array = []  # per player slot: the middle of that player's area (null: no tiles)
+
+
+# Removes everything build_map() made, so the map can change.
+func clear_map() -> void:
+	if map_root != null:
+		map_root.free()
+		map_root = null
+	gate_parts = []
+	area_planes = []
+	area_centers = []
+	ground_mats = []
+
+
+# Builds the map being played (see use_map()): ground, path, base, gates and areas.
+# Can be called again after the map changes.
+func build_map() -> void:
+	clear_map()
+	map_root = Node3D.new()
+	add_child(map_root)
+	# The camera looks at the map's middle, from further away on bigger maps
+	var s := maxf(maxf(map_cols / VIEW_TILES.x, map_rows / VIEW_TILES.y), 0.75)
+	view_scale = s
+	camera_focus = Vector3(map_cols / 2.0, 0.0, map_rows / 2.0 + 0.3)
+	camera_home = camera_focus + Vector3(0, 26.5, 19.1) * s
+	camera_pan = Vector2.ZERO
+	camera.position = camera_home
+	camera.look_at(camera_focus)
+	sun.directional_shadow_max_distance = 60.0 * maxf(s, 1.0)
 
 	# Ground: grass tiles, with the path sunk a little lower.
 	# Tiles are slightly bigger than one unit so they overlap and no gaps show between them.
@@ -105,9 +146,13 @@ func build_world() -> void:
 	tile.size = Vector3(1.01, 0.5, 1.01)
 	# Painted grass and dirt textures (see assets/shaders/ground.gdshader). A small
 	# image with one white pixel per path cell lets the shader blend the path's edge.
-	var mask := Image.create(COLS, ROWS, false, Image.FORMAT_L8)
+	# Water tiles count as path here: sunk lower, with a muddy bank around the water.
+	var mask := Image.create(map_cols, map_rows, false, Image.FORMAT_L8)
 	for c: Vector2i in path_cells:
 		if in_map(c):
+			mask.set_pixel(c.x, c.y, Color.WHITE)
+	for c: Vector2i in blocked:
+		if blocked[c] == "w" and in_map(c):
 			mask.set_pixel(c.x, c.y, Color.WHITE)
 	var grass := ShaderMaterial.new()
 	grass.shader = load("res://assets/shaders/ground.gdshader")
@@ -116,16 +161,18 @@ func build_world() -> void:
 	grass.set_shader_parameter("grass_nrm", load("res://assets/terrain/grass_normal.png"))
 	grass.set_shader_parameter("dirt_nrm", load("res://assets/terrain/dirt_normal.png"))
 	grass.set_shader_parameter("path_mask", ImageTexture.create_from_image(mask))
-	grass.set_shader_parameter("map_size", Vector2(COLS, ROWS))
+	grass.set_shader_parameter("map_size", Vector2(map_cols, map_rows))
 	var dirt: ShaderMaterial = grass.duplicate()
 	dirt.set_shader_parameter("is_path", 1.0)
+	grass.set_shader_parameter("grid", grid_fade)
 	ground_mats = [grass, dirt]
 	apply_graphics()
 	# One MultiMesh for the grass and one for the path, so the whole ground is 2 draw calls instead of 432
 	var spots := {-0.33: [], -0.25: []}
-	for x in COLS:
-		for y in ROWS:
-			var h := -0.33 if path_cells.has(Vector2i(x, y)) else -0.25
+	for x in map_cols:
+		for y in map_rows:
+			var c := Vector2i(x, y)
+			var h := -0.33 if path_cells.has(c) or blocked.get(c, "") == "w" else -0.25
 			spots[h].append(Vector3(x + 0.5, h, y + 0.5))
 	for h: float in spots:
 		var mm := MultiMesh.new()
@@ -137,23 +184,19 @@ func build_world() -> void:
 		var mmi := MultiMeshInstance3D.new()
 		mmi.multimesh = mm
 		mmi.material_override = dirt if h == -0.33 else grass
-		add_child(mmi)
+		map_root.add_child(mmi)
 	var base := BoxMesh.new()
-	base.size = Vector3(COLS + 0.6, 1.0, ROWS + 0.6)
-	add_mesh(self, base, mat(Color(0.16, 0.12, 0.09)), Vector3(COLS / 2.0, -0.85, ROWS / 2.0))
+	base.size = Vector3(map_cols + 0.6, 1.0, map_rows + 0.6)
+	add_mesh(map_root, base, mat(Color(0.16, 0.12, 0.09)), Vector3(map_cols / 2.0, -0.85, map_rows / 2.0))
+	build_decor()
 
-	for g in GATES.size():
-		build_gate(g)
-
-	# Range circle and build preview
-	var disc := CylinderMesh.new()
-	disc.top_radius = 1.0
-	disc.bottom_radius = 1.0
-	disc.height = 0.02
-	disc.radial_segments = 48
-	range_disc = add_mesh(self, disc, mat(Color.WHITE, 0.0, 0.07))
-	range_disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	build_markers_and_hud()
+	# A gate only where the map has one; gate_parts stays one entry per player slot
+	for g in gate_cells.size():
+		if gate_cells[g] == null:
+			gate_parts.append(null)
+		else:
+			build_gate(g)
+	build_areas()
 
 
 # Graphics High: ambient occlusion (dark contact shadows), bounced light, soft
@@ -202,9 +245,9 @@ func save_settings() -> void:
 func build_gate(g: int) -> void:
 	var gate := Node3D.new()
 	gate.position = to3d(routes[g][0])
-	var out_dir: Vector2i = LOOP[g] - GATES[g]
+	var out_dir: Vector2 = routes[g][1] - routes[g][0]
 	gate.rotation.y = atan2(out_dir.x, out_dir.y)
-	add_child(gate)
+	map_root.add_child(gate)
 	var stone := mat(Color(0.42, 0.42, 0.46))
 	var pillar := BoxMesh.new()
 	pillar.size = Vector3(0.22, 1.3, 0.3)
@@ -256,6 +299,135 @@ func box(x: float, y: float, z: float) -> BoxMesh:
 	return b
 
 
+# Each player's area, shown while placing a tower in multiplayer: one MultiMesh
+# of tile squares per player (see area_of), so any shape costs one draw call.
+func build_areas() -> void:
+	var square := PlaneMesh.new()
+	square.size = Vector2(1, 1)
+	var cells: Array = [[], [], [], []]
+	for c: Vector2i in area_of:
+		var slot: int = area_of[c]
+		if slot >= 0 and slot < MAX_PLAYERS:
+			cells[slot].append(c)
+	for slot in MAX_PLAYERS:
+		# Water isn't covered: it can't be built on, and the tint would change its color
+		var spots: Array[Vector3] = []
+		var sum := Vector2.ZERO
+		for c: Vector2i in cells[slot]:
+			if blocked.get(c, "") != "w":
+				spots.append(Vector3(c.x + 0.5, 0.04, c.y + 0.5))
+			sum += Vector2(c) + Vector2(0.5, 0.5)
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = square
+		mm.instance_count = spots.size()
+		for i in mm.instance_count:
+			mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, spots[i]))
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.material_override = m
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		mmi.visible = false
+		map_root.add_child(mmi)
+		area_planes.append(mmi)
+		# Its label goes in the middle of its tiles
+		var n: int = cells[slot].size()
+		if n > 0:
+			area_centers.append(Vector3(sum.x / n, 0.04, sum.y / n))
+		else:
+			area_centers.append(null)
+
+
+# Rocks and trees (KayKit Forest Nature Pack, scaled to fit one tile) and water.
+const ROCK_MODELS := [["Rock_1_E", 0.55], ["Rock_3_F", 0.6], ["Rock_3_C", 0.8], ["Rock_2_C", 0.45]]
+const TREE_MODELS := [["Tree_1_A", 0.3], ["Tree_2_A", 0.33], ["Tree_3_A", 0.3], ["Tree_4_A", 0.36]]
+var nature_mats := {}  # "r" or "t" -> the rocks' or trees' material
+
+
+# The pack material for rocks and trees, with less color and darker so they sit
+# with the painted grass (rocks a bit darker still). Shared by all of a kind.
+func nature_mat(mesh: Mesh, kind: String) -> ShaderMaterial:
+	if not nature_mats.has(kind):
+		var m: ShaderMaterial = pack_mat(mesh, 0).duplicate()
+		m.set_shader_parameter("saturation", 0.8)
+		m.set_shader_parameter("tint", Color(0.62, 0.63, 0.6) if kind == "r" else Color(0.7, 0.74, 0.66))
+		m.set_shader_parameter("rim_strength", 0.15)
+		nature_mats[kind] = m
+	return nature_mats[kind]
+
+
+# A number made from a tile's position: the same on every computer, so a map's
+# rocks and trees always look the same, for every player.
+func tile_hash(c: Vector2i) -> int:
+	var h := (c.x * 73856093) ^ (c.y * 19349663)
+	h = (h ^ (h >> 13)) * 1274126177
+	return (h ^ (h >> 16)) & 0x7fffffff
+
+
+# The map's rocks, trees and water (see blocked). Each tile gets a model, a turn and
+# a size from tile_hash(); one MultiMesh per model, so they cost a few draw calls
+# however many there are.
+func build_decor() -> void:
+	var by_model := {}  # model file -> [Transform3D, ...]
+	var water: Array[Vector2i] = []
+	for c: Vector2i in blocked:
+		var kind: String = blocked[c]
+		if kind == "w":
+			water.append(c)
+			continue
+		var models: Array = ROCK_MODELS if kind == "r" else TREE_MODELS
+		var h := tile_hash(c)
+		var pick: Array = models[h % models.size()]
+		var s: float = pick[1] * (0.9 + (h >> 4) % 21 / 100.0)
+		var turn := deg_to_rad((h >> 9) % 360)
+		var nudge := Vector3(((h >> 18) % 11 - 5) * 0.015, 0.0, ((h >> 22) % 11 - 5) * 0.015)
+		var tr := Transform3D(Basis(Vector3.UP, turn).scaled(Vector3.ONE * s), Vector3(c.x + 0.5, 0.0, c.y + 0.5) + nudge)
+		var file := "nature/%s_Color1" % pick[0]
+		if not by_model.has(file):
+			by_model[file] = []
+		by_model[file].append(tr)
+	for file: String in by_model:
+		for part: Array in pack_parts(file):
+			var mm := MultiMesh.new()
+			mm.transform_format = MultiMesh.TRANSFORM_3D
+			mm.mesh = part[0]
+			mm.instance_count = by_model[file].size()
+			for i in mm.instance_count:
+				mm.set_instance_transform(i, by_model[file][i] * part[1])
+			var mmi := MultiMeshInstance3D.new()
+			mmi.multimesh = mm
+			mmi.material_override = nature_mat(part[0], "r" if file.contains("Rock") else "t")
+			map_root.add_child(mmi)
+	if water.is_empty():
+		return
+	# Water: one square per tile just under the grass, drawn by water.gdshader.
+	# Its own small mask (one pixel per water cell) gives the soft edge.
+	var mask := Image.create(map_cols, map_rows, false, Image.FORMAT_L8)
+	for c in water:
+		if in_map(c):
+			mask.set_pixel(c.x, c.y, Color.WHITE)
+	var m := ShaderMaterial.new()
+	m.shader = load("res://assets/shaders/water.gdshader")
+	m.set_shader_parameter("water_mask", ImageTexture.create_from_image(mask))
+	m.set_shader_parameter("map_size", Vector2(map_cols, map_rows))
+	var square := PlaneMesh.new()
+	square.size = Vector2(1, 1)
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = square
+	mm.instance_count = water.size()
+	for i in mm.instance_count:
+		mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, Vector3(water[i].x + 0.5, -0.03, water[i].y + 0.5)))
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.material_override = m
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	map_root.add_child(mmi)
+
+
 func build_markers_and_hud() -> void:
 	range_disc.visible = false
 	var ghost_mesh := BoxMesh.new()
@@ -263,20 +435,6 @@ func build_markers_and_hud() -> void:
 	ghost_mat = mat(Color.GREEN, 0.0, 0.4)
 	ghost = add_mesh(self, ghost_mesh, ghost_mat)
 	ghost.visible = false
-
-	# Each player's area, shown while placing a tower in multiplayer
-	var area_mesh := PlaneMesh.new()
-	area_mesh.size = Vector2(COLS / 2.0, ROWS / 2.0)
-	for slot in MAX_PLAYERS:
-		var m := StandardMaterial3D.new()
-		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
-		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
-		var right := slot >= 2
-		var top := slot == 1 or slot == 2
-		var pos := Vector3(COLS * (0.75 if right else 0.25), 0.04, ROWS * (0.25 if top else 0.75))
-		var plane := add_mesh(self, area_mesh, m, pos)
-		plane.visible = false
-		area_planes.append(plane)
 
 	# Shared materials and meshes
 	stone_mat = mat(Color(0.35, 0.35, 0.4))
@@ -434,6 +592,13 @@ func low_roof(t: Array) -> bool:
 # loaded once and shared by every model like it. shape, if given, changes them
 # once when loaded (see remake_mesh()).
 func add_pack_model(parent: Node3D, file: String, slot: int, shape := Callable()) -> void:
+	for part: Array in pack_parts(file, shape):
+		var mi := add_mesh(parent, part[0], pack_mat(part[0], slot))
+		mi.transform = part[1]
+
+
+# A pack model's meshes, [[mesh, transform], ...], loaded once.
+func pack_parts(file: String, shape := Callable()) -> Array:
 	var key := file if shape.is_null() else "%s %s" % [file, shape.get_method()]
 	if not pack_meshes.has(key):
 		var parts := []
@@ -444,9 +609,7 @@ func add_pack_model(parent: Node3D, file: String, slot: int, shape := Callable()
 			for part: Array in parts:
 				part[0] = remake_mesh(part[0], shape)
 		pack_meshes[key] = parts
-	for part: Array in pack_meshes[key]:
-		var mi := add_mesh(parent, part[0], pack_mat(part[0], slot))
-		mi.transform = part[1]
+	return pack_meshes[key]
 
 
 # Rebuilds a pack mesh triangle by triangle: shape gets [a, b, c, uv_a, uv_b, uv_c]
@@ -706,11 +869,17 @@ func merge_parts(parts: Node3D) -> ArrayMesh:
 	return mesh
 
 
+const AREA_TINT_COMPAT := 0.42  # other players' area tint on Compatibility (0.2 on Forward+)
+
+
 func update_visuals(delta: float) -> void:
 	time += delta
-	# Keeps the map above the bottom console at every zoom
-	camera.v_offset = CAMERA_V_OFFSET * zoom
+	# Keeps the map above the bottom console at every zoom and map size:
+	# the shift grows with the camera's distance
+	camera.v_offset = CAMERA_V_OFFSET * zoom * view_scale
 	for g in gate_parts.size():
+		if gate_parts[g] == null:
+			continue
 		var in_use: bool = players[g] != null
 		for part in gate_parts[g].values():
 			part.visible = in_use
@@ -734,17 +903,20 @@ func update_visuals(delta: float) -> void:
 			y = lerpf(0.6, s.node.get_meta("from_y"), left)
 		s.node.position = to3d(s.pos, y)
 
-	# While placing a tower: your area glows in your color, other players' areas go dark
-	for slot in MAX_PLAYERS:
-		var plane: MeshInstance3D = area_planes[slot]
+	# While placing a tower: your area goes dark, other players' areas glow in their color.
+	# Compatibility blends colors in sRGB, which makes the same alpha look much fainter.
+	var tint := AREA_TINT_COMPAT if compat else 0.2
+	for slot in area_planes.size():
+		var plane: MultiMeshInstance3D = area_planes[slot]
 		plane.visible = showing_areas() and players[slot] != null
 		var own := slot == local_slot
-		plane.material_override.albedo_color = Color(PLAYER_COLORS[slot], 0.22) if own else Color(0, 0, 0, 0.5)
+		plane.material_override.albedo_color = Color(0, 0, 0, 0.5) if own else Color(PLAYER_COLORS[slot], tint)
 	# Grid lines fade in on the grass while placing a tower
 	var want := 1.0 if build_type != "" and state == "playing" else 0.0
 	if grid_fade != want:
 		grid_fade = move_toward(grid_fade, want, delta * 5.0)
-		ground_mats[0].set_shader_parameter("grid", grid_fade)
+		if not ground_mats.is_empty():
+			ground_mats[0].set_shader_parameter("grid", grid_fade)
 	range_disc.visible = false
 	ghost.visible = false
 	if selected != null:

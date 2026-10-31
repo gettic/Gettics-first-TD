@@ -1,4 +1,4 @@
-extends "res://game_ui.gd"
+extends "res://map_editor.gd"
 ## Gettic's first TD: the root script (see game_base.gd for how the files fit together).
 ## Waves, the update loop, input and player actions.
 
@@ -6,15 +6,8 @@ func _ready() -> void:
 	if is_debug_game():
 		open_log_window()
 	font = ThemeDB.fallback_font
-	# Each gate's route: the gate, then all four corners starting where it joins the square
-	for g in GATES.size():
-		var route: Array[Vector2] = [cell_center(GATES[g])]
-		for i in LOOP.size():
-			route.append(cell_center(LOOP[(g + i) % LOOP.size()]))
-		routes.append(route)
-		mark_path(GATES[g], LOOP[g])
-	for i in LOOP.size():
-		mark_path(LOOP[i], LOOP[(i + 1) % LOOP.size()])
+	# The path, gates, routes and areas come from the map (see read_map())
+	use_map(read_map(DEFAULT_MAP))
 	build_world()
 	build_hud()
 	multiplayer.peer_connected.connect(_on_peer_connected)
@@ -27,17 +20,6 @@ func _ready() -> void:
 			relay_url = arg.trim_prefix("--relay=")
 	play_alone()
 	check_for_update()
-
-
-# Marks the tiles on a straight line from a to b as path.
-func mark_path(a: Vector2i, b: Vector2i) -> void:
-	var step := Vector2i(signi(b.x - a.x), signi(b.y - a.y))
-	var c := a
-	while true:
-		path_cells[c] = true
-		if c == b:
-			break
-		c += step
 
 
 func new_game() -> void:
@@ -58,6 +40,7 @@ func new_game() -> void:
 func play_alone() -> void:
 	players = [null, null, null, null]
 	var me := Player.new()
+	me.name = my_name()
 	players[0] = me
 	local_slot = 0
 	new_game()
@@ -107,10 +90,10 @@ func call_wave(slot: int) -> String:
 	var text: String
 	if slot in wave_votes:
 		wave_votes.erase(slot)
-		text = "%s doesn't want the next wave early anymore (%d/%d)" % [PLAYER_NAMES[slot], wave_votes.size(), votes_needed()]
+		text = "%s doesn't want the next wave early anymore (%d/%d)" % [name_of(slot), wave_votes.size(), votes_needed()]
 	else:
 		wave_votes.append(slot)
-		text = "%s wants the next wave early (%d/%d)" % [PLAYER_NAMES[slot], wave_votes.size(), votes_needed()]
+		text = "%s wants the next wave early (%d/%d)" % [name_of(slot), wave_votes.size(), votes_needed()]
 	if not check_wave_votes():
 		flash(text)
 		send_all("net_message", [text])
@@ -132,6 +115,7 @@ func spawn_enemy(kind: String, g: int) -> void:
 	e.id = next_enemy_id
 	next_enemy_id += 1
 	e.route = routes[g]
+	e.loop_wp = loop_starts[g]
 	e.pos = e.route[0]
 	e.max_hp = spawn_hp
 	e.bounty = 2 + int(wave / 4.0)
@@ -157,7 +141,8 @@ func spawn_enemy(kind: String, g: int) -> void:
 func _process(delta: float) -> void:
 	if debug_log:
 		update_log_window()
-	code_input.visible = menu_open and net_mode == ""
+	code_input.visible = menu_open and net_mode == "" and not editing and not ed_ask_open and not pick_open
+	name_input.visible = code_input.visible
 	if net_mode == "searching":
 		update_search(delta)
 	elif net_mode == "connecting":
@@ -229,10 +214,11 @@ func update_camera(delta: float) -> void:
 		dir.x -= 1
 	if Input.is_physical_key_pressed(KEY_D):
 		dir.x += 1
-	if dir != Vector2.ZERO:
+	# Typing W, A, S or D in the chat or any text box (name, invite code, map name) doesn't move the camera
+	if dir != Vector2.ZERO and not chatting() and not (get_viewport().gui_get_focus_owner() is LineEdit):
 		# Move slower when zoomed in, so it doesn't feel too fast up close
 		camera_pan += dir.normalized() * CAMERA_SPEED * zoom * delta
-		camera_pan = camera_pan.clamp(-CAMERA_LIMIT, CAMERA_LIMIT)
+		camera_pan = camera_pan.clamp(-camera_limit(), camera_limit())
 	zoom = lerpf(zoom, target_zoom, 1.0 - exp(-12.0 * delta))
 	# Zooming slides the camera along the line it looks down, so the angle stays the same
 	var pan := Vector3(camera_pan.x, 0.0, camera_pan.y)
@@ -274,9 +260,9 @@ func update_enemies(dt: float) -> void:
 				e.traveled += d
 				move -= d
 				e.wp += 1
-				# After the last corner, go around the square again (route[1] is the first corner)
+				# After the last corner, go around the loop again from where the road joined it
 				if e.wp >= e.route.size():
-					e.wp = 1
+					e.wp = e.loop_wp
 			else:
 				e.pos += (target - e.pos) / d * move
 				e.traveled += move
@@ -433,6 +419,17 @@ func _unhandled_input(event: InputEvent) -> void:
 	if menu_open:
 		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 			menu_click(get_viewport().get_mouse_position())
+		elif pick_open and event is InputEventMouseButton and event.pressed and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
+			# Scrolls the list of maps in the Esc menu
+			var step := -1 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1
+			ed_list_top = clampi(ed_list_top + step, 0, maxi(ed_list.size() - ED_LIST_ROWS, 0))
+		return
+	if editing:
+		editor_input(event)
+		return
+	# Enter: chat (while typing, the chat box gets the keys, not the game)
+	if event is InputEventKey and event.pressed and not event.echo and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
+		open_chat()
 		return
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_RIGHT:
@@ -554,7 +551,7 @@ func act(action: String, args: Array) -> void:
 	match net_mode:
 		"client":
 			net_request.rpc_id(1, action, args)
-		"connecting":
+		"connecting", "map_offer":
 			pass
 		_:
 			var error := perform(local_slot, action, args)
@@ -603,7 +600,7 @@ func ask_to_build(slot: int, owner: int, c: Vector2i, type: String) -> String:
 		asks.append([id, slot, type, c])
 	else:
 		net_ask.rpc_id(players[owner].peer, id, slot, type, c)
-	return "That's %s's area. Waiting for %s to say yes..." % [PLAYER_NAMES[owner], PLAYER_NAMES[owner]]
+	return "That's %s's area. Waiting for %s to say yes..." % [name_of(owner), name_of(owner)]
 
 
 func answer_request(slot: int, id: int, yes: bool) -> void:
@@ -611,7 +608,7 @@ func answer_request(slot: int, id: int, yes: bool) -> void:
 	if r.is_empty() or r.to != slot:
 		return
 	end_request(id)
-	var who: String = PLAYER_NAMES[slot]
+	var who: String = name_of(slot)
 	if not yes:
 		tell(r.from, "%s said no" % who)
 		return
@@ -640,7 +637,7 @@ func update_requests(delta: float) -> void:
 			end_request(id)
 		elif r.time > 30.0:
 			end_request(id)
-			tell(r.from, "%s didn't answer" % PLAYER_NAMES[r.to])
+			tell(r.from, "%s didn't answer" % name_of(r.to))
 
 
 # This player answers the oldest question from another player.
@@ -690,7 +687,7 @@ func upgrade_tower(slot: int, c: Vector2i) -> String:
 	if t == null or state != "playing":
 		return ""
 	if t.owner != slot:
-		return "That's %s's tower" % PLAYER_NAMES[t.owner]
+		return "That's %s's tower" % name_of(t.owner)
 	if t.level >= 3:
 		return "Already max level"
 	var cost: int = TOWERS[t.type]["cost"][t.level + 1]
@@ -709,7 +706,7 @@ func sell_tower(slot: int, c: Vector2i) -> String:
 	if t == null or state != "playing":
 		return ""
 	if t.owner != slot:
-		return "That's %s's tower" % PLAYER_NAMES[t.owner]
+		return "That's %s's tower" % name_of(t.owner)
 	players[slot].gold += int(t.spent * 0.7)
 	remove_tower(c)
 	send_all("net_tower_removed", [c])

@@ -11,6 +11,7 @@ const UI_DIM := Color(0.55, 0.52, 0.47)
 
 var title_font: Font  # big titles; the normal font unless a style says otherwise
 var map_hud: Node2D  # 2D layer under the console: health bars, lightning, area labels
+var console_layer: Node2D  # the console's stone, drawn once (and again when the map changes)
 var portrait_view: SubViewport  # a close-up of the selected tower, shown in the console
 var portrait_cam: Camera3D
 
@@ -27,9 +28,9 @@ func build_hud() -> void:
 	map_hud = Node2D.new()
 	layer.add_child(map_hud)
 	map_hud.draw.connect(draw_on.bind(map_hud, draw_map_overlays))
-	var stone := Node2D.new()
-	layer.add_child(stone)
-	stone.draw.connect(draw_on.bind(stone, ui_console))
+	console_layer = Node2D.new()
+	layer.add_child(console_layer)
+	console_layer.draw.connect(draw_on.bind(console_layer, ui_console))
 	# The portrait: a second small camera in the same world, only drawn while a tower is selected
 	portrait_view = SubViewport.new()
 	portrait_view.size = Vector2i(PORTRAIT_RECT.size)
@@ -42,28 +43,73 @@ func build_hud() -> void:
 	layer.add_child(hud)
 	hud.draw.connect(draw_hud)
 
-	# Text box in the Esc menu for typing an invite code
-	code_input = LineEdit.new()
-	code_input.position = JOIN_INPUT_RECT.position
-	code_input.size = JOIN_INPUT_RECT.size
-	code_input.placeholder_text = "Invite code"
-	code_input.max_length = 40
-	code_input.add_theme_font_size_override("font_size", 18)
-	# Sunken stone with a thin gold edge, like the buttons
+	# Text boxes: the invite code and the player's name in the Esc menu, and the chat
+	code_input = text_box(layer, JOIN_INPUT_RECT, "Invite code", 40, 18)
+	code_input.text_submitted.connect(func(_t: String) -> void: join_game())
+	name_input = text_box(layer, NAME_INPUT_RECT, "", NAME_MAX, 17)
+	name_input.text_submitted.connect(func(_t: String) -> void: name_input.release_focus())
+	name_input.focus_exited.connect(save_name)
+	load_name()
+	# Chat: Enter opens this box, Enter sends, Esc cancels
+	chat_input = text_box(layer, CHAT_INPUT_RECT, "Say something to everyone   (Enter: send, Esc: cancel)", CHAT_MAX, 15)
+	var see_through: StyleBoxFlat = chat_input.get_theme_stylebox("focus").duplicate()
+	see_through.bg_color = Color(0.03, 0.03, 0.035, 0.75)
+	chat_input.add_theme_stylebox_override("normal", see_through)
+	chat_input.add_theme_stylebox_override("focus", see_through)
+	chat_input.text_submitted.connect(func(t: String) -> void:
+		send_chat(t)
+		close_chat())
+	chat_input.gui_input.connect(func(e: InputEvent) -> void:
+		if e is InputEventKey and e.pressed and e.keycode == KEY_ESCAPE:
+			close_chat()
+			chat_input.accept_event())
+	chat_input.focus_exited.connect(close_chat)
+
+
+# A hidden text box: sunken stone with a thin gold edge, like the buttons.
+func text_box(layer: CanvasLayer, r: Rect2, placeholder: String, most: int, size: int) -> LineEdit:
+	var input := LineEdit.new()
+	input.position = r.position
+	input.size = r.size
+	input.placeholder_text = placeholder
+	input.max_length = most
+	input.add_theme_font_size_override("font_size", size)
 	var box := StyleBoxFlat.new()
 	box.bg_color = Color(0.06, 0.06, 0.065)
 	box.border_color = UI_GOLD_DARK
 	box.set_border_width_all(1)
 	box.content_margin_left = 8
-	code_input.add_theme_stylebox_override("normal", box)
+	input.add_theme_stylebox_override("normal", box)
 	var focus := box.duplicate()
 	focus.border_color = UI_GOLD
-	code_input.add_theme_stylebox_override("focus", focus)
-	code_input.add_theme_color_override("font_color", UI_TEXT)
-	code_input.add_theme_color_override("font_placeholder_color", UI_DIM)
-	code_input.visible = false
-	code_input.text_submitted.connect(func(_t: String) -> void: join_game())
-	layer.add_child(code_input)
+	input.add_theme_stylebox_override("focus", focus)
+	input.add_theme_color_override("font_color", UI_TEXT)
+	input.add_theme_color_override("font_placeholder_color", UI_DIM)
+	input.visible = false
+	layer.add_child(input)
+	return input
+
+
+func open_chat() -> void:
+	chat_input.visible = true
+	chat_input.grab_focus()
+
+
+func close_chat() -> void:
+	chat_input.text = ""
+	chat_input.visible = false
+	chat_input.release_focus()
+
+
+func chatting() -> bool:
+	return chat_input.visible
+
+
+# The small map's ground is on the console's layer, so that's drawn again too.
+func build_map() -> void:
+	super()
+	if console_layer != null:
+		console_layer.queue_redraw()
 
 
 # Runs draw_func with the drawing helpers drawing on node instead of hud.
@@ -92,10 +138,73 @@ func draw_hud() -> void:
 	draw_panel()
 	if state != "playing":
 		draw_end_screen()
+	draw_chat()
 	if menu_open:
 		draw_menu()
 	if update_dialog != "":
 		draw_update_dialog()
+
+
+# The last chat lines, just above the minimap like in Warcraft III: "Name: text"
+# with the name in the player's color. Each line fades out after CHAT_SHOW
+# seconds; while typing, the last lines all show.
+func draw_chat() -> void:
+	var size := 15
+	var width := CHAT_INPUT_RECT.size.x
+	var now := Time.get_ticks_msec() / 1000.0
+	var typing := chatting()
+	var y := CHAT_INPUT_RECT.position.y - 8.0 if typing else CHAT_INPUT_RECT.end.y - 8.0
+	var shown := 0
+	for i in range(chat_log.size() - 1, -1, -1):
+		var line: Array = chat_log[i]
+		var alpha := 1.0 if typing else clampf(CHAT_SHOW - (now - line[3]), 0.0, 1.0)
+		if alpha <= 0.0:
+			break
+		var slot: int = line[0]
+		var who := "" if slot < 0 else str(line[1]) + ": "
+		var who_w := font.get_string_size(who, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+		var rows := wrap_words(str(line[2]), width - who_w, width, size)
+		var col := Color(UI_GOLD_LIGHT, alpha) if slot < 0 else Color(UI_TEXT, alpha)
+		for r in range(rows.size() - 1, -1, -1):
+			if shown >= CHAT_LINES:
+				return
+			var x := CHAT_INPUT_RECT.position.x + 4.0
+			if r == 0 and who != "":
+				chat_text(Vector2(x, y), who, size, Color(PLAYER_COLORS[slot], alpha))
+				x += who_w
+			chat_text(Vector2(x, y), rows[r], size, col)
+			y -= size + 4.0
+			shown += 1
+
+
+func chat_text(pos: Vector2, s: String, size: int, col: Color) -> void:
+	hud.draw_string_outline(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, 4, Color(0, 0, 0, 0.85 * col.a))
+	hud.draw_string(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
+
+
+# Splits text into lines that fit: the first line is first_width wide, the rest width.
+func wrap_words(s: String, first_width: float, width: float, size: int) -> PackedStringArray:
+	var rows := PackedStringArray()
+	var row := ""
+	var room := first_width
+	for word in s.split(" ", false):
+		var next := word if row == "" else row + " " + word
+		if row != "" and font.get_string_size(next, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x > room:
+			rows.append(row)
+			room = width
+			next = word
+		# A word too long for a whole line is cut
+		while font.get_string_size(next, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x > room and next.length() > 1:
+			var cut := next.length() - 1
+			while cut > 1 and font.get_string_size(next.left(cut), HORIZONTAL_ALIGNMENT_LEFT, -1, size).x > room:
+				cut -= 1
+			rows.append(next.left(cut))
+			room = width
+			next = next.substr(cut)
+		row = next
+	if row != "":
+		rows.append(row)
+	return rows
 
 
 # Health bars, lightning and area labels: under the console.
@@ -117,12 +226,14 @@ func draw_area_labels() -> void:
 	for slot in MAX_PLAYERS:
 		if players[slot] == null:
 			continue
-		var p := camera.unproject_position(area_planes[slot].position)
+		if slot >= area_centers.size() or area_centers[slot] == null:
+			continue
+		var p := camera.unproject_position(area_centers[slot])
 		if slot == local_slot:
 			outlined(p, "Your area", 24, UI_TEXT)
 		else:
-			outlined(p, "%s's area" % PLAYER_NAMES[slot], 24, PLAYER_COLORS[slot])
-			outlined(p + Vector2(0, 24), "%s must say yes" % PLAYER_NAMES[slot], 15, UI_GREY)
+			outlined(p, "%s's area" % name_of(slot), 24, UI_TEXT)
+			outlined(p + Vector2(0, 24), "%s must say yes" % name_of(slot), 15, UI_GREY)
 
 
 # Centered text with a dark outline, readable on top of the map.
@@ -142,7 +253,7 @@ func draw_ask() -> void:
 	ui_box(r)
 	# A strip in the asking player's color
 	hud.draw_rect(Rect2(r.position.x + 10, r.position.y + 40, r.size.x - 20, 2), PLAYER_COLORS[from] * Color(1, 1, 1, 0.7))
-	var line := "%s wants to build a %s tower in your area" % [PLAYER_NAMES[from], str(ask[2]).capitalize()]
+	var line := "%s wants to build a %s tower in your area" % [name_of(from), str(ask[2]).capitalize()]
 	if asks.size() > 1:
 		line += "  (+%d more)" % (asks.size() - 1)
 	text(r.position + Vector2(20, 32), line, 17, PLAYER_COLORS[from])
@@ -301,7 +412,7 @@ func next_wave_text() -> String:
 
 # Hints on the left, the update button in the middle, resources on the right.
 func draw_top_bar() -> void:
-	text(Vector2(14, 20), "WASD: move camera    Scroll: zoom    Right-click: cancel    Esc: menu & multiplayer", 13, UI_DIM)
+	text(Vector2(14, 20), "WASD: move camera    Scroll: zoom    Right-click: cancel    Enter: chat    Esc: menu & multiplayer", 13, UI_DIM)
 	if update_version != "":
 		button(UPDATE_RECT, "New version %s - Update" % update_version, true, true)
 	var x := SCREEN_W - 14.0
@@ -336,11 +447,11 @@ func resource(x: float, s: String, size: int, col: Color, icon: String) -> float
 # Towers, monsters, gates in use and the camera's view on the small map
 # (the ground and the path are on the stone layer).
 func draw_minimap() -> void:
-	var m := MINIMAP_RECT
-	var k := m.size.x / COLS  # pixels per tile
-	for g in GATES.size():
-		if players[g] != null:
-			hud.draw_rect(Rect2(m.position + Vector2(GATES[g]) * k, Vector2(k, k)).grow(1), PLAYER_COLORS[g])
+	var m := minimap_map()
+	var k := m.size.x / map_cols  # pixels per tile
+	for g in gate_cells.size():
+		if gate_cells[g] != null and players[g] != null:
+			hud.draw_rect(Rect2(m.position + Vector2(gate_cells[g]) * k, Vector2(k, k)).grow(1), PLAYER_COLORS[g])
 	for t: Tower in towers.values():
 		var r := Rect2(m.position + Vector2(t.cell) * k, Vector2(k, k)).grow(-1)
 		hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.8))
@@ -388,7 +499,7 @@ func draw_wave_info() -> void:
 			if slot == local_slot:
 				hud.draw_arc(Vector2(px + 6, BAR_TOP + 140), 9, 0, TAU, 20, UI_GOLD_LIGHT, 1.5)
 			px += 22
-		text(Vector2(px + 4, BAR_TOP + 145), "You: %s" % PLAYER_NAMES[local_slot], 14, PLAYER_COLORS[local_slot])
+		text(Vector2(px + 4, BAR_TOP + 145), "You: %s" % name_of(local_slot), 14, PLAYER_COLORS[local_slot])
 	else:
 		text(Vector2(x, BAR_TOP + 145), "Build: keys 1-4   Upgrade: U   Sell: X", 13, UI_DIM)
 
@@ -415,7 +526,7 @@ func draw_selected() -> void:
 	var right := x + 196
 	hud.draw_multiline_string(font, Vector2(right, BAR_TOP + 96), data["desc"], HORIZONTAL_ALIGNMENT_LEFT, 130, 14, 2, UI_GREY)
 	if not mine:
-		text(Vector2(right, BAR_TOP + 140), "Built by %s" % PLAYER_NAMES[selected.owner], 14, PLAYER_COLORS[selected.owner])
+		text(Vector2(right, BAR_TOP + 140), "Built by %s" % name_of(selected.owner), 14, PLAYER_COLORS[selected.owner])
 	elif lv == 3:
 		text(Vector2(right, BAR_TOP + 140), "Max level", 14, UI_GOLD_LIGHT)
 
@@ -577,7 +688,7 @@ func draw_card_tip(i: int) -> void:
 		lines = [wave_tip(), next_wave_text()]
 	else:
 		title = "Game speed x%d (F)" % game_speed
-		lines = ["Only the host can change the speed."] if net_mode == "client" else ["Switches between normal and double speed."]
+		lines = ["Only the host can change the speed."] if net_mode == "client" else ["Switches between normal, double and triple speed."]
 	var r := Rect2(SCREEN_W - 372, BAR_TOP - 24 - 34 - lines.size() * 20, 360, 34 + lines.size() * 20 + 10)
 	hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.9), false, 1.0)
 	hud.draw_rect(r, Color(0.05, 0.05, 0.055, 0.92))
@@ -657,65 +768,66 @@ func draw_menu() -> void:
 	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 40).x
 	ui_title(Rect2(m.position.x, m.position.y, m.size.x, 66), Vector2((SCREEN_W - tw) / 2.0, m.position.y + 50), title, 40)
 	var sub := "The game is paused." if net_mode == "" else "The game keeps running while this menu is open."
-	centered(m.position.y + 88, sub, 15, UI_GREY)
+	centered(m.position.y + 84, sub, 15, UI_GREY)
 	button(GRAPHICS_RECT, "Graphics: %s" % ("High" if graphics_high else "Low"), true, graphics_high)
-	ui_heading(Vector2(left, 180), "MULTIPLAYER", width)
+	ui_heading(Vector2(left, 196), "MULTIPLAYER", width)
 	var grey := UI_GREY
 	var gold_col := Color(1, 0.85, 0.3)
 	match net_mode:
 		"":
+			text(Vector2(left, NAME_INPUT_RECT.position.y + 24), "Your name:", 16, UI_TEXT)
 			button(HOST_RECT, "Host a game and get an invite code", true, true)
-			text(Vector2(left, 280), "Or join a friend's game with their invite code:", 15, grey)
+			text(Vector2(left, JOIN_INPUT_RECT.position.y - 12), "Or join a friend's game with their invite code:", 15, grey)
 			button(JOIN_BUTTON_RECT, "Join")
-			hud.draw_multiline_string(font, Vector2(left, 360), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 15, 3, Color(1, 0.75, 0.5))
+			hud.draw_multiline_string(font, Vector2(left, JOIN_INPUT_RECT.end.y + 26), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 15, 3, Color(1, 0.75, 0.5))
 			if relay_url != "":
 				draw_public_games()
 		"searching", "connecting":
 			button(HOST_RECT, "Cancel")
-			hud.draw_multiline_string(font, Vector2(left, 270), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 16, 3, grey)
+			hud.draw_multiline_string(font, Vector2(left, HOST_RECT.end.y + 30), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 16, 3, grey)
 		"host":
-			text(Vector2(left, 218), "Invite code:", 15, grey)
+			text(Vector2(left, 234), "Invite code:", 15, grey)
 			if invite_code != "":
-				text(Vector2(left, 262), invite_code, 40, gold_col)
+				text(Vector2(left, 278), invite_code, 40, gold_col)
 				button(COPY_RECT, "Copy")
 			else:
-				text(Vector2(left, 256), "Getting your invite code...", 18, grey)
-			hud.draw_multiline_string(font, Vector2(left, 296), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 14, 3, grey)
+				text(Vector2(left, 272), "Getting your invite code...", 18, grey)
+			hud.draw_multiline_string(font, Vector2(left, 312), net_status, HORIZONTAL_ALIGNMENT_LEFT, width, 14, 3, grey)
 			if relay != null and invite_code != "":
 				var label := "Public game: ON  (anyone can find it in the list)" if public_game else "Public game: OFF  (only friends with the code)"
 				button(PUBLIC_RECT, label, true, public_game)
-			draw_player_list(Vector2(left, 412))
+			draw_player_list(Vector2(left, 428))
 			button(STOP_RECT, "Stop hosting")
 		"client":
-			text(Vector2(left, 218), "You are playing as %s." % PLAYER_NAMES[local_slot], 16, PLAYER_COLORS[local_slot])
-			draw_player_list(Vector2(left, 250))
+			text(Vector2(left, 234), "You are playing as %s." % name_of(local_slot), 16, PLAYER_COLORS[local_slot])
+			draw_player_list(Vector2(left, 266))
 			button(STOP_RECT, "Leave the game")
 	button(RESUME_RECT, "Resume (Esc)")
 
 
 func game_row_rect(i: int) -> Rect2:
-	return Rect2(HOST_RECT.position.x, 444 + i * 38, HOST_RECT.size.x, 34)
+	return Rect2(HOST_RECT.position.x, REFRESH_RECT.end.y + 8 + i * 38, HOST_RECT.size.x, 34)
 
 
 func draw_public_games() -> void:
 	var left := HOST_RECT.position.x
-	ui_heading(Vector2(left, 428), "PUBLIC GAMES", REFRESH_RECT.position.x - left - 10)
+	ui_heading(Vector2(left, REFRESH_RECT.position.y + 20), "PUBLIC GAMES", REFRESH_RECT.position.x - left - 10)
 	button(REFRESH_RECT, "Refresh", games_http == null)
 	if public_games.is_empty():
-		text(Vector2(left, 470), games_status, 15, UI_GREY)
+		text(Vector2(left, REFRESH_RECT.end.y + 34), games_status, 15, UI_GREY)
 	for i in mini(public_games.size(), GAME_ROWS):
 		var g: Dictionary = public_games[i]
 		button(game_row_rect(i), "Join  %s      %d / %d players      wave %d" % [g.code, int(g.players), MAX_PLAYERS, int(g.wave)])
 
 
 func draw_player_list(pos: Vector2) -> void:
-	text(pos, "Players (%d / %d):" % [player_count(), MAX_PLAYERS], 15, UI_GREY)
+	text(pos, "Players (%d / %d):" % [player_count(), map_slots()], 15, UI_GREY)
 	var y := pos.y + 24
 	for slot in MAX_PLAYERS:
 		if players[slot] == null:
 			continue
 		hud.draw_circle(Vector2(pos.x + 8, y - 5), 6, PLAYER_COLORS[slot])
-		var who: String = PLAYER_NAMES[slot]
+		var who: String = name_of(slot)
 		if slot == local_slot:
 			who += " (you)"
 		elif players[slot].peer == 1:
@@ -860,11 +972,19 @@ func ui_console() -> void:
 
 # The small map's grass and path.
 func draw_minimap_ground() -> void:
-	var m := MINIMAP_RECT
-	var k := m.size.x / COLS
+	var m := minimap_map()
+	var k := m.size.x / map_cols
 	hud.draw_rect(m, Color(0.13, 0.27, 0.1))
 	for c: Vector2i in path_cells:
 		hud.draw_rect(Rect2(m.position + Vector2(c) * k, Vector2(k, k)), Color(0.4, 0.28, 0.16))
+
+
+# Where the map sits on the small map: as big as fits, in the middle.
+func minimap_map() -> Rect2:
+	var m := MINIMAP_RECT
+	var k := minf(m.size.x / map_cols, m.size.y / map_rows)
+	var size := Vector2(map_cols, map_rows) * k
+	return Rect2(m.position + (m.size - size) / 2.0, size)
 
 
 # A dark sunken area, with light on its lower edges.
@@ -944,6 +1064,8 @@ func toggle_menu() -> void:
 	games_timer = 0.0  # fresh list of public games when the menu opens
 	if not menu_open:
 		code_input.release_focus()
+		name_input.release_focus()
+	close_chat()
 
 
 func menu_click(p: Vector2) -> void:
