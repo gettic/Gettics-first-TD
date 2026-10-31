@@ -104,18 +104,28 @@ Everyone needs the same game version.
 
 ## Changing the game
 
-All the game code is in `main.gd`. Good places to start:
+The game code is split into a few files, each building on the one before:
 
-- `TOWERS` at the top sets each tower's cost, damage, range and fire rate.
+| File | What's in it |
+|---|---|
+| `game_base.gd` | All the settings (constants) and the game's shared state |
+| `game_updates.gd` | Checking for updates, unpacking the downloaded `.exe`, and the debug log window |
+| `game_world.gd` | The 3D world: map, gates, tower and monster models, shots and effects |
+| `game_net.gd` | Multiplayer: hosting, joining, invite codes, public games |
+| `game_ui.gd` | The side panel, menus and popups |
+| `main.gd` | The game itself: waves, monsters walking, towers shooting, keys and clicks |
+
+Good places to start:
+
+- `TOWERS` in `game_base.gd` sets each tower's cost, damage, range and fire rate.
 - `START_GOLD`, `MAX_ALIVE`, `WAVE_INTERVAL` and `MAX_WAVE` set the starting gold, the monster limit (per player), the time between waves and the number of waves.
 - `EARLY_VOTE` sets the share of players (0.75 = 75%) who must agree to send a wave early in multiplayer.
 - `LOOP` sets the square's corners, and `GATES` where each player's gate stands, just outside one corner.
 - `PLAYER_NAMES` and `PLAYER_COLORS` set each player's name and color.
-- `start_wave()` controls how much health enemies get each wave, and how many come out of each gate.
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.
-- `build_world()` sets up the 3D scene: camera angle, lighting and map colors. `build_gate()` builds the gates.
-- `build_tower_node()` builds each tower's 3D model.
-- The **multiplayer** section of `main.gd` has the networking: `RELAY_URL` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used for games on your own network.
-- The **unpacking** section of `main.gd` splits the downloaded `.exe` into the engine and the game the first time it runs; `GAME_FOLDER` and `GAME_NAME` set the folder's and files' names.
+- `start_wave()` in `main.gd` controls how much health enemies get each wave, and how many come out of each gate.
+- `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting and map colors. `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model.
+- `RELAY_URL` in `game_base.gd` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used for games on your own network.
+- `GAME_FOLDER` and `GAME_NAME` in `game_base.gd` set the names of the folder and files the downloaded `.exe` unpacks into.
 - The game server is a small Cloudflare Worker, kept outside this repository.
 - To see errors while testing, start the game with `godot --path . -- --debug-log`: a second window lists every error, warning and print (**F12** shows and hides it). The **Windows Debug** export preset builds a separate debug .exe that always has this window and never unpacks or updates itself.
