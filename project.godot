@@ -3,8 +3,8 @@ config_version=5
 
 [application]
 
-config/name="Spiral TD"
-config/version="1.17"
+config/name="Gettic’s first TD"
+config/version="1.18"
 run/main_scene="res://main.tscn"
 config/features=PackedStringArray("4.7")
 

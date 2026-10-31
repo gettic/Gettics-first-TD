@@ -45,7 +45,7 @@ godot --path path/to/this/folder
 | **X** / **Delete** | Sell the selected tower (70% refund) |
 | **W A S D** | Move the camera |
 | **Scroll wheel** | Zoom in and out |
-| **Space** | Start the game / send the next wave early (bonus gold, once the current wave has fully spawned) |
+| **Space** | Start the game / send the next wave early (bonus gold, once the current wave has fully spawned; in multiplayer it's a vote, press again to take it back) |
 | **F** | Change game speed (1×, 2×, 3×; in multiplayer only the host can) |
 | **Y** / **N** | Say yes or no when another player asks to build in your area |
 | **Right-click** | Cancel |
@@ -80,6 +80,7 @@ Up to 4 players can defend the square together.
 
 - Each player has a **gate at their own corner** of the square: Blue bottom-left, Red top-left, Yellow top-right, Pink bottom-right. Every player's gate sends a full wave, so **more players means more monsters**, and the loss limit grows with it: **50 alive monsters per player** (100 with 2 players, 200 with 4).
 - **Each player has their own area**: the quarter of the map around their gate. When you pick a tower to build, your area lights up and the other players' areas go dark. To build in someone else's area, they have to say yes: a box pops up for them (**Y** for yes, **N** for no). Areas of gates nobody plays are free for everyone.
+- **Sending a wave early is a vote**: pressing **Space** votes for it, and the wave comes once at least **75% of the players** agree (2 of 2, 3 of 3, or 3 of 4). The button shows the votes, like `2/3`. Press **Space** again to take your vote back. Starting the first wave doesn't need a vote.
 - **Everyone has their own gold.** Every player gets the wave bonus, and the gold for a kill goes to the player whose tower made it. Tower bases are tinted in the owner's color, and you can only upgrade or sell your own towers.
 - You can start hosting in the middle of a game and keep your towers. A player who joins late gets some extra gold to catch up. If a player leaves, their gate closes and their towers stay.
 - In multiplayer, **Esc doesn't pause** the game.
@@ -107,6 +108,7 @@ All the game code is in `main.gd`. Good places to start:
 
 - `TOWERS` at the top sets each tower's cost, damage, range and fire rate.
 - `START_GOLD`, `MAX_ALIVE`, `WAVE_INTERVAL` and `MAX_WAVE` set the starting gold, the monster limit (per player), the time between waves and the number of waves.
+- `EARLY_VOTE` sets the share of players (0.75 = 75%) who must agree to send a wave early in multiplayer.
 - `LOOP` sets the square's corners, and `GATES` where each player's gate stands, just outside one corner.
 - `PLAYER_NAMES` and `PLAYER_COLORS` set each player's name and color.
 - `start_wave()` controls how much health enemies get each wave, and how many come out of each gate.
@@ -116,3 +118,4 @@ All the game code is in `main.gd`. Good places to start:
 - The **multiplayer** section of `main.gd` has the networking: `RELAY_URL` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used for games on your own network.
 - The **unpacking** section of `main.gd` splits the downloaded `.exe` into the engine and the game the first time it runs; `GAME_FOLDER` and `GAME_NAME` set the folder's and files' names.
 - The game server is a small Cloudflare Worker, kept outside this repository.
+- To see errors while testing, start the game with `godot --path . -- --debug-log`: a second window lists every error, warning and print (**F12** shows and hides it). The **Windows Debug** export preset builds a separate debug .exe that always has this window and never unpacks or updates itself.

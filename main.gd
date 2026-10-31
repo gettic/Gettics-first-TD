@@ -1,4 +1,4 @@
-﻿extends Node3D
+extends Node3D
 ## Gettic's first TD - a small 3D tower defense game.
 ## Monsters come out of a gate at each player's corner and walk around a square.
 ## Up to 4 players can play together over the network (see "multiplayer").
@@ -33,6 +33,7 @@ const MAX_PLAYERS := 4
 const PLAYER_NAMES := ["Blue", "Red", "Yellow", "Pink"]
 const PLAYER_COLORS := [Color(0.3, 0.55, 1.0), Color(1.0, 0.3, 0.3), Color(1.0, 0.85, 0.2), Color(1.0, 0.45, 0.8)]
 const ENEMY_KINDS := ["normal", "fast", "armored", "boss"]
+const EARLY_VOTE := 0.75  # with more players, this share of them must agree to send a wave early
 
 # Multiplayer: the host's game runs everything, the others send it their actions
 const NET_PORT := 24750
@@ -123,6 +124,10 @@ const RELEASES_API := "https://api.github.com/repos/gettic/Gettics-first-TD/rele
 const GAME_FOLDER := "Gettic's first TD"
 const GAME_NAME := "Gettic's first TD"  # the files are named like "Gettic's first TD v1.16.exe"
 
+# The debug build (made with /debuggame) is exported with this feature tag.
+# It opens a log window, and never unpacks, renames or updates itself.
+const DEBUG_FEATURE := "debug_game"
+
 
 class Enemy:
 	var id := 0  # the same on every player's computer
@@ -178,6 +183,49 @@ class Player:
 	var peer := 1  # network id; the host is always 1
 	var slot := 0  # 0-3: which gate and color
 	var gold := 0
+
+
+# Catches every error, warning and print in the debug build, for the log window.
+# Godot may call it from other threads, so lines wait in a list until the game takes them.
+class DebugLog extends Logger:
+	var lines: Array = []  # [text, color, is_error]
+	var lock := Mutex.new()
+
+	func _log_error(function: String, file: String, line: int, code: String, rationale: String,
+			_editor_notify: bool, error_type: int, script_backtraces: Array[ScriptBacktrace]) -> void:
+		# Errors raised from the game's own code: point at that line, not inside the engine
+		for bt in script_backtraces:
+			if bt.get_frame_count() > 0:
+				function = bt.get_frame_function(0)
+				file = bt.get_frame_file(0)
+				line = bt.get_frame_line(0)
+				break
+		var kind := "ERROR"
+		var col := Color(1.0, 0.45, 0.4)
+		if error_type == ERROR_TYPE_WARNING:
+			kind = "WARNING"
+			col = Color(1.0, 0.8, 0.35)
+		elif error_type == ERROR_TYPE_SCRIPT:
+			kind = "SCRIPT ERROR"
+		elif error_type == ERROR_TYPE_SHADER:
+			kind = "SHADER ERROR"
+		var what := rationale if rationale != "" else code
+		add("%s: %s\n    at %s (%s:%d)" % [kind, what, function, file, line], col, error_type != ERROR_TYPE_WARNING)
+
+	func _log_message(message: String, error: bool) -> void:
+		add(message.strip_edges(false, true), Color(1.0, 0.6, 0.5) if error else Color(0.75, 0.75, 0.8), error)
+
+	func add(text: String, col: Color, is_error := false) -> void:
+		lock.lock()
+		lines.append([Time.get_time_string_from_system() + "  " + text, col, is_error])
+		lock.unlock()
+
+	func take() -> Array:
+		lock.lock()
+		var out := lines
+		lines = []
+		lock.unlock()
+		return out
 
 
 # A network connection that goes through the game server (see RELAY_URL)
@@ -345,6 +393,7 @@ var gold: int:
 		if players[local_slot] != null:
 			players[local_slot].gold = value
 var next_wave_timer := 0.0
+var wave_votes: Array = []  # player slots that want the next wave early (see EARLY_VOTE)
 var wave := 0
 var spawn_queues: Array = [[], [], [], []]  # monster kinds still to come out of each gate
 var spawn_timers := [0.0, 0.0, 0.0, 0.0]
@@ -396,6 +445,10 @@ var update_error := ""
 var update_http: HTTPRequest
 var unpack_chosen := ""  # a folder the player picked to unpack to, instead of next to the download
 var folder_picker: FileDialog
+var debug_log: DebugLog  # only in the debug build
+var log_window: Window
+var log_text: RichTextLabel
+var log_errors := 0
 
 # 3D scene pieces
 var camera: Camera3D
@@ -419,6 +472,8 @@ var shot_mats := {}
 
 
 func _ready() -> void:
+	if is_debug_game():
+		open_log_window()
 	font = ThemeDB.fallback_font
 	# Each gate's route: the gate, then all four corners starting where it joins the square
 	for g in GATES.size():
@@ -453,10 +508,83 @@ func mark_path(a: Vector2i, b: Vector2i) -> void:
 		c += step
 
 
+# ---------------------------------------------------------------- debug log
+
+# True in the debug build, or when started with "-- --debug-log" (for example from source).
+func is_debug_game() -> bool:
+	return OS.has_feature(DEBUG_FEATURE) or "--debug-log" in OS.get_cmdline_user_args()
+
+
+# A second window next to the game that lists every error, warning and print.
+# F12 shows and hides it.
+func open_log_window() -> void:
+	debug_log = DebugLog.new()
+	OS.add_logger(debug_log)
+	get_viewport().gui_embed_subwindows = false  # a real window of its own
+	log_window = Window.new()
+	log_window.title = "Gettic's first TD - debug log (F12 hides it)"
+	log_window.size = Vector2i(720, 460)
+	var main_window := get_window()
+	log_window.position = main_window.position + Vector2i(main_window.size.x + 8, 0)
+	log_window.close_requested.connect(func(): log_window.hide())
+	var bg := ColorRect.new()
+	bg.color = Color(0.07, 0.07, 0.09)
+	bg.set_anchors_preset(Control.PRESET_FULL_RECT)
+	log_window.add_child(bg)
+	var box := VBoxContainer.new()
+	box.set_anchors_preset(Control.PRESET_FULL_RECT)
+	box.offset_left = 8
+	box.offset_top = 8
+	box.offset_right = -8
+	box.offset_bottom = -8
+	log_window.add_child(box)
+	var buttons := HBoxContainer.new()
+	box.add_child(buttons)
+	var copy := Button.new()
+	copy.text = "Copy all"
+	copy.pressed.connect(func(): DisplayServer.clipboard_set(log_text.get_parsed_text()))
+	buttons.add_child(copy)
+	var clear := Button.new()
+	clear.text = "Clear"
+	clear.pressed.connect(func():
+		log_text.clear()
+		log_errors = 0)
+	buttons.add_child(clear)
+	var folder := Button.new()
+	folder.text = "Open log files"
+	folder.pressed.connect(func(): OS.shell_open(ProjectSettings.globalize_path("user://logs")))
+	buttons.add_child(folder)
+	log_text = RichTextLabel.new()
+	log_text.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	log_text.scroll_following = true
+	log_text.selection_enabled = true
+	log_text.add_theme_font_size_override("normal_font_size", 13)
+	box.add_child(log_text)
+	add_child(log_window)
+	print("Debug log started: Gettic's first TD v%s, Godot %s, %s" % [
+		ProjectSettings.get_setting("application/config/version", "0"),
+		Engine.get_version_info().string, OS.get_name()])
+
+
+func update_log_window() -> void:
+	var new_lines := debug_log.take()
+	for l in new_lines:
+		log_text.push_color(l[1])
+		log_text.add_text(l[0] + "\n")
+		log_text.pop()
+		if l[2]:
+			log_errors += 1
+	if new_lines.size() > 0:
+		log_window.title = "Gettic's first TD - debug log, %d errors (F12 hides it)" % log_errors
+
+
 # ---------------------------------------------------------------- updates
 
 func check_for_update() -> void:
 	version = str(ProjectSettings.get_setting("application/config/version", "0"))
+	# The debug build stays a separate single file and leaves the normal game alone.
+	if is_debug_game():
+		return
 	# Clean up the old game files left behind by the last update.
 	if OS.has_feature("template"):
 		for arg in OS.get_cmdline_user_args():
@@ -827,6 +955,7 @@ func clear_world() -> void:
 			fx["node"].queue_free()
 	enemies.clear()
 	enemy_by_id.clear()
+	wave_votes.clear()
 	requests.clear()
 	asks.clear()
 	towers.clear()
@@ -1245,6 +1374,7 @@ func start_wave() -> void:
 		return
 	var early_bonus := int(maxf(next_wave_timer, 0.0)) if wave > 0 else 0
 	wave += 1
+	wave_votes.clear()
 	var income := 10 + wave * 2
 	# Every player gets the wave income, and every player's gate sends a full wave
 	for p in players:
@@ -1268,12 +1398,39 @@ func start_wave() -> void:
 
 
 # A player calling the next wave early (Space or the button). Not allowed until
-# every monster of the current wave has spawned. Returns an error message, or "".
-func call_wave() -> String:
+# every monster of the current wave has spawned. With more players it's a vote:
+# pressing again takes the vote back. Returns an error message, or "".
+func call_wave(slot: int) -> String:
 	if monsters_left_to_spawn() > 0:
 		return "Wait until the whole wave has spawned!"
-	start_wave()
+	if wave == 0 or player_count() < 2:
+		start_wave()
+		return ""
+	var text: String
+	if slot in wave_votes:
+		wave_votes.erase(slot)
+		text = "%s doesn't want the next wave early anymore (%d/%d)" % [PLAYER_NAMES[slot], wave_votes.size(), votes_needed()]
+	else:
+		wave_votes.append(slot)
+		text = "%s wants the next wave early (%d/%d)" % [PLAYER_NAMES[slot], wave_votes.size(), votes_needed()]
+	if not check_wave_votes():
+		flash(text)
+		send_all("net_message", [text])
 	return ""
+
+
+# How many players must agree to send the next wave early.
+func votes_needed() -> int:
+	return ceili(player_count() * EARLY_VOTE)
+
+
+# Host: sends the next wave if enough players have voted for it. Also called when a
+# player leaves, since fewer votes may then be enough.
+func check_wave_votes() -> bool:
+	if wave_votes.is_empty() or wave_votes.size() < votes_needed() or monsters_left_to_spawn() > 0:
+		return false
+	start_wave()
+	return true
 
 
 # Host: a new monster at gate g.
@@ -1340,6 +1497,8 @@ func make_enemy(kind: String) -> Enemy:
 # ---------------------------------------------------------------- update
 
 func _process(delta: float) -> void:
+	if debug_log:
+		update_log_window()
 	code_input.visible = menu_open and net_mode == ""
 	if net_mode == "searching":
 		update_search(delta)
@@ -1651,6 +1810,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
 		toggle_menu()
 		return
+	if log_window and event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F12:
+		log_window.visible = not log_window.visible
+		return
 	if menu_open:
 		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 			menu_click(get_viewport().get_mouse_position())
@@ -1806,7 +1968,7 @@ func perform(slot: int, action: String, args: Array) -> String:
 				return sell_tower(slot, args[0])
 		"wave":
 			if state == "playing":
-				return call_wave()
+				return call_wave(slot)
 		"speed":
 			if slot != local_slot:
 				return "Only the host can change the speed"
@@ -2289,10 +2451,12 @@ func _on_peer_disconnected(id: int) -> void:
 		if players[slot] != null and players[slot].peer == id:
 			players[slot] = null
 			spawn_queues[slot].clear()
+			wave_votes.erase(slot)
 			send_players()
 			var text := "%s left the game" % PLAYER_NAMES[slot]
 			flash(text)
 			send_all("net_message", [text])
+			check_wave_votes()
 
 
 func send_players() -> void:
@@ -2318,7 +2482,7 @@ func send_snapshot() -> void:
 	var golds := []
 	for p in players:
 		golds.append(p.gold if p != null else 0)
-	var info := [wave, next_wave_timer, state, game_speed, monsters_left_to_spawn(), golds]
+	var info := [wave, next_wave_timer, state, game_speed, monsters_left_to_spawn(), golds, wave_votes]
 	send_all("net_snapshot", [info, ids, kinds, data])
 
 
@@ -2475,6 +2639,7 @@ func net_snapshot(info: Array, ids: PackedInt32Array, kinds: PackedByteArray, da
 	state = info[2]
 	game_speed = info[3]
 	net_spawn_left = info[4]
+	wave_votes = info[6]
 	var golds: Array = info[5]
 	for slot in MAX_PLAYERS:
 		if players[slot] != null:
@@ -2674,6 +2839,8 @@ func draw_panel() -> void:
 	hud.draw_rect(Rect2(PANEL_LEFT, 0, SCREEN_W - PANEL_LEFT, SCREEN_H), Color(0.09, 0.09, 0.12))
 	text(Vector2(PANEL_X, 36), "WAVE %d / %d" % [wave, MAX_WAVE], 26)
 	text(Vector2(PANEL_X + 250, 34), "v" + version, 13, Color(0.5, 0.5, 0.55))
+	if is_debug_game():
+		text(Vector2(PANEL_X + 196, 34), "DEBUG", 13, Color(1.0, 0.45, 0.4))
 	# How close you are to losing: green when few monsters are alive, red near the limit
 	var alive := alive_count()
 	var danger := clampf(float(alive) / max_alive(), 0.0, 1.0)
@@ -2746,6 +2913,13 @@ func draw_panel() -> void:
 		wave_label = "Start (SPACE)"
 	elif wave < MAX_WAVE and monsters_left_to_spawn() > 0:
 		wave_label = "Spawning... (%d left)" % monsters_left_to_spawn()
+	elif wave < MAX_WAVE and player_count() > 1:
+		# A vote: the button shows how many agree and how many are needed
+		var votes := "%d/%d" % [wave_votes.size(), votes_needed()]
+		if local_slot in wave_votes:
+			wave_label = "Voted %s (SPACE: undo)" % votes
+		else:
+			wave_label = "Vote +%dg %s (SPACE)" % [int(maxf(next_wave_timer, 0.0)), votes]
 	elif wave < MAX_WAVE:
 		wave_label = "Send now +%dg (SPACE)" % int(maxf(next_wave_timer, 0.0))
 	else:
