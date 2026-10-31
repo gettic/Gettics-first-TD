@@ -8,6 +8,9 @@ const NOTES_MOST := 20  # versions shown in the update popup, newest first
 
 var update_changes: Array = []  # [tag, "What's new"] of each newer version, newest first
 var update_more := false  # there are older updates than the ones in update_changes
+const UPDATE_CHECK_EVERY := 1800.0  # seconds between update checks while the game runs
+var update_checking := false  # a check is on its way
+var update_etag := ""  # GitHub's tag for the last answer, so an unchanged list costs almost nothing
 
 
 # Catches every error, warning and print in the debug build, for the log window.
@@ -153,19 +156,54 @@ func check_for_update() -> void:
 				restart_game(game_exe_path().get_base_dir().path_join(wanted), game_exe_path())
 				return
 			remove_other_versions()
+	request_releases()
+	# Look again from time to time while the game runs: the released game only,
+	# unless a test asks for it with --update-check-every=SECONDS
+	var every := UPDATE_CHECK_EVERY
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("--update-check-every="):
+			every = maxf(arg.trim_prefix("--update-check-every=").to_float(), 1.0)
+	if every != UPDATE_CHECK_EVERY or (OS.has_feature("template") and DisplayServer.get_name() != "headless"):
+		var timer := Timer.new()
+		timer.wait_time = every
+		timer.timeout.connect(recheck_for_update)
+		add_child(timer)
+		timer.start()
+
+
+# Asks GitHub for the last releases. The answer comes later, in _on_update_checked.
+func request_releases() -> void:
+	if update_checking:
+		return
 	var http := HTTPRequest.new()
 	http.timeout = 10.0
 	add_child(http)
 	http.request_completed.connect(_on_update_checked.bind(http))
-	if http.request(RELEASES_LIST_API, ["User-Agent: GetticsFirstTD", "Accept: application/vnd.github+json"]) != OK:
+	var headers := ["User-Agent: GetticsFirstTD", "Accept: application/vnd.github+json"]
+	# Unchanged since last time: GitHub just says so, which is small and doesn't count toward its limit
+	if update_etag != "":
+		headers.append("If-None-Match: " + update_etag)
+	if http.request(RELEASES_LIST_API, headers) != OK:
 		http.queue_free()
+		return
+	update_checking = true
 
 
-func _on_update_checked(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray, http: HTTPRequest) -> void:
+# The timer's check, skipped while the update popup is open or downloading.
+func recheck_for_update() -> void:
+	if update_dialog == "":
+		request_releases()
+
+
+func _on_update_checked(result: int, code: int, headers: PackedStringArray, body: PackedByteArray, http: HTTPRequest) -> void:
 	http.queue_free()
-	# No internet or GitHub not answering: just play without the update check.
+	update_checking = false
+	# No internet, GitHub not answering, or nothing new since last time: just play on.
 	if result != HTTPRequest.RESULT_SUCCESS or code != 200:
 		return
+	for h in headers:
+		if h.to_lower().begins_with("etag:"):
+			update_etag = h.substr(5).strip_edges()
 	var list = JSON.parse_string(body.get_string_from_utf8())
 	if not list is Array:
 		return
@@ -193,6 +231,10 @@ func read_releases(list: Array) -> void:
 	update_more = newer.size() > NOTES_MOST or (newer.size() == list.size() and list.size() >= RELEASES_PAGE)
 	# The download is the newest release's files, as before
 	var newest: Dictionary = newer[0]
+	# A check during the game may find a newer one: forget the last one's files
+	update_zip_url = ""
+	update_exe_url = ""
+	update_pck_url = ""
 	update_version = str(newest["tag_name"])
 	update_url = str(newest.get("html_url", ""))
 	update_notes = update_changes[0][1]
