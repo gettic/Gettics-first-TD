@@ -1242,6 +1242,13 @@ func build_tower_node(t: Tower) -> void:
 	var root := Node3D.new()
 	root.position = to3d(t.pos)
 	add_child(root)
+	if t.type == "arrow":
+		var arrow_head := build_arrow_tower(root, t.level, t.owner)
+		for i in t.level + 1:
+			add_mesh(root, pip_mesh, gold_mat, Vector3(-0.3 + i * 0.2, 0.06, 0.44))
+		t.node = root
+		t.head = arrow_head
+		return
 	# The base is tinted with the owner's color
 	var base := BoxMesh.new()
 	base.size = Vector3(0.8, 0.3, 0.8)
@@ -1257,13 +1264,6 @@ func build_tower_node(t: Tower) -> void:
 	head.position = Vector3(0, 0.3 + h + 0.15, 0)
 	root.add_child(head)
 	match t.type:
-		"arrow":
-			var box := BoxMesh.new()
-			box.size = Vector3(0.34, 0.22, 0.34)
-			add_mesh(head, box, mat(col))
-			var barrel := BoxMesh.new()
-			barrel.size = Vector3(0.07, 0.07, 0.4)
-			add_mesh(head, barrel, dark_mat, Vector3(0, 0.02, -0.3))
 		"cannon":
 			var ball := SphereMesh.new()
 			ball.radius = 0.24
@@ -1298,6 +1298,211 @@ func build_tower_node(t: Tower) -> void:
 		add_mesh(root, pip_mesh, gold_mat, Vector3(-0.3 + i * 0.2, 0.32, 0.36))
 	t.node = root
 	t.head = head
+
+
+# Arrow tower: a dwarven gear repeater. A stone-and-brass block with a big side
+# gear and a band in the owner's color, and a repeating crossbow on top that turns
+# to aim (its front is -Z). Each level makes it taller and adds: level 2 a
+# chimney, level 3 a second gear on the front, level 4 twin crossbows and smoke.
+# The many small parts are merged into one mesh per material, made once per
+# level (and owner for the body) and shared by every arrow tower like it.
+const DW_STONE := Color(0.58, 0.5, 0.4)
+const DW_STONE_DARK := Color(0.32, 0.31, 0.33)
+const DW_METAL := Color(0.42, 0.45, 0.5)
+const DW_IRON := Color(0.2, 0.2, 0.23)
+const DW_BRASS := Color(0.85, 0.62, 0.22)
+const DW_WOOD := Color(0.52, 0.32, 0.15)
+const DW_WOOD_DARK := Color(0.32, 0.19, 0.09)
+const DW_WOOD_LIGHT := Color(0.72, 0.52, 0.28)
+const DW_STRING := Color(0.95, 0.92, 0.8)
+const DW_SMOKE := Color(0.3, 0.3, 0.32)
+var model_meshes := {}  # merged tower meshes by name
+var model_mats := {}  # their materials by color
+
+
+func build_arrow_tower(root: Node3D, level: int, slot: int) -> Node3D:
+	var top := 0.14 + 0.3 + level * 0.17
+	var body_key := "arrow body %d %d" % [level, slot]
+	if not model_meshes.has(body_key):
+		model_meshes[body_key] = merge_parts(arrow_body_parts(level, PLAYER_COLORS[slot]))
+	var head_key := "arrow head %d" % level
+	if not model_meshes.has(head_key):
+		model_meshes[head_key] = merge_parts(arrow_head_parts(level))
+	add_mesh(root, model_meshes[body_key], null)
+	var head := Node3D.new()
+	head.position = Vector3(0, top + 0.08, 0)
+	root.add_child(head)
+	add_mesh(head, model_meshes[head_key], null)
+	return head
+
+
+func arrow_body_parts(L: int, oc: Color) -> Node3D:
+	var root := Node3D.new()
+	var H := 0.3 + L * 0.17
+	var top := 0.14 + H
+	part_box(root, Vector3(0.86, 0.14, 0.86), DW_STONE_DARK, Vector3(0, 0.07, 0))
+	for sx in [-1, 1]:
+		for sz in [-1, 1]:
+			part_box(root, Vector3(0.16, 0.18, 0.16), DW_METAL, Vector3(sx * 0.36, 0.09, sz * 0.36))
+	part_box(root, Vector3(0.62, H, 0.62), DW_STONE, Vector3(0, 0.14 + H / 2.0, 0))
+	part_box(root, Vector3(0.72, 0.08, 0.72), DW_STONE_DARK, Vector3(0, top + 0.04, 0))
+	# Band in the owner's color
+	part_box(root, Vector3(0.64, 0.12, 0.64), oc, Vector3(0, 0.14 + H * 0.45, 0))
+	# Brass straps up the corners
+	for k in 4:
+		var f := part_node(root, Vector3.ZERO, Vector3(0, k * 90, 0))
+		for x in [-0.26, 0.26]:
+			part_box(f, Vector3(0.06, H, 0.04), DW_BRASS, Vector3(x, 0.14 + H / 2.0, 0.31))
+	# Big brass gear on the right side, and one on the front from level 3
+	var gears := [Vector3(0.33, 0.14 + H * 0.4, 0.0)]
+	if L >= 2:
+		gears.append(Vector3(0.0, 0.14 + H * 0.35, 0.33))
+	for g: Vector3 in gears:
+		var face := Vector3(0, 0, 90) if g.x > 0.0 else Vector3(90, 0, 0)
+		var gn := part_node(root, g, face)
+		part_torus(gn, 0.07, 0.15, DW_BRASS, Vector3.ZERO)
+		part_ball(gn, 0.06, DW_IRON, Vector3.ZERO)
+		for k in 8:
+			var a := TAU * k / 8.0
+			part_box(gn, Vector3(0.06, 0.06, 0.06), DW_BRASS, Vector3(cos(a) * 0.17, 0, sin(a) * 0.17), Vector3(0, -rad_to_deg(a), 0))
+	# Chimney from level 2, smoking at level 4
+	if L >= 1:
+		part_cyl(root, 0.06, 0.07, 0.4, DW_IRON, Vector3(-0.24, top + 0.2, -0.24))
+		part_cyl(root, 0.08, 0.08, 0.04, DW_BRASS, Vector3(-0.24, top + 0.4, -0.24))
+	if L >= 3:
+		for k in 3:
+			part_ball(root, 0.04 + k * 0.015, DW_SMOKE, Vector3(-0.24 + k * 0.06, top + 0.47 + k * 0.08, -0.26 - k * 0.04))
+	return root
+
+
+func arrow_head_parts(L: int) -> Node3D:
+	var head := Node3D.new()
+	part_cyl(head, 0.24, 0.27, 0.1, DW_IRON, Vector3(0, 0.05, 0))
+	part_box(head, Vector3(0.3, 0.14, 0.32), DW_BRASS, Vector3(0, 0.15, 0.04))
+	var xs := [0.0] if L < 3 else [-0.13, 0.13]
+	for x: float in xs:
+		var cb := part_crossbow(head, Vector3(x, 0.26, -0.08), 1.0 if L < 3 else 0.9)
+		# Bolt magazine on top
+		part_box(cb, Vector3(0.11, 0.16, 0.18), DW_WOOD, Vector3(0, 0.15, -0.02))
+		part_box(cb, Vector3(0.12, 0.03, 0.19), DW_BRASS, Vector3(0, 0.24, -0.02))
+	return head
+
+
+# A chunky crossbow pointing at -Z
+func part_crossbow(p: Node3D, pos: Vector3, s: float) -> Node3D:
+	var n := part_node(p, pos, Vector3.ZERO)
+	n.scale = Vector3.ONE * s
+	part_box(n, Vector3(0.1, 0.09, 0.56), DW_WOOD_DARK, Vector3(0, 0, -0.04))
+	part_box(n, Vector3(0.13, 0.12, 0.12), DW_IRON, Vector3(0, -0.01, 0.2))
+	part_box(n, Vector3(0.32, 0.07, 0.07), DW_METAL, Vector3(-0.17, 0, -0.28), Vector3(0, 25, 0))
+	part_box(n, Vector3(0.32, 0.07, 0.07), DW_METAL, Vector3(0.17, 0, -0.28), Vector3(0, -25, 0))
+	for e: Vector3 in [Vector3(-0.31, 0, -0.21), Vector3(0.31, 0, -0.21)]:
+		part_box(n, Vector3(0.06, 0.09, 0.09), DW_IRON, e)
+		part_beam(n, e, Vector3(0, 0, 0.1), 0.01, 0.01, DW_STRING, 4)
+	part_beam(n, Vector3(0, 0.07, 0.12), Vector3(0, 0.07, -0.42), 0.022, 0.022, DW_WOOD_LIGHT, 6)
+	part_beam(n, Vector3(0, 0.07, -0.42), Vector3(0, 0.07, -0.56), 0.05, 0.0, DW_BRASS, 6)
+	var fletch := PrismMesh.new()
+	fletch.size = Vector3(0.12, 0.08, 0.02)
+	part_put(n, fletch, Color(0.95, 0.95, 0.95), Vector3(0, 0.1, 0.09), Vector3(90, 90, 0))
+	return n
+
+
+# Helpers that build model parts under a temporary node, for merge_parts()
+func part_node(p: Node3D, pos: Vector3, rot: Vector3) -> Node3D:
+	var n := Node3D.new()
+	n.position = pos
+	n.rotation_degrees = rot
+	p.add_child(n)
+	return n
+
+
+func part_put(p: Node3D, mesh: Mesh, col: Color, pos: Vector3, rot := Vector3.ZERO) -> MeshInstance3D:
+	var mi := add_mesh(p, mesh, model_mat(col), pos)
+	mi.rotation_degrees = rot
+	return mi
+
+
+func part_box(p: Node3D, size: Vector3, col: Color, pos: Vector3, rot := Vector3.ZERO) -> MeshInstance3D:
+	return part_put(p, box(size.x, size.y, size.z), col, pos, rot)
+
+
+func part_cyl(p: Node3D, rt: float, rb: float, h: float, col: Color, pos: Vector3, seg := 8) -> MeshInstance3D:
+	var c := CylinderMesh.new()
+	c.top_radius = rt
+	c.bottom_radius = rb
+	c.height = h
+	c.radial_segments = seg
+	c.rings = 1
+	return part_put(p, c, col, pos)
+
+
+func part_ball(p: Node3D, r: float, col: Color, pos: Vector3) -> MeshInstance3D:
+	var s := SphereMesh.new()
+	s.radius = r
+	s.height = r * 2.0
+	s.radial_segments = 12
+	s.rings = 6
+	return part_put(p, s, col, pos)
+
+
+func part_torus(p: Node3D, ri: float, ro: float, col: Color, pos: Vector3) -> MeshInstance3D:
+	var t := TorusMesh.new()
+	t.inner_radius = ri
+	t.outer_radius = ro
+	t.rings = 16
+	t.ring_segments = 6
+	return part_put(p, t, col, pos)
+
+
+# A cylinder (a cone when rb != ra) from point a to point b
+func part_beam(p: Node3D, a: Vector3, b: Vector3, ra: float, rb: float, col: Color, seg: int) -> MeshInstance3D:
+	var c := CylinderMesh.new()
+	c.bottom_radius = ra
+	c.top_radius = rb
+	c.height = a.distance_to(b)
+	c.radial_segments = seg
+	c.rings = 1
+	var mi := part_put(p, c, col, Vector3.ZERO)
+	var y := (b - a).normalized()
+	var ref := Vector3.UP if absf(y.dot(Vector3.UP)) < 0.99 else Vector3.RIGHT
+	var x := ref.cross(y).normalized()
+	mi.transform = Transform3D(Basis(x, y, x.cross(y)), (a + b) / 2.0)
+	return mi
+
+
+func model_mat(col: Color) -> StandardMaterial3D:
+	if not model_mats.has(col):
+		model_mats[col] = mat(col)
+	return model_mats[col]
+
+
+# Merges all the parts under a temporary node into one mesh with a surface per
+# material, then frees the parts.
+func merge_parts(parts: Node3D) -> ArrayMesh:
+	var tools := {}
+	var todo: Array[Node] = [parts]
+	while not todo.is_empty():
+		var n: Node = todo.pop_back()
+		todo.append_array(n.get_children())
+		if n is MeshInstance3D:
+			var m: Material = n.material_override
+			if not tools.has(m):
+				var st := SurfaceTool.new()
+				st.begin(Mesh.PRIMITIVE_TRIANGLES)
+				tools[m] = st
+			# Its transform relative to the temporary node
+			var tr: Transform3D = n.transform
+			var up := n.get_parent() as Node3D
+			while up != parts:
+				tr = up.transform * tr
+				up = up.get_parent() as Node3D
+			tools[m].append_from(n.mesh, 0, tr)
+	var mesh := ArrayMesh.new()
+	for m: Material in tools:
+		tools[m].commit(mesh)
+		mesh.surface_set_material(mesh.get_surface_count() - 1, m)
+	parts.free()
+	return mesh
 
 
 func update_visuals(delta: float) -> void:
