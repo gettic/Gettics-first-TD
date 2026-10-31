@@ -12,7 +12,7 @@ Monsters come out of a green portal in a stone gate at a corner of the map, walk
 
 Play alone or with up to 4 players: each player gets their own gate at a corner of the square (see [Multiplayer](#multiplayer)).
 
-The 3D world is built from simple shapes in code, so the game has no image, model or sound files.
+The 3D world is built mostly from simple shapes in code, plus a few free CC0 models from the KayKit packs by Kay Lousberg (see [assets/CREDITS.md](assets/CREDITS.md)). The game has no sound files.
 
 ## Download
 
@@ -49,7 +49,7 @@ godot --path path/to/this/folder
 | **F** | Change game speed (1×, 2×, 3×; in multiplayer only the host can) |
 | **Y** / **N** | Say yes or no when another player asks to build in your area |
 | **Right-click** | Cancel |
-| **Esc** | Menu: pause / continue, and host or join a multiplayer game |
+| **Esc** | Menu: pause / continue, host or join a multiplayer game, and switch graphics between High and Low (Low is faster on older PCs; PCs with built-in graphics start on Low) |
 | **R** | Restart after winning or losing |
 
 ## Towers
@@ -78,7 +78,7 @@ You start with 150 gold. You earn gold for each kill and a bonus at the start of
 
 Up to 4 players can defend the square together.
 
-- Each player has a **gate at their own corner** of the square: Blue bottom-left, Red top-left, Yellow top-right, Pink bottom-right. Every player's gate sends a full wave, so **more players means more monsters**, and the loss limit grows with it: **50 alive monsters per player** (100 with 2 players, 200 with 4).
+- Each player has a **gate at their own corner** of the square: Blue bottom-left, Red top-left, Yellow top-right, Green bottom-right. Every player's gate sends a full wave, so **more players means more monsters**, and the loss limit grows with it: **50 alive monsters per player** (100 with 2 players, 200 with 4).
 - **Each player has their own area**: the quarter of the map around their gate. When you pick a tower to build, your area lights up and the other players' areas go dark. To build in someone else's area, they have to say yes: a box pops up for them (**Y** for yes, **N** for no). Areas of gates nobody plays are free for everyone.
 - **Sending a wave early is a vote**: pressing **Space** votes for it, and the wave comes once at least **75% of the players** agree (2 of 2, 3 of 3, or 3 of 4). The button shows the votes, like `2/3`. Press **Space** again to take your vote back. Starting the first wave doesn't need a vote.
 - **Everyone has their own gold.** Every player gets the wave bonus, and the gold for a kill goes to the player whose tower made it. Tower bases are tinted in the owner's color, and you can only upgrade or sell your own towers.
@@ -124,7 +124,7 @@ Good places to start:
 - `PLAYER_NAMES` and `PLAYER_COLORS` set each player's name and color.
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.
 - `start_wave()` in `main.gd` controls how much health enemies get each wave, and how many come out of each gate.
-- `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting and map colors. `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model.
+- `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting and map colors. `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Model files (like the Arrow tower's) are in `assets/`, with their sources in `assets/CREDITS.md`.
 - `RELAY_URL` in `game_base.gd` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used for games on your own network.
 - `GAME_FOLDER` and `GAME_NAME` in `game_base.gd` set the names of the folder and files the downloaded `.exe` unpacks into.
 - The game server is a small Cloudflare Worker, kept outside this repository.

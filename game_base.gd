@@ -38,8 +38,8 @@ const LOOP := [Vector2i(2, 15), Vector2i(2, 2), Vector2i(21, 2), Vector2i(21, 15
 # GATES[0]). Its monsters walk from the gate into that corner, then join the loop.
 const GATES := [Vector2i(2, 17), Vector2i(0, 2), Vector2i(21, 0), Vector2i(23, 15)]
 const MAX_PLAYERS := 4
-const PLAYER_NAMES := ["Blue", "Red", "Yellow", "Pink"]
-const PLAYER_COLORS := [Color(0.3, 0.55, 1.0), Color(1.0, 0.3, 0.3), Color(1.0, 0.85, 0.2), Color(1.0, 0.45, 0.8)]
+const PLAYER_NAMES := ["Blue", "Red", "Yellow", "Green"]
+const PLAYER_COLORS := [Color(0.3, 0.55, 1.0), Color(1.0, 0.3, 0.3), Color(1.0, 0.85, 0.2), Color(0.25, 0.8, 0.45)]
 const ENEMY_KINDS := ["normal", "fast", "armored", "boss"]
 const EARLY_VOTE := 0.75  # with more players, this share of them must agree to send a wave early
 
@@ -112,6 +112,7 @@ const STOP_RECT := Rect2(270, 560, 420, 40)
 const RESUME_RECT := Rect2(270, 616, 420, 44)
 const PUBLIC_RECT := Rect2(270, 350, 420, 36)
 const REFRESH_RECT := Rect2(590, 408, 100, 28)
+const GRAPHICS_RECT := Rect2(596, 70, 124, 28)
 const GAME_ROWS := 4  # public games shown in the menu
 
 # Update popup layout (screen pixels)

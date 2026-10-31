@@ -24,25 +24,66 @@ func add_mesh(parent: Node3D, mesh: Mesh, material: Material, pos := Vector3.ZER
 	return mi
 
 
+const SETTINGS_FILE := "user://settings.cfg"  # this PC's settings, like Graphics Low/High
+var graphics_high := true  # Low/High in the Esc menu: only switches effects
+var compat := false  # running on the Compatibility renderer (older PCs), which needs darker light
+var env: Environment
+var sun: DirectionalLight3D
+
+
 func build_world() -> void:
-	var env := Environment.new()
+	# Forward+ falls back to Compatibility by itself on PCs that can't run it
+	compat = RenderingServer.get_current_rendering_method() == "gl_compatibility"
+	env = Environment.new()
 	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.015, 0.02, 0.03)
-	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-	env.ambient_light_color = Color(0.55, 0.6, 0.7)
-	env.ambient_light_energy = 0.45
-	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	# Dark blue around the board. Set brighter than it looks: ACES and contrast
+	# darken it, and the two renderers do that differently.
+	env.background_color = Color(0.035, 0.041, 0.052) if compat else Color(0.13, 0.15, 0.19)
+	# A sky only for the ambient light and reflections: the camera never sees it
+	var sky_mat := ProceduralSkyMaterial.new()
+	sky_mat.sky_top_color = Color(0.32, 0.45, 0.68)
+	sky_mat.sky_horizon_color = Color(0.72, 0.68, 0.6)
+	sky_mat.ground_bottom_color = Color(0.12, 0.1, 0.08)
+	sky_mat.ground_horizon_color = Color(0.45, 0.4, 0.33)
+	env.sky = Sky.new()
+	env.sky.sky_material = sky_mat
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
+	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
+	env.ambient_light_energy = 0.45 if compat else 0.55
+	env.tonemap_mode = Environment.TONE_MAPPER_ACES
+	env.tonemap_exposure = 0.8 if compat else 1.05
 	env.glow_enabled = true
+	env.glow_bloom = 0.05
+	env.glow_hdr_threshold = 0.9
+	env.adjustment_enabled = true
+	env.adjustment_contrast = 1.08
+	env.adjustment_saturation = 1.15
+	env.ssao_radius = 0.6
+	env.ssao_intensity = 2.0
+	env.ssao_power = 1.6
+	env.ssil_radius = 2.0
+	env.ssil_intensity = 0.8
 	var world_env := WorldEnvironment.new()
 	world_env.environment = env
 	add_child(world_env)
 
-	var sun := DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-55, -30, 0)
-	sun.light_energy = 1.0
+	# Warm sun from the side for long soft shadows, and a weak cool fill light
+	# from the other side so the shadow sides aren't flat
+	sun = DirectionalLight3D.new()
+	sun.rotation_degrees = Vector3(-42, -35, 0)
+	sun.light_color = Color(1.0, 0.9, 0.75)
+	sun.light_energy = 1.0 if compat else 1.4
 	sun.shadow_enabled = true
+	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
 	sun.directional_shadow_max_distance = 60.0
 	add_child(sun)
+	var fill := DirectionalLight3D.new()
+	fill.rotation_degrees = Vector3(-30, 150, 0)
+	fill.light_color = Color(0.55, 0.65, 0.9)
+	fill.light_energy = 0.3 if compat else 0.35
+	add_child(fill)
+	load_settings()
+	apply_graphics()
 
 	camera = Camera3D.new()
 	camera.fov = 40.0
@@ -61,14 +102,27 @@ func build_world() -> void:
 	var grass_a := mat(Color(0.11, 0.24, 0.09))
 	var grass_b := mat(Color(0.13, 0.28, 0.11))
 	var dirt := mat(Color(0.3, 0.2, 0.12))
+	# One MultiMesh per color, so the whole ground is a few draw calls instead of 432
+	var spots := {dirt: [], grass_a: [], grass_b: []}
 	for x in COLS:
 		for y in ROWS:
 			if path_cells.has(Vector2i(x, y)):
-				add_mesh(self, tile, dirt, Vector3(x + 0.5, -0.33, y + 0.5))
+				spots[dirt].append(Vector3(x + 0.5, -0.33, y + 0.5))
 			elif (x + y) % 2 == 0:
-				add_mesh(self, tile, grass_a, Vector3(x + 0.5, -0.25, y + 0.5))
+				spots[grass_a].append(Vector3(x + 0.5, -0.25, y + 0.5))
 			else:
-				add_mesh(self, tile, grass_b, Vector3(x + 0.5, -0.252, y + 0.5))
+				spots[grass_b].append(Vector3(x + 0.5, -0.252, y + 0.5))
+	for m: Material in spots:
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = tile
+		mm.instance_count = spots[m].size()
+		for i in mm.instance_count:
+			mm.set_instance_transform(i, Transform3D(Basis.IDENTITY, spots[m][i]))
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.material_override = m
+		add_child(mmi)
 	var base := BoxMesh.new()
 	base.size = Vector3(COLS + 0.6, 1.0, ROWS + 0.6)
 	add_mesh(self, base, mat(Color(0.16, 0.12, 0.09)), Vector3(COLS / 2.0, -0.85, ROWS / 2.0))
@@ -85,6 +139,43 @@ func build_world() -> void:
 	range_disc = add_mesh(self, disc, mat(Color.WHITE, 0.0, 0.07))
 	range_disc.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	build_markers_and_hud()
+
+
+# Graphics High: ambient occlusion (dark contact shadows), bounced light, soft
+# wide shadows and more glow. Low: plain shadows and less glow, for slower PCs.
+# The Compatibility renderer has no ambient occlusion or bounced light anyway.
+func apply_graphics() -> void:
+	var high := graphics_high
+	env.ssao_enabled = high and not compat
+	env.ssil_enabled = high and not compat
+	env.glow_intensity = 0.6 if high else 0.35
+	sun.shadow_blur = 1.5 if high else 1.0
+	sun.light_angular_distance = 1.5 if high else 0.0
+	RenderingServer.directional_shadow_atlas_set_size(4096 if high else 2048, true)
+	RenderingServer.directional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_SOFT_HIGH if high else RenderingServer.SHADOW_QUALITY_SOFT_LOW)
+
+
+func load_settings() -> void:
+	var cfg := ConfigFile.new()
+	if cfg.load(SETTINGS_FILE) == OK and cfg.has_section_key("graphics", "high"):
+		graphics_high = cfg.get_value("graphics", "high", true)
+	else:
+		# First run: Low on weaker PCs (built-in graphics, or the Compatibility
+		# fallback), High otherwise. Saved, so the player's choice always wins after this.
+		graphics_high = not (compat or weak_gpu())
+		save_settings()
+
+
+# True for graphics built into the processor, like most laptops have.
+func weak_gpu() -> bool:
+	return RenderingServer.get_video_adapter_type() == RenderingDevice.DEVICE_TYPE_INTEGRATED_GPU
+
+
+func save_settings() -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS_FILE)  # keeps any other settings in it
+	cfg.set_value("graphics", "high", graphics_high)
+	cfg.save(SETTINGS_FILE)
 
 
 # Stone gate with a green portal where one player's monsters come out. It faces
@@ -176,6 +267,8 @@ func build_markers_and_hud() -> void:
 	pip_mesh = SphereMesh.new()
 	pip_mesh.radius = 0.05
 	pip_mesh.height = 0.1
+	pip_mesh.radial_segments = 12  # tiny, so few triangles are enough
+	pip_mesh.rings = 6
 	boom_mesh = SphereMesh.new()
 	boom_mesh.radius = 1.0
 	boom_mesh.height = 2.0
@@ -194,8 +287,7 @@ func build_tower_node(t: Tower) -> void:
 			model_head = build_arrow_tower(root, t.level, t.owner)
 		else:
 			model_head = build_cannon_tower(root, t.level, t.owner)
-		for i in t.level + 1:
-			add_mesh(root, pip_mesh, gold_mat, Vector3(-0.3 + i * 0.2, 0.06, 0.44))
+		add_pips(root, t.level, Vector3(0, 0.06, 0.44))
 		t.node = root
 		t.head = model_head
 		return
@@ -234,18 +326,23 @@ func build_tower_node(t: Tower) -> void:
 			ring.inner_radius = 0.26
 			ring.outer_radius = 0.31
 			add_mesh(head, ring, dark_mat, Vector3(0, 0.1, 0)).rotation_degrees.x = 60
-	for i in t.level + 1:
-		add_mesh(root, pip_mesh, gold_mat, Vector3(-0.3 + i * 0.2, 0.32, 0.36))
+	add_pips(root, t.level, Vector3(0, 0.32, 0.36))
 	t.node = root
 	t.head = head
 
 
-# Arrow tower: a dwarven gear repeater. A stone-and-brass block with a big side
-# gear and a band in the owner's color, and a repeating crossbow on top that turns
-# to aim (its front is -Z). Each level makes it taller and adds: level 2 a
-# chimney, level 3 a second gear on the front, level 4 twin crossbows and smoke.
-# The many small parts are merged into one mesh per material, made once per
-# level (and owner for the body) and shared by every arrow tower like it.
+# A gold pip per level, merged into one mesh per level and shared by every tower
+func add_pips(root: Node3D, level: int, pos: Vector3) -> void:
+	var key := "pips %d" % level
+	if not model_meshes.has(key):
+		var parts := Node3D.new()
+		for i in level + 1:
+			add_mesh(parts, pip_mesh, gold_mat, Vector3(-0.3 + i * 0.2, 0, 0))
+		model_meshes[key] = merge_parts(parts)
+	add_mesh(root, model_meshes[key], null, pos)
+
+
+# Colors and shared meshes for the code-built towers (the cannon tower)
 const DW_STONE := Color(0.58, 0.5, 0.4)
 const DW_STONE_DARK := Color(0.32, 0.31, 0.33)
 const DW_METAL := Color(0.42, 0.45, 0.5)
@@ -260,91 +357,85 @@ var model_meshes := {}  # merged tower meshes by name
 var model_mats := {}  # their materials by color
 
 
+# Arrow tower: the KayKit stone towers as the pack has them (Kay Lousberg, CC0,
+# see assets/CREDITS.md). Level 1 is the open tower with a crossbow on top,
+# level 2 tower_A and levels 3 and 4 the bigger tower_B, with the crossbow out
+# on the balcony (two at level 4). The crossbows turn to aim (their front is -Z),
+# going round the balcony. The roof, banners and flag show the owner's color.
+const PACK_SCALE := 0.65  # the pack is made for bigger hexagon tiles
+const ARROW_MODELS := ["tower_base", "tower_A", "tower_B", "tower_B"]
+const ARROW_HEAD_Y := [1.38, 1.5, 1.5, 1.5]  # where the crossbows sit, in pack units
+const ARROW_REACH := [0.0, 0.5, 0.62, 0.62]  # how far out on the balcony
+var pack_meshes := {}  # pack model -> [[mesh, transform], ...], loaded once
+var pack_mats := {}  # shared pack materials by texture and owner
+var pack_shader: Shader
+
+
 func build_arrow_tower(root: Node3D, level: int, slot: int) -> Node3D:
-	var top := 0.14 + 0.3 + level * 0.17
-	var body_key := "arrow body %d %d" % [level, slot]
-	if not model_meshes.has(body_key):
-		model_meshes[body_key] = merge_parts(arrow_body_parts(level, PLAYER_COLORS[slot]))
-	var head_key := "arrow head %d" % level
-	if not model_meshes.has(head_key):
-		model_meshes[head_key] = merge_parts(arrow_head_parts(level))
-	add_mesh(root, model_meshes[body_key], null)
+	var model := Node3D.new()
+	model.scale = Vector3.ONE * PACK_SCALE * (1.08 if level == 3 else 1.0)
+	root.add_child(model)
+	add_pack_model(model, "towers/building_%s_blue" % ARROW_MODELS[level], slot)
+	if level == 0:
+		# The open tower only has small banners, so a flag shows whose it is
+		var flag := Node3D.new()
+		flag.position = Vector3(0.3, 1.45, 0.2)
+		flag.scale = Vector3.ONE * 1.8
+		model.add_child(flag)
+		add_pack_model(flag, "towers/flag_blue", slot)
 	var head := Node3D.new()
-	head.position = Vector3(0, top + 0.08, 0)
-	root.add_child(head)
-	add_mesh(head, model_meshes[head_key], null)
+	head.position = Vector3(0, ARROW_HEAD_Y[level], 0)
+	model.add_child(head)
+	var spots := [Vector3(0, 0, -ARROW_REACH[level])]
+	if level == 3:
+		spots = [Vector3(-0.3, 0, -0.55), Vector3(0.3, 0, -0.55)]
+	for p: Vector3 in spots:
+		var bow := Node3D.new()
+		bow.position = p + (Vector3(0, 0.2, 0.3) if level == 0 else Vector3(0, 0.12, 0))
+		bow.rotation_degrees.y = 180.0  # the pack's crossbow points at +Z
+		bow.scale = Vector3.ONE * 0.5
+		head.add_child(bow)
+		add_pack_model(bow, "towers/Skeleton_Crossbow", 0)
 	return head
 
 
-func arrow_body_parts(L: int, oc: Color) -> Node3D:
-	var root := Node3D.new()
-	var H := 0.3 + L * 0.17
-	var top := 0.14 + H
-	part_box(root, Vector3(0.86, 0.14, 0.86), DW_STONE_DARK, Vector3(0, 0.07, 0))
-	for sx in [-1, 1]:
-		for sz in [-1, 1]:
-			part_box(root, Vector3(0.16, 0.18, 0.16), DW_METAL, Vector3(sx * 0.36, 0.09, sz * 0.36))
-	part_box(root, Vector3(0.62, H, 0.62), DW_STONE, Vector3(0, 0.14 + H / 2.0, 0))
-	part_box(root, Vector3(0.72, 0.08, 0.72), DW_STONE_DARK, Vector3(0, top + 0.04, 0))
-	# Band in the owner's color
-	part_box(root, Vector3(0.64, 0.12, 0.64), oc, Vector3(0, 0.14 + H * 0.45, 0))
-	# Brass straps up the corners
-	for k in 4:
-		var f := part_node(root, Vector3.ZERO, Vector3(0, k * 90, 0))
-		for x in [-0.26, 0.26]:
-			part_box(f, Vector3(0.06, H, 0.04), DW_BRASS, Vector3(x, 0.14 + H / 2.0, 0.31))
-	# Big brass gear on the right side, and one on the front from level 3
-	var gears := [Vector3(0.33, 0.14 + H * 0.4, 0.0)]
-	if L >= 2:
-		gears.append(Vector3(0.0, 0.14 + H * 0.35, 0.33))
-	for g: Vector3 in gears:
-		var face := Vector3(0, 0, 90) if g.x > 0.0 else Vector3(90, 0, 0)
-		var gn := part_node(root, g, face)
-		part_torus(gn, 0.07, 0.15, DW_BRASS, Vector3.ZERO)
-		part_ball(gn, 0.06, DW_IRON, Vector3.ZERO)
-		for k in 8:
-			var a := TAU * k / 8.0
-			part_box(gn, Vector3(0.06, 0.06, 0.06), DW_BRASS, Vector3(cos(a) * 0.17, 0, sin(a) * 0.17), Vector3(0, -rad_to_deg(a), 0))
-	# Chimney from level 2, smoking at level 4
-	if L >= 1:
-		part_cyl(root, 0.06, 0.07, 0.4, DW_IRON, Vector3(-0.24, top + 0.2, -0.24))
-		part_cyl(root, 0.08, 0.08, 0.04, DW_BRASS, Vector3(-0.24, top + 0.4, -0.24))
-	if L >= 3:
-		for k in 3:
-			part_ball(root, 0.04 + k * 0.015, DW_SMOKE, Vector3(-0.24 + k * 0.06, top + 0.47 + k * 0.08, -0.26 - k * 0.04))
-	return root
+# Adds a pack model's meshes under parent in the owner's color. The meshes are
+# loaded once and shared by every model like it.
+func add_pack_model(parent: Node3D, file: String, slot: int) -> void:
+	if not pack_meshes.has(file):
+		var parts := []
+		var scene: Node = load("res://assets/%s.gltf" % file).instantiate()
+		collect_meshes(scene, Transform3D.IDENTITY, parts)
+		scene.free()
+		pack_meshes[file] = parts
+	for part: Array in pack_meshes[file]:
+		var mi := add_mesh(parent, part[0], pack_mat(part[0], slot))
+		mi.transform = part[1]
 
 
-func arrow_head_parts(L: int) -> Node3D:
-	var head := Node3D.new()
-	part_cyl(head, 0.24, 0.27, 0.1, DW_IRON, Vector3(0, 0.05, 0))
-	part_box(head, Vector3(0.3, 0.14, 0.32), DW_BRASS, Vector3(0, 0.15, 0.04))
-	var xs := [0.0] if L < 3 else [-0.13, 0.13]
-	for x: float in xs:
-		var cb := part_crossbow(head, Vector3(x, 0.26, -0.08), 1.0 if L < 3 else 0.9)
-		# Bolt magazine on top
-		part_box(cb, Vector3(0.11, 0.16, 0.18), DW_WOOD, Vector3(0, 0.15, -0.02))
-		part_box(cb, Vector3(0.12, 0.03, 0.19), DW_BRASS, Vector3(0, 0.24, -0.02))
-	return head
+func collect_meshes(n: Node, tr: Transform3D, out: Array) -> void:
+	if n is Node3D:
+		tr = tr * n.transform
+	if n is MeshInstance3D:
+		out.append([n.mesh, tr])
+	for c in n.get_children():
+		collect_meshes(c, tr, out)
 
 
-# A chunky crossbow pointing at -Z
-func part_crossbow(p: Node3D, pos: Vector3, s: float) -> Node3D:
-	var n := part_node(p, pos, Vector3.ZERO)
-	n.scale = Vector3.ONE * s
-	part_box(n, Vector3(0.1, 0.09, 0.56), DW_WOOD_DARK, Vector3(0, 0, -0.04))
-	part_box(n, Vector3(0.13, 0.12, 0.12), DW_IRON, Vector3(0, -0.01, 0.2))
-	part_box(n, Vector3(0.32, 0.07, 0.07), DW_METAL, Vector3(-0.17, 0, -0.28), Vector3(0, 25, 0))
-	part_box(n, Vector3(0.32, 0.07, 0.07), DW_METAL, Vector3(0.17, 0, -0.28), Vector3(0, -25, 0))
-	for e: Vector3 in [Vector3(-0.31, 0, -0.21), Vector3(0.31, 0, -0.21)]:
-		part_box(n, Vector3(0.06, 0.09, 0.09), DW_IRON, e)
-		part_beam(n, e, Vector3(0, 0, 0.1), 0.01, 0.01, DW_STRING, 4)
-	part_beam(n, Vector3(0, 0.07, 0.12), Vector3(0, 0.07, -0.42), 0.022, 0.022, DW_WOOD_LIGHT, 6)
-	part_beam(n, Vector3(0, 0.07, -0.42), Vector3(0, 0.07, -0.56), 0.05, 0.0, DW_BRASS, 6)
-	var fletch := PrismMesh.new()
-	fletch.size = Vector3(0.12, 0.08, 0.02)
-	part_put(n, fletch, Color(0.95, 0.95, 0.95), Vector3(0, 0.1, 0.09), Vector3(90, 90, 0))
-	return n
+# The pack's texture with the owner's color and the rim light (pack_model.gdshader),
+# made once per texture and owner.
+func pack_mat(mesh: Mesh, slot: int) -> ShaderMaterial:
+	var tex: Texture2D = (mesh.surface_get_material(0) as BaseMaterial3D).albedo_texture
+	var key := "%d %d" % [tex.get_instance_id(), slot]
+	if not pack_mats.has(key):
+		if pack_shader == null:
+			pack_shader = load("res://assets/shaders/pack_model.gdshader")
+		var m := ShaderMaterial.new()
+		m.shader = pack_shader
+		m.set_shader_parameter("palette", tex)
+		m.set_shader_parameter("team", float(slot))
+		pack_mats[key] = m
+	return pack_mats[key]
 
 
 # Cannon tower: a dwarven mortar bunker. A squat eight-sided stone bunker with
@@ -556,14 +647,21 @@ func update_visuals(delta: float) -> void:
 	for e in enemies:
 		var r := e.radius / CELL
 		e.node.position = to3d(e.pos, -0.08 + r + absf(sin(time * 8.0 + e.bob)) * 0.06)
-		e.mat.albedo_color = e.color.lerp(Color(0.55, 0.9, 1.0), 0.55) if e.slow_time > 0.0 else e.color
+		# Slowed monsters use their kind's icy material
+		var m: Material = enemy_mats[e.kind][1] if e.slow_time > 0.0 else e.mat
+		if e.node.material_override != m:
+			e.node.material_override = m
 	for t: Tower in towers.values():
 		if t.type == "arrow" or t.type == "cannon":
 			t.head.rotation.y = atan2(-t.aim.x, -t.aim.y)
 		else:
 			t.head.rotation.y += delta * 2.0
 	for s in shots:
-		s.node.position = to3d(s.pos, 0.6)
+		var y := 0.6
+		if s.node.has_meta("from_y"):
+			var left := clampf(s.pos.distance_to(s.target_pos) / s.node.get_meta("from_dist"), 0.0, 1.0)
+			y = lerpf(0.6, s.node.get_meta("from_y"), left)
+		s.node.position = to3d(s.pos, y)
 
 	# While placing a tower: your area glows in your color, other players' areas go dark
 	for slot in MAX_PLAYERS:
@@ -601,6 +699,11 @@ func show_range(p: Vector2, rng: float) -> void:
 	range_disc.scale = Vector3(s, 1, s)
 
 
+var enemy_meshes := {}  # monster kind -> its ball
+var enemy_mats := {}  # monster kind -> [normal, slowed] material
+var shot_meshes := {}  # tower type -> its shot's ball
+
+
 # A monster's looks, used both by the host and by the other players' copies.
 func make_enemy(kind: String) -> Enemy:
 	var e := Enemy.new()
@@ -619,14 +722,22 @@ func make_enemy(kind: String) -> Enemy:
 			e.color = Color(0.9, 0.15, 0.15)
 
 	var r := e.radius / CELL
-	var ball := SphereMesh.new()
-	ball.radius = r
-	ball.height = r * 2.0
-	e.mat = mat(e.color)
-	if kind == "armored":
-		e.mat.metallic = 0.8
-		e.mat.roughness = 0.3
-	e.node = add_mesh(self, ball, e.mat, to3d(e.pos, r))
+	# The ball and its two materials (normal and slowed) are shared by every monster of a kind
+	if not enemy_meshes.has(kind):
+		var ball := SphereMesh.new()
+		ball.radius = r
+		ball.height = r * 2.0
+		ball.radial_segments = 32
+		ball.rings = 16
+		enemy_meshes[kind] = ball
+		var mats := [mat(e.color), mat(e.color.lerp(Color(0.55, 0.9, 1.0), 0.55))]
+		if kind == "armored":
+			for m: StandardMaterial3D in mats:
+				m.metallic = 0.8
+				m.roughness = 0.3
+		enemy_mats[kind] = mats
+	e.mat = enemy_mats[kind][0]
+	e.node = add_mesh(self, enemy_meshes[kind], e.mat, to3d(e.pos, r))
 	if kind == "boss":
 		var crown := TorusMesh.new()
 		crown.inner_radius = 0.1
@@ -651,10 +762,17 @@ func launch_shot(t: Tower, target: Enemy, visual: bool) -> void:
 		s.speed = 300.0
 	if not shot_mats.has(t.type):
 		shot_mats[t.type] = mat(TOWERS[t.type]["color"], 2.0)
-	var ball := SphereMesh.new()
-	ball.radius = 0.12 if t.type == "cannon" else 0.07
-	ball.height = ball.radius * 2.0
-	s.node = add_mesh(self, ball, shot_mats[t.type], to3d(s.pos, 0.6))
+		var ball := SphereMesh.new()
+		ball.radius = 0.12 if t.type == "cannon" else 0.07
+		ball.height = ball.radius * 2.0
+		ball.radial_segments = 16
+		ball.rings = 8
+		shot_meshes[t.type] = ball
+	s.node = add_mesh(self, shot_meshes[t.type], shot_mats[t.type], to3d(s.pos, 0.6))
+	# Arrows start up at the crossbow and come down to the monster (just for looks)
+	if t.type == "arrow":
+		s.node.set_meta("from_y", t.head.global_position.y + 0.08)
+		s.node.set_meta("from_dist", maxf(s.pos.distance_to(target.pos), 1.0))
 	shots.append(s)
 
 

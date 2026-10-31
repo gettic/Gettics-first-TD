@@ -4,3 +4,9 @@
 
 # Exported builds
 build/
+
+# Secrets and stray files (safety net)
+.env
+.env.*
+*.log
+*.tmp

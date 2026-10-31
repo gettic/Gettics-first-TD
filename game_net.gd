@@ -176,9 +176,15 @@ func check_wave_votes() -> bool:
 func send_all(method: StringName, args: Array) -> void:
 	if net_mode != "host":
 		return
+	var enet := multiplayer.multiplayer_peer as ENetMultiplayerPeer
 	for p in players:
-		if p != null and p.peer != 1:
-			callv("rpc_id", [p.peer, method] + args)
+		if p == null or p.peer == 1:
+			continue
+		# When several players leave at once, the network already knows about
+		# the others while we handle the first one: skip them
+		if enet != null and enet.get_peer(p.peer).get_state() != ENetPacketPeer.STATE_CONNECTED:
+			continue
+		callv("rpc_id", [p.peer, method] + args)
 
 
 func host_game() -> void:
@@ -258,6 +264,9 @@ func host_direct() -> void:
 	if peer.create_server(NET_PORT, MAX_PLAYERS - 1) != OK:
 		net_status = "Couldn't start hosting. Is the game already hosting in another window?"
 		return
+	# Players only talk to the host, so Godot doesn't need to tell them about
+	# each other (that also sends to players who are leaving at the same moment)
+	(multiplayer as SceneMultiplayer).server_relay = false
 	multiplayer.multiplayer_peer = peer
 	net_mode = "host"
 	players[local_slot].peer = 1
