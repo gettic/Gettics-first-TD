@@ -149,7 +149,7 @@ func spawn_enemy(kind: String, g: int) -> void:
 func _process(delta: float) -> void:
 	if debug_log:
 		update_log_window()
-	code_input.visible = menu_open and net_mode == "" and not editing and not ed_ask_open and not pick_open and not board_open and update_dialog == ""
+	code_input.visible = menu_open and net_mode == "" and not editing and not ed_ask_open and not pick_open and not board_open and not settings_open and update_dialog == ""
 	name_input.visible = code_input.visible
 	if net_mode == "searching":
 		update_search(delta)
@@ -503,6 +503,10 @@ func update_effects(delta: float) -> void:
 # ---------------------------------------------------------------- input
 
 func _unhandled_input(event: InputEvent) -> void:
+	# F11 or Alt+Enter: fullscreen on and off, anywhere in the game
+	if event is InputEventKey and event.pressed and not event.echo and (event.keycode == KEY_F11 or (event.alt_pressed and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER))):
+		toggle_fullscreen()
+		return
 	if update_dialog != "":
 		dialog_input(event)
 		return
@@ -514,7 +518,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if menu_open:
 		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-			menu_click(get_viewport().get_mouse_position())
+			menu_click(ui_mouse(true))
 		elif pick_open and event is InputEventMouseButton and event.pressed and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
 			# Scrolls the list of maps in the Esc menu
 			var step := -1 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1
@@ -532,7 +536,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			build_type = ""
 			selected = null
 		elif event.button_index == MOUSE_BUTTON_LEFT:
-			on_click(get_viewport().get_mouse_position())
+			on_click(ui_mouse())
 		elif event.button_index == MOUSE_BUTTON_WHEEL_UP and not mouse_over_panel():
 			zoom_camera(-1.0)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN and not mouse_over_panel():
@@ -614,7 +618,7 @@ func dialog_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and event.keycode == KEY_ESCAPE:
 		update_dialog = ""
 	elif event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
-		var p := get_viewport().get_mouse_position()
+		var p := ui_mouse(true)
 		if update_dialog == "unpack_failed":
 			if DIALOG_NO_RECT.has_point(p):
 				update_dialog = ""

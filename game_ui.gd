@@ -54,7 +54,8 @@ func build_hud() -> void:
 	console_layer.draw.connect(draw_on.bind(console_layer, ui_console))
 	# The portrait: a second small camera in the same world, only drawn while a tower is selected
 	portrait_view = SubViewport.new()
-	portrait_view.size = Vector2i(PORTRAIT_RECT.size)
+	portrait_view.size = Vector2i(PORTRAIT_RECT.size)  # bigger on big screens (see place_ui)
+	portrait_view.msaa_3d = Viewport.MSAA_4X  # it's small, so smooth edges are cheap
 	portrait_view.render_target_update_mode = SubViewport.UPDATE_DISABLED
 	add_child(portrait_view)
 	portrait_cam = Camera3D.new()
@@ -96,6 +97,7 @@ func build_hud() -> void:
 			close_chat()
 			chat_input.accept_event())
 	chat_input.focus_exited.connect(close_chat)
+	get_viewport().size_changed.connect(place_ui)
 
 
 # A hidden text box: sunken stone with a thin gold edge, like the buttons.
@@ -171,13 +173,44 @@ func update_visuals(delta: float) -> void:
 func draw_hud() -> void:
 	draw_panel()
 	if state != "playing":
+		hud.draw_set_transform(Vector2(0, ui_extra / 2.0))
 		draw_end_screen()
 		draw_fireworks()
+	hud.draw_set_transform(Vector2(0, ui_extra))
 	draw_chat()
+	# Popups in the middle of the screen
+	hud.draw_set_transform(Vector2(0, ui_extra / 2.0))
 	if menu_open:
 		draw_menu()
 	if update_dialog != "":
 		draw_update_dialog()
+	hud.draw_set_transform(Vector2.ZERO)
+
+
+# The whole screen whichever way the drawing is shifted, for darkening it under popups.
+func screen_rect() -> Rect2:
+	return Rect2(0, -ui_extra, SCREEN_W, SCREEN_H + ui_extra * 2.0)
+
+
+# Taller screens (16:10): the console and text boxes move down, popups half as
+# much (see ui_extra). Called at the start and whenever the window's size changes.
+func place_ui() -> void:
+	var vp := get_viewport()
+	var seen := vp.get_visible_rect().size
+	ui_extra = maxf(seen.y - SCREEN_H, 0.0)
+	var down := Vector2(0, ui_extra)
+	var half := down / 2.0
+	chat_input.position = CHAT_INPUT_RECT.position + down
+	code_input.position = JOIN_INPUT_RECT.position + half
+	name_input.position = NAME_INPUT_RECT.position + half
+	notes_clip.position = NOTES_RECT.position + Vector2(2, 2) + half
+	if fw_glow != null:
+		fw_glow.position = half
+		fw_paper.position = half
+	# The portrait at the screen's real pixels, so it's sharp on big screens
+	var k := clampf(vp.get_final_transform().get_scale().x, 1.0, 4.0)
+	portrait_view.size = Vector2i(PORTRAIT_RECT.size * k)
+	console_layer.queue_redraw()
 
 
 # The last chat lines, just above the minimap like in Warcraft III: "Name: text"
@@ -312,15 +345,17 @@ func draw_ask() -> void:
 	text(r.position + Vector2(20, 68), "The spot is marked with a ring on the map.", 14, UI_GREY)
 	button(ASK_YES_RECT, "Yes (Y)", true, true)
 	button(ASK_NO_RECT, "No (N)")
-	# Point at the spot with a pulsing ring
+	# Point at the spot with a pulsing ring (on the map: not shifted with the console)
 	var spot := camera.unproject_position(Vector3(cell.x + 0.5, 0.1, cell.y + 0.5))
+	hud.draw_set_transform(Vector2.ZERO)
 	hud.draw_arc(spot, 16.0 + sin(time * 6.0) * 4.0, 0, TAU, 32, PLAYER_COLORS[from], 3.0)
+	hud.draw_set_transform(Vector2(0, ui_extra))
 
 
 func draw_update_dialog() -> void:
 	var d := DIALOG_RECT
 	var left := d.position.x + 30
-	hud.draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(0, 0, 0, 0.6))
+	hud.draw_rect(screen_rect(), Color(0, 0, 0, 0.6))
 	ui_box(d)
 	if update_dialog.begins_with("unpack"):
 		draw_unpack_dialog()
@@ -364,7 +399,7 @@ func draw_notes_box() -> void:
 	hud.draw_rect(track, Color(0, 0, 0, 0.55))
 	hud.draw_rect(track.grow(1), Color(0.3, 0.22, 0.1, 0.8), false, 1.0)
 	var thumb := notes_thumb()
-	var grabbed := notes_drag >= 0.0 or thumb.has_point(get_viewport().get_mouse_position())
+	var grabbed := notes_drag >= 0.0 or thumb.has_point(ui_mouse(true))
 	vgrad(thumb, UI_GOLD_LIGHT if grabbed else UI_GOLD, UI_GOLD_DARK)
 	bevel(thumb, 1, UI_GOLD_LIGHT, Color(0.2, 0.13, 0.05))
 
@@ -478,7 +513,7 @@ func _input(event: InputEvent) -> void:
 	var page := notes_clip.size.y - 40.0
 	var target := notes_target
 	if event is InputEventMouseButton and event.pressed:
-		var p := get_viewport().get_mouse_position()
+		var p := ui_mouse(true)
 		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			target -= NOTES_STEP
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
@@ -496,7 +531,7 @@ func _input(event: InputEvent) -> void:
 		notes_drag = -1.0
 		return
 	elif event is InputEventMouseMotion and notes_drag >= 0.0:
-		drag_notes(get_viewport().get_mouse_position().y)
+		drag_notes(ui_mouse(true).y)
 		return
 	elif event is InputEventKey and event.pressed:
 		match event.keycode:
@@ -626,6 +661,8 @@ func gem(c: Vector2, radius: float, col: Color) -> void:
 func draw_panel() -> void:
 	# The console's stone is on its own layer (see build_hud)
 	draw_top_bar()
+	# The rest sits at the screen's bottom (see ui_extra)
+	hud.draw_set_transform(Vector2(0, ui_extra))
 	draw_minimap()
 	draw_wave_info()
 	# Another player's build request takes the middle until it's answered
@@ -716,7 +753,8 @@ func draw_minimap() -> void:
 		hud.draw_rect(Rect2(m.position + Vector2(selected.cell) * k, Vector2(k, k)).grow(2), UI_GOLD_LIGHT, false, 1.5)
 	# What the camera sees, cut to the small map
 	var view := PackedVector2Array()
-	for s: Vector2 in [Vector2(0, TOP_BAR_H), Vector2(SCREEN_W, TOP_BAR_H), Vector2(SCREEN_W, BAR_TOP), Vector2(0, BAR_TOP)]:
+	var low := BAR_TOP + ui_extra
+	for s: Vector2 in [Vector2(0, TOP_BAR_H), Vector2(SCREEN_W, TOP_BAR_H), Vector2(SCREEN_W, low), Vector2(0, low)]:
 		view.append(m.position + screen_to_ground(s) * k)
 	var edge := PackedVector2Array([m.position, Vector2(m.end.x, m.position.y), m.end, Vector2(m.position.x, m.end.y)])
 	for poly: PackedVector2Array in Geometry2D.intersect_polygons(view, edge):
@@ -843,7 +881,7 @@ func card_rects() -> Array:
 func hovered_card() -> int:
 	if menu_open or update_dialog != "":
 		return -1
-	var p := get_viewport().get_mouse_position()
+	var p := ui_mouse()
 	# 9 and 10: the 2 path buttons over the build row (a level 4 tower of yours selected)
 	if picking_path():
 		for i in 2:
@@ -1091,14 +1129,14 @@ func draw_menu() -> void:
 	var m := MENU_RECT
 	var left := HOST_RECT.position.x
 	var width := HOST_RECT.size.x
-	hud.draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(0, 0, 0, 0.5))
+	hud.draw_rect(screen_rect(), Color(0, 0, 0, 0.5))
 	ui_box(m)
 	var title := "PAUSED" if net_mode == "" else "MENU"
 	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 40).x
 	ui_title(Rect2(m.position.x, m.position.y, m.size.x, 66), Vector2((SCREEN_W - tw) / 2.0, m.position.y + 50), title, 40)
 	var sub := "The game is paused." if net_mode == "" else "The game keeps running while this menu is open."
 	centered(m.position.y + 84, sub, 15, UI_GREY)
-	button(GRAPHICS_RECT, "Graphics: %s" % ("High" if graphics_high else "Low"), true, graphics_high)
+	button(GRAPHICS_RECT, "Settings")
 	ui_heading(Vector2(left, 196), "MULTIPLAYER", width)
 	var grey := UI_GREY
 	var gold_col := Color(1, 0.85, 0.3)
@@ -1138,7 +1176,7 @@ func draw_menu() -> void:
 # The top 10 from the game server (see open_board()), over the Esc menu.
 func draw_board() -> void:
 	var b := BOARD_RECT
-	hud.draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(0, 0, 0, 0.5))
+	hud.draw_rect(screen_rect(), Color(0, 0, 0, 0.5))
 	ui_box(b)
 	var title := "LEADERBOARD"
 	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 36).x
@@ -1182,6 +1220,62 @@ func draw_board() -> void:
 		centered(below, "Your best: %s, wave %d%s, %s" % [where, board_me.wave, " (won)" if board_me.won else "", board_time_text(board_me.ms)], 15, gold_col)
 	button(BOARD_REFRESH_RECT, "Refresh", can_refresh_board())
 	button(BOARD_BACK_RECT, "Back (Esc)", true, true)
+
+
+var settings_open := false  # the Settings box over the Esc menu
+
+
+# Each row of the Settings box: its name and the current choice.
+func settings_rows() -> Array:
+	return [
+		["Graphics", "High" if graphics_high else "Low"],
+		["Window", "Fullscreen" if fullscreen else "Windowed"],
+		["3D resolution", "%d%%" % roundi(render_scale * 100.0)],
+		["Anti-aliasing", AA_NAMES[AA_MODES.find(aa_mode)]],
+	]
+
+
+func settings_row_rect(i: int) -> Rect2:
+	return Rect2(SETTINGS_BUTTON_X, SETTINGS_ROW_Y + i * 48, 180, 34)
+
+
+# Graphics, fullscreen, 3D resolution and anti-aliasing: a click on a row's button picks the next choice.
+func draw_settings() -> void:
+	var b := SETTINGS_BOX
+	hud.draw_rect(screen_rect(), Color(0, 0, 0, 0.5))
+	ui_box(b)
+	var title := "SETTINGS"
+	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 34).x
+	ui_title(Rect2(b.position.x, b.position.y, b.size.x, 60), Vector2((SCREEN_W - tw) / 2.0, b.position.y + 44), title, 34)
+	var rows := settings_rows()
+	for i in rows.size():
+		var r := settings_row_rect(i)
+		text(Vector2(b.position.x + 40, r.position.y + 23), rows[i][0], 17, UI_TEXT)
+		button(r, rows[i][1])
+	centered(SETTINGS_BACK_RECT.position.y - 14, "F11 or Alt+Enter: fullscreen.  Lower 3D resolution: faster.", 13, UI_DIM)
+	button(SETTINGS_BACK_RECT, "Back (Esc)", true, true)
+
+
+func settings_click(p: Vector2) -> void:
+	if SETTINGS_BACK_RECT.has_point(p):
+		settings_open = false
+		return
+	for i in settings_rows().size():
+		if settings_row_rect(i).has_point(p):
+			match i:
+				0:
+					graphics_high = not graphics_high
+					apply_graphics()
+				1:
+					set_fullscreen(not fullscreen)
+				2:
+					var scales := render_scales()
+					render_scale = scales[(scales.find(render_scale) + 1) % scales.size()]
+					apply_display()
+				3:
+					aa_mode = AA_MODES[(AA_MODES.find(aa_mode) + 1) % AA_MODES.size()]
+					apply_display()
+			save_settings()
 
 
 func board_click(p: Vector2) -> void:
@@ -1337,6 +1431,8 @@ func ui_console() -> void:
 	vgrad(top, Color(1, 1, 1, 0.03), Color(0, 0, 0, 0.3))
 	hud.draw_rect(Rect2(0, TOP_BAR_H + 4, SCREEN_W, 2), Color(0, 0, 0, 0.5))
 	bevel(Rect2(-6, TOP_BAR_H, SCREEN_W + 12, 5), 2, UI_GOLD_LIGHT, UI_GOLD_DARK)
+	# The rest sits at the screen's bottom (see ui_extra)
+	hud.draw_set_transform(Vector2(0, ui_extra))
 	# A raised arch over the portrait, poking up into the map
 	var arch := Vector2(PORTRAIT_RECT.get_center().x, BAR_TOP + ARCH_DROP)
 	hud.draw_circle(arch, ARCH_R + 4, Color(0, 0, 0, 0.5))
@@ -1369,6 +1465,7 @@ func ui_console() -> void:
 	bevel(PORTRAIT_RECT.grow(6), 6, UI_GOLD_LIGHT, UI_GOLD_DARK)
 	for c in [PORTRAIT_RECT.position, Vector2(PORTRAIT_RECT.end.x, PORTRAIT_RECT.position.y), PORTRAIT_RECT.end, Vector2(PORTRAIT_RECT.position.x, PORTRAIT_RECT.end.y)]:
 		stud(c, 6.0)
+	hud.draw_set_transform(Vector2.ZERO)
 
 
 # The small map's grass and path.
@@ -1460,11 +1557,13 @@ func ui_bar(r: Rect2, frac: float, col: Color) -> void:
 
 
 func toggle_menu() -> void:
-	# Esc in the leaderboard goes back to the menu
-	if board_open and menu_open:
+	# Esc in the leaderboard or the settings goes back to the menu
+	if (board_open or settings_open) and menu_open:
 		board_open = false
+		settings_open = false
 		return
 	board_open = false
+	settings_open = false
 	menu_open = not menu_open
 	build_type = ""
 	games_timer = 0.0  # fresh list of public games when the menu opens
@@ -1478,6 +1577,9 @@ func menu_click(p: Vector2) -> void:
 	if board_open:
 		board_click(p)
 		return
+	if settings_open:
+		settings_click(p)
+		return
 	if RESUME_RECT.has_point(p):
 		toggle_menu()
 		return
@@ -1485,9 +1587,9 @@ func menu_click(p: Vector2) -> void:
 		open_board()
 		return
 	if GRAPHICS_RECT.has_point(p):
-		graphics_high = not graphics_high
-		apply_graphics()
-		save_settings()
+		settings_open = true
+		code_input.release_focus()
+		name_input.release_focus()
 		return
 	match net_mode:
 		"":
@@ -1525,7 +1627,7 @@ func menu_click(p: Vector2) -> void:
 func draw_end_screen() -> void:
 	var won := state == "won"
 	# Less dark when won, so the map shows under the fireworks
-	hud.draw_rect(Rect2(0, TOP_BAR_H, SCREEN_W, BAR_TOP - TOP_BAR_H), Color(0, 0, 0, 0.4 if won else 0.6))
+	hud.draw_rect(Rect2(0, TOP_BAR_H - ui_extra / 2.0, SCREEN_W, BAR_TOP - TOP_BAR_H + ui_extra), Color(0, 0, 0, 0.4 if won else 0.6))
 	var title := WIN_TEXT if won else "GAME OVER"
 	var sub := "You survived all %d waves." % MAX_WAVE if won else "Too many monsters! You reached wave %d." % wave
 	# The win text is long, so it's smaller (it fits FW_KEEP, where no fireworks burst)
@@ -1589,6 +1691,7 @@ func fw_layer(tex: Texture2D, m: Material, most: int) -> MultiMeshInstance2D:
 	node.multimesh = mm
 	node.texture = tex
 	node.material = m
+	node.position = Vector2(0, ui_extra / 2.0)  # with the win text (see draw_hud)
 	hud.get_parent().add_child(node)
 	return node
 

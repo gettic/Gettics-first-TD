@@ -17,7 +17,7 @@ extends Node3D
 
 const CELL := 40
 const SCREEN_W := 1280
-const SCREEN_H := 720
+const SCREEN_H := 720  # the layout's size: screens taller than 16:9 add ui_extra
 const CAMERA_SPEED := 12.0  # tiles per second
 const CAMERA_LIMIT := Vector2(9.0, 7.0)  # how far the camera can move from its start
 const CAMERA_H_OFFSET := 0.0  # the map uses the full width now
@@ -233,7 +233,12 @@ const STOP_RECT := Rect2(430, 580, 420, 40)
 const RESUME_RECT := Rect2(430, 640, 270, 44)  # the Leaderboard button is next to it
 const PUBLIC_RECT := Rect2(430, 366, 420, 36)
 const REFRESH_RECT := Rect2(750, 472, 100, 28)
-const GRAPHICS_RECT := Rect2(756, 50, 124, 28)
+const GRAPHICS_RECT := Rect2(756, 50, 124, 28)  # opens the Settings box
+# The Settings box over the Esc menu: a row per setting, its button cycles the choices
+const SETTINGS_BOX := Rect2(430, 150, 420, 350)
+const SETTINGS_ROW_Y := 226  # the first row's button; the rest follow every 48
+const SETTINGS_BUTTON_X := 640
+const SETTINGS_BACK_RECT := Rect2(560, 438, 160, 40)
 const GAME_ROWS := 3  # public games shown in the menu
 
 # Update popup layout (screen pixels)
@@ -510,7 +515,28 @@ func to3d(p: Vector2, height := 0.0) -> Vector3:
 
 
 func mouse_over_panel() -> bool:
-	return over_panel(get_viewport().get_mouse_position())
+	return over_panel(ui_mouse())
+
+
+# Screens taller than 16:9 (like 16:10) show more map: the layout is 1280 x (720 +
+# ui_extra), with the console ui_extra lower and popups ui_extra / 2 lower.
+var ui_extra := 0.0
+
+
+# A screen point in the 1280x720 layout's pixels (the UI's rects). popup: for the
+# centered popups and menus; otherwise for the top bar and the console.
+func ui_point(p: Vector2, popup := false) -> Vector2:
+	if popup:
+		return p - Vector2(0, ui_extra / 2.0)
+	var split := BAR_TOP - 60.0
+	if p.y < split:
+		return p
+	# The extra map between: just above the console
+	return Vector2(p.x, maxf(p.y - ui_extra, split - 1.0))
+
+
+func ui_mouse(popup := false) -> Vector2:
+	return ui_point(get_viewport().get_mouse_position(), popup)
 
 
 func over_panel(p: Vector2) -> bool:

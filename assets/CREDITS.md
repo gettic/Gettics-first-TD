@@ -20,6 +20,6 @@ Made for this game: `shaders/pack_model.gdshader`, `shaders/ground.gdshader`, `s
 
 Made by Gettic: `logo/logo.png` and the game icon `logo/icon.png`, `logo/icon.ico` (cut from his logo).
 
-Made by Gettic with an AI tool: `towers/arrow/arrow_tower.glb` and its textures `towers/arrow/arrow_tower_*.jpg` (the game's copy of his `archer_tower_L1.glb`: textures cut to 256 px, no normal maps).
+Made by Gettic with an AI tool: the Arrow tower 0.02, `towers/arrow/archer_tower_L1.glb` to `archer_tower_L10.glb` (one per look), and their textures `towers/arrow/archer_tower_L1_*.jpg` (taken out of `archer_tower_L1.glb` at full size; the other models use the same textures, so they're imported without their own copy).
 
 Crediting isn't required by CC0, but thank you, Kay Lousberg and Cethiel.

@@ -85,6 +85,14 @@ func build_hud() -> void:
 		if e is InputEventKey and e.pressed and e.keycode == KEY_ESCAPE:
 			map_name_input.release_focus()
 			map_name_input.accept_event())
+	place_ui()
+
+
+# The editor's name box moves down with its console (see ui_extra).
+func place_ui() -> void:
+	super()
+	if map_name_input != null:
+		map_name_input.position = ED_NAME_RECT.position + Vector2(0, ui_extra)
 
 
 # ---------------------------------------------------------------- saved maps
@@ -248,7 +256,7 @@ func draw_join_box() -> void:
 	var b := JOIN_BOX
 	var rows: Array = map_offer.rows
 	var check: Dictionary = map_offer.check
-	hud.draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(0, 0, 0, 0.45))
+	hud.draw_rect(screen_rect(), Color(0, 0, 0, 0.45))
 	ui_box(b)
 	var title := "JOIN GAME"
 	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 34).x
@@ -514,7 +522,7 @@ func ed_tool_rect(i: int) -> Rect2:
 
 
 func editor_input(event: InputEvent) -> void:
-	var p := get_viewport().get_mouse_position()
+	var p := ui_mouse(ed_list_open)
 	if event is InputEventMouseButton:
 		if not event.pressed:
 			if event.button_index == MOUSE_BUTTON_LEFT or event.button_index == MOUSE_BUTTON_RIGHT:
@@ -687,6 +695,8 @@ func draw_menu() -> void:
 		button(ED_ASK_NO_RECT, "Keep playing")
 	if board_open:
 		draw_board()
+	if settings_open:
+		draw_settings()
 
 
 func menu_click(p: Vector2) -> void:
@@ -700,8 +710,8 @@ func menu_click(p: Vector2) -> void:
 				menu_open = false
 			ed_leave()
 		return
-	if board_open:
-		super(p)  # the leaderboard box gets the click
+	if board_open or settings_open:
+		super(p)  # the leaderboard or settings box gets the click
 		return
 	if ed_ask_open:
 		if ED_ASK_YES_RECT.has_point(p):
@@ -743,7 +753,7 @@ func toggle_menu() -> void:
 
 
 func ed_draw_menu() -> void:
-	hud.draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(0, 0, 0, 0.5))
+	hud.draw_rect(screen_rect(), Color(0, 0, 0, 0.5))
 	ui_box(ED_MENU_RECT)
 	var title := "MAP EDITOR"
 	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 34).x
@@ -763,12 +773,17 @@ func draw_hud() -> void:
 		return
 	ed_draw_marks()
 	ed_draw_console()
+	# Popups in the middle of the screen, messages over the console (see ui_extra)
+	hud.draw_set_transform(Vector2(0, ui_extra / 2.0))
 	if ed_list_open:
 		ed_draw_list()
+	hud.draw_set_transform(Vector2(0, ui_extra))
 	if message_time > 0.0 and not menu_open:
 		outlined(Vector2(SCREEN_W / 2.0, MESSAGE_Y), message, 18, Color(1, 1, 0.6, minf(message_time, 1.0)))
+	hud.draw_set_transform(Vector2(0, ui_extra / 2.0))
 	if menu_open:
 		draw_menu()
+	hud.draw_set_transform(Vector2.ZERO)
 
 
 func ground_point(x: float, y: float, h := 0.06) -> Vector2:
@@ -810,8 +825,7 @@ func ed_draw_marks() -> void:
 		hud.draw_circle(sp, 11, Color(0, 0, 0, 0.7))
 		hud.draw_circle(sp, 9, PLAYER_COLORS[g])
 		text(sp + Vector2(-4.5, 6), str(g + 1), 16, Color.BLACK)
-	var mp := get_viewport().get_mouse_position()
-	if ed_list_open or menu_open or ed_over_console(mp):
+	if ed_list_open or menu_open or ed_over_console(ui_mouse()):
 		return
 	var c := mouse_cell()
 	if in_map(c):
@@ -852,7 +866,8 @@ func ed_draw_console() -> void:
 		title += "   (not saved)"
 	text(Vector2(140, 21), title, 16, UI_TEXT)
 	text(Vector2(1010, 21), "Esc: menu   WASD / wheel: camera", 14, UI_GREY)
-	# Console
+	# Console, at the screen's bottom
+	hud.draw_set_transform(Vector2(0, ui_extra))
 	var r := Rect2(0, BAR_TOP, SCREEN_W, SCREEN_H - BAR_TOP)
 	stone_blocks(r, UI_STONE, 36, 96)
 	vgrad(r, Color(1, 1, 1, 0.03), Color(0, 0, 0, 0.35))
@@ -925,6 +940,7 @@ func ed_draw_console() -> void:
 	button(ED_SAVE_RECT, "Save", true, ed_changed)
 	button(ED_PLAY_RECT, "Play this map", not ed_check.has("error"))
 	button(ED_EXIT_RECT, "Exit the editor")
+	hud.draw_set_transform(Vector2.ZERO)
 
 
 # Buildable tiles in each gate's area.
@@ -941,7 +957,7 @@ func ed_area_counts() -> Array:
 
 
 func ed_draw_list(title := "LOAD A MAP", current := ed_name) -> void:
-	hud.draw_rect(Rect2(0, 0, SCREEN_W, SCREEN_H), Color(0, 0, 0, 0.4))
+	hud.draw_rect(screen_rect(), Color(0, 0, 0, 0.4))
 	ui_box(ED_LIST_RECT)
 	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 28).x
 	ui_title(Rect2(ED_LIST_RECT.position.x, ED_LIST_RECT.position.y, ED_LIST_RECT.size.x, 54), Vector2((SCREEN_W - tw) / 2.0, ED_LIST_RECT.position.y + 40), title, 28)

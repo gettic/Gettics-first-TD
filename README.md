@@ -14,7 +14,7 @@ Monsters come out of a green portal in a stone gate at a corner of the map, walk
 
 Play alone or with up to 4 players: each player gets their own gate at a corner of the square (see [Multiplayer](#multiplayer)). Or draw your own maps in the [Map editor](#map-editor).
 
-The 3D world is built mostly from simple shapes in code, plus free CC0 models from the KayKit packs by Kay Lousberg (trees, rocks and the skeleton monsters with their walk animations) and painted CC0 grass and dirt textures by Cethiel (see [assets/CREDITS.md](assets/CREDITS.md)). The Arrow tower model, the logo and the game icon are by Gettic. The game has no sound files.
+The 3D world is built mostly from simple shapes in code, plus free CC0 models from the KayKit packs by Kay Lousberg (trees, rocks and the skeleton monsters with their walk animations) and painted CC0 grass and dirt textures by Cethiel (see [assets/CREDITS.md](assets/CREDITS.md)). The Arrow tower models (a new look at levels 1-5, 10, 15, 20, 30 and 40), the logo and the game icon are by Gettic. The game has no sound files.
 
 ## Download
 
@@ -55,7 +55,8 @@ godot --path path/to/this/folder
 | **Y** / **N** | Say yes or no when another player asks to build in your area |
 | **Enter** | Chat: type a message and press **Enter** to send it (**Esc** cancels). Game keys are off while you type |
 | **Right-click** | Cancel |
-| **Esc** | Menu: pause / continue, see the **Leaderboard**, open the **Map editor**, host or join a multiplayer game, and switch graphics between High and Low (Low is faster on older PCs; PCs with built-in graphics start on Low) |
+| **Esc** | Menu: pause / continue, see the **Leaderboard**, open the **Map editor**, host or join a multiplayer game, and open **Settings**: Graphics High / Low (Low is faster on older PCs; PCs with built-in graphics start on Low), Fullscreen / Windowed, 3D resolution (100 / 85 / 75 / 50%, lower is faster) and anti-aliasing |
+| **F11** or **Alt+Enter** | Switch between fullscreen and a window (the game starts in fullscreen the first time and remembers your choice) |
 | **R** | Restart after winning or losing |
 
 ## Towers

@@ -25,7 +25,14 @@ func add_mesh(parent: Node3D, mesh: Mesh, material: Material, pos := Vector3.ZER
 
 
 const SETTINGS_FILE := "user://settings.cfg"  # this PC's settings, like Graphics Low/High
-var graphics_high := true  # Low/High in the Esc menu: only switches effects
+var graphics_high := true  # Low/High in the Settings box: only switches effects
+var fullscreen := false  # borderless over the whole screen (F11, Alt+Enter)
+var fullscreen_chosen := false  # saved, or picked this run
+var render_scale := 1.0  # the 3D's resolution compared to the screen's
+var aa_mode := "msaa2"  # anti-aliasing: one of AA_MODES
+const RENDER_SCALES := [1.0, 0.85, 0.75, 0.5]
+const AA_MODES := ["msaa2", "msaa4", "fxaa", "off"]
+const AA_NAMES := ["MSAA 2x", "MSAA 4x", "FXAA", "Off"]
 var compat := false  # running on the Compatibility renderer (older PCs), which needs darker light
 var env: Environment
 var sun: DirectionalLight3D
@@ -104,6 +111,7 @@ func build_world() -> void:
 	build_markers_and_hud()
 	build_map()
 	build_monsters()  # at the start, so the first wave doesn't stutter
+	load_arrow_models()  # and upgrades don't either
 
 
 const VIEW_TILES := Vector2(24, 18)  # the map size the camera's normal distance is made for
@@ -222,13 +230,67 @@ func apply_graphics() -> void:
 
 func load_settings() -> void:
 	var cfg := ConfigFile.new()
-	if cfg.load(SETTINGS_FILE) == OK and cfg.has_section_key("graphics", "high"):
+	var found := cfg.load(SETTINGS_FILE) == OK
+	if found and cfg.has_section_key("graphics", "high"):
 		graphics_high = cfg.get_value("graphics", "high", true)
 	else:
 		# First run: Low on weaker PCs (built-in graphics, or the Compatibility
 		# fallback), High otherwise. Saved, so the player's choice always wins after this.
 		graphics_high = not (compat or weak_gpu())
+	# Display: files from before 1.28 don't have these, so they get the first-run choices
+	var big_screen := DisplayServer.screen_get_size().y > 1080
+	fullscreen_chosen = cfg.has_section_key("display", "fullscreen")
+	fullscreen = bool(cfg.get_value("display", "fullscreen", release_build()))
+	render_scale = float(cfg.get_value("display", "render_scale", 0.75 if weak_gpu() and big_screen else 1.0))
+	if not render_scale in render_scales():
+		render_scale = 1.0
+	aa_mode = str(cfg.get_value("display", "aa", "msaa2"))
+	if not aa_mode in AA_MODES:
+		aa_mode = "msaa2"
+	if not found or not cfg.has_section_key("graphics", "high") or not cfg.has_section_key("display", "aa"):
 		save_settings()
+	apply_display()
+	# The debug build and test runs stay in a normal window (the debug log sits next to it)
+	if release_build():
+		set_fullscreen(fullscreen)
+
+
+# The exported game the players get (not the debug build, the editor or tests).
+func release_build() -> bool:
+	return OS.has_feature("template") and not is_debug_game() and DisplayServer.get_name() != "headless"
+
+
+# Fullscreen: a borderless window over the whole screen. Windowed: maximized.
+func set_fullscreen(on: bool) -> void:
+	fullscreen = on
+	fullscreen_chosen = true
+	if DisplayServer.get_name() == "headless":
+		return
+	var w := get_window()
+	if on:
+		w.mode = Window.MODE_FULLSCREEN
+	elif w.mode == Window.MODE_FULLSCREEN or w.mode == Window.MODE_EXCLUSIVE_FULLSCREEN or release_build():
+		w.mode = Window.MODE_MAXIMIZED
+
+
+# F11 and Alt+Enter.
+func toggle_fullscreen() -> void:
+	set_fullscreen(get_window().mode != Window.MODE_FULLSCREEN)
+	save_settings()
+
+
+# 3D resolution (FSR 1 upscales it; Compatibility can only stretch it) and anti-aliasing.
+# The 2D overlay always uses the screen's full resolution.
+func apply_display() -> void:
+	var vp := get_viewport()
+	vp.scaling_3d_scale = render_scale
+	vp.scaling_3d_mode = Viewport.SCALING_3D_MODE_FSR if render_scale < 1.0 and not compat else Viewport.SCALING_3D_MODE_BILINEAR
+	vp.msaa_3d = Viewport.MSAA_4X if aa_mode == "msaa4" else (Viewport.MSAA_2X if aa_mode == "msaa2" else Viewport.MSAA_DISABLED)
+	vp.screen_space_aa = Viewport.SCREEN_SPACE_AA_FXAA if aa_mode == "fxaa" else Viewport.SCREEN_SPACE_AA_DISABLED
+
+
+func render_scales() -> Array:
+	return [1.0, 0.75] if compat else RENDER_SCALES
 
 
 # True for graphics built into the processor, like most laptops have.
@@ -237,9 +299,18 @@ func weak_gpu() -> bool:
 
 
 func save_settings() -> void:
+	# Headless runs (error checks, tests) never write the player's settings
+	if DisplayServer.get_name() == "headless":
+		return
 	var cfg := ConfigFile.new()
 	cfg.load(SETTINGS_FILE)  # keeps any other settings in it
 	cfg.set_value("graphics", "high", graphics_high)
+	# Fullscreen only once it's chosen or on the release build, so a test or debug
+	# run doesn't decide how the real game starts
+	if fullscreen_chosen or release_build():
+		cfg.set_value("display", "fullscreen", fullscreen)
+	cfg.set_value("display", "render_scale", render_scale)
+	cfg.set_value("display", "aa", aa_mode)
 	cfg.save(SETTINGS_FILE)
 
 
@@ -466,7 +537,7 @@ func build_tower_node(t: Tower) -> void:
 	if t.type == "arrow" or t.type == "cannon":
 		var model_head: Node3D
 		if t.type == "arrow":
-			model_head = build_arrow_tower(root, look, t.owner)
+			model_head = build_arrow_tower(root, t.level, t.path, t.owner)
 		else:
 			model_head = build_cannon_tower(root, look, t.owner)
 		add_pips(root, look, Vector3(0, 0.06, 0.44))
@@ -539,46 +610,39 @@ var model_meshes := {}  # merged tower meshes by name
 var model_mats := {}  # their materials by color
 
 
-# Arrow tower: Gettic's archer tower (made by Gettic with an AI tool, see
-# assets/CREDITS.md), loaded once and shared by every arrow tower. The roof tiles,
-# the archer's cape, the banners and the flag show the owner's color. The archer
-# stands on the hoarding under the roof and walks round it to aim (the head turns,
-# its front is -Z). Levels: 2 adds two flag poles on the tile's front corners,
-# 3 four poles and a second archer, 4 three archers, lighter stone and glowing gold.
-const ARROW_FILE := "res://assets/towers/arrow/arrow_tower.glb"
-const ARROW_SCALE := 0.21  # the model is about 3.5 units wide, a tile is 1
-const ARROW_BOW_Y := 4.17  # where the archer's bow is, in model units (feet 3.3 + 0.87)
-const ARROW_REACH := 0.72  # how far out from the middle the archer stands
-const ARROW_ARCHERS := [1, 1, 2, 3]
-const ARROW_POLES := [0, 2, 4, 4]
-const ARROW_CORNERS := [Vector3(-1.8, 0, 1.8), Vector3(1.8, 0, 1.8), Vector3(-1.8, 0, -1.8), Vector3(1.8, 0, -1.8)]
-var arrow_parts := {}  # "Tower", "Archer", "Banner" -> [[mesh, transform], ...]
-var arrow_mats := {}  # recolored copies of the model's materials, by name, owner and level
+# Arrow tower: Gettic's archer tower 0.02 (made by Gettic with an AI tool, see
+# assets/CREDITS.md), one model per look (L1-L10), each loaded once and shared by
+# every arrow tower. The roof tiles, the archer's cape, the banners and the flag
+# show the owner's color. The archer stands on the hoarding under the roof and
+# walks round it to aim (the head turns, its front is -Z). Levels 1-4 use L1-L4,
+# then a new model at levels 5, 10, 15, 20, 30 and 40 (see ARROW_FROM). From level
+# 5 the Volley path has three archers, Sniper one.
+const ARROW_FILE := "res://assets/towers/arrow/archer_tower_L%d.glb"
+const ARROW_MODELS := 10
+const ARROW_FROM := [9, 14, 19, 29, 39]  # level index where L6, L7, L8, L9 and L10 start
+const ARROW_SCALE := 0.21  # L1 is about 3.5 units wide, a tile is 1
+const ARROW_BOW := 0.87  # the archer's bow above his feet, in model units
+var arrow_parts := {}  # model 1-10 -> {"Tower", "Archer", "Banner": [[mesh, transform], ...], "feet": Vector3}
+var arrow_base := {}  # L1's materials by name (the other models are imported without textures)
+var arrow_mats := {}  # team-colored copies of the materials, by name and owner
 var pack_meshes := {}  # pack model -> [[mesh, transform], ...], loaded once
 var pack_mats := {}  # shared pack materials by texture and owner
 var pack_shader: Shader
 
 
-func build_arrow_tower(root: Node3D, level: int, slot: int) -> Node3D:
-	if arrow_parts.is_empty():
-		var scene: Node = load(ARROW_FILE).instantiate()
-		for n in ["Tower", "Archer", "Banner"]:
-			var parts := []
-			var found: Node3D = scene.find_child(n, true, false)
-			# The archer is placed by the code, the others keep their place
-			var tr: Transform3D = found.transform.affine_inverse() if n == "Archer" else Transform3D.IDENTITY
-			collect_meshes(found, tr, parts)
-			arrow_parts[n] = parts
-		scene.free()
+func build_arrow_tower(root: Node3D, level: int, path: int, slot: int) -> Node3D:
+	var d := arrow_model(arrow_look(level))
 	var model := Node3D.new()
 	model.scale = Vector3.ONE * ARROW_SCALE
 	root.add_child(model)
-	add_arrow_part(model, "Tower", slot, level)
-	add_arrow_part(model, "Banner", slot, level)
+	add_arrow_part(model, d["Tower"], slot)
+	add_arrow_part(model, d["Banner"], slot)
+	# The head turns at the archer's bow height (higher from L6)
+	var feet: Vector3 = d["feet"]
 	var head := Node3D.new()
-	head.position = Vector3(0, ARROW_BOW_Y * ARROW_SCALE, 0)
+	head.position = Vector3(0, (feet.y + ARROW_BOW) * ARROW_SCALE, 0)
 	root.add_child(head)
-	var n: int = ARROW_ARCHERS[level]
+	var n := 3 if level >= PATH_LEVEL and path == 2 else 1
 	for i in n:
 		# More archers stand side by side round the hoarding
 		var turn := Node3D.new()
@@ -586,68 +650,79 @@ func build_arrow_tower(root: Node3D, level: int, slot: int) -> Node3D:
 		turn.rotation.y = (i - (n - 1) / 2.0) * 0.75
 		head.add_child(turn)
 		var man := Node3D.new()
-		man.position = Vector3(0, 3.3 - ARROW_BOW_Y, -ARROW_REACH)
+		man.position = Vector3(0, -ARROW_BOW, -feet.z)
 		man.rotation_degrees.y = 180.0  # the model's archer looks at +Z
 		turn.add_child(man)
-		add_arrow_part(man, "Archer", slot, level)
-	if ARROW_POLES[level] > 0 and not model_meshes.has("arrow pole"):
-		var pole := CylinderMesh.new()
-		pole.top_radius = 0.06
-		pole.bottom_radius = 0.09
-		pole.height = 4.4
-		pole.radial_segments = 6
-		pole.rings = 1
-		model_meshes["arrow pole"] = pole
-	for i in ARROW_POLES[level]:
-		var c: Vector3 = ARROW_CORNERS[i]
-		add_mesh(model, model_meshes["arrow pole"], model_mat(DW_WOOD_DARK), c + Vector3(0, 2.2, 0))
-		var flag := Node3D.new()
-		flag.position = c + Vector3(0, 4.35, 0)
-		flag.rotation_degrees.y = 0.0 if c.x < 0 else 180.0  # the flags fly inward
-		flag.scale = Vector3.ONE * 1.3
-		model.add_child(flag)
-		add_arrow_part(flag, "Banner", slot, level, true)
+		add_arrow_part(man, d["Archer"], slot)
 	return head
 
 
-# Adds one part of the arrow tower model under parent, with the owner's colors.
-# at_parent puts it at parent's origin instead of its place in the model.
-func add_arrow_part(parent: Node3D, part: String, slot: int, level: int, at_parent := false) -> void:
-	for p: Array in arrow_parts[part]:
+# Which model (1-10) a level index shows
+func arrow_look(level: int) -> int:
+	if level < 4:
+		return level + 1
+	for i in ARROW_FROM.size():
+		if level < ARROW_FROM[i]:
+			return 5 + i
+	return ARROW_MODELS
+
+
+# Loads all the models at the start, so upgrading never stutters
+func load_arrow_models() -> void:
+	for k in range(1, ARROW_MODELS + 1):
+		arrow_model(k)
+
+
+# One model's parts, loaded once. L1 is loaded first: its materials are the shared ones.
+func arrow_model(k: int) -> Dictionary:
+	if k != 1 and arrow_base.is_empty():
+		arrow_model(1)
+	if not arrow_parts.has(k):
+		var scene: Node = load(ARROW_FILE % k).instantiate()
+		var d := {}
+		for n in ["Tower", "Archer", "Banner"]:
+			var parts := []
+			var found: Node3D = scene.find_child(n, true, false)
+			# The archer is placed by the code, the others keep their place
+			var tr: Transform3D = found.transform.affine_inverse() if n == "Archer" else Transform3D.IDENTITY
+			collect_meshes(found, tr, parts)
+			d[n] = parts
+			if n == "Archer":
+				d["feet"] = found.position
+		if k == 1:
+			for p: Array in d["Tower"] + d["Archer"] + d["Banner"]:
+				for s in p[0].get_surface_count():
+					var m: Material = p[0].surface_get_material(s)
+					arrow_base[m.resource_name] = m
+		scene.free()
+		arrow_parts[k] = d
+	return arrow_parts[k]
+
+
+# Adds one part of an arrow tower model under parent, with the owner's colors.
+func add_arrow_part(parent: Node3D, parts: Array, slot: int) -> void:
+	for p: Array in parts:
 		var mesh: Mesh = p[0]
 		var mi := MeshInstance3D.new()
 		mi.mesh = mesh
 		mi.transform = p[1]
-		if at_parent:
-			mi.transform.origin = Vector3.ZERO
 		parent.add_child(mi)
 		for s in mesh.get_surface_count():
-			var m := arrow_mat(mesh.surface_get_material(s), slot, level)
-			if m != null:
-				mi.set_surface_override_material(s, m)
+			mi.set_surface_override_material(s, arrow_mat(mesh.surface_get_material(s).resource_name, slot))
 
 
-# The model's own material (null), or a shared copy: the roof, cape and flags in the
-# owner's color, and at level 4 lighter stone and glowing gold.
-func arrow_mat(m: Material, slot: int, level: int) -> Material:
-	var name := m.resource_name
+# L1's material of that name, shared by every model; the roof, cape and flags
+# as a shared copy in the owner's color.
+func arrow_mat(name: String, slot: int) -> Material:
 	var team := name == "TeamColor" or name == "RoofTiles"
-	var top := level == 3 and (name.begins_with("Stone") or name == "Gold")
-	if not (team or top):
-		return null
-	var key := "%s %d %d" % [name, slot, level if top else 0]
+	if not team:
+		return arrow_base[name]
+	var key := "%s %d" % [name, slot]
 	if not arrow_mats.has(key):
-		var c: StandardMaterial3D = m.duplicate()
-		if team:
-			var col: Color = PLAYER_COLORS[slot]
-			# The roof a little greyer, so it doesn't outshine the map
-			c.albedo_color = col.lerp(Color(0.5, 0.5, 0.5), 0.25) if name == "RoofTiles" else col
-		elif name == "Gold":
-			c.emission_enabled = true
-			c.emission = Color(1.0, 0.75, 0.3)
-			c.emission_energy_multiplier = 0.8
-		else:
-			c.albedo_color = Color(1.25, 1.2, 1.1)
+		var c: StandardMaterial3D = arrow_base[name].duplicate()
+		var col: Color = PLAYER_COLORS[slot]
+		# The roof a little greyer, so it doesn't outshine the map
+		c.albedo_color = col.lerp(Color(0.5, 0.5, 0.5), 0.25) if name == "RoofTiles" else col
 		arrow_mats[key] = c
 	return arrow_mats[key]
 
