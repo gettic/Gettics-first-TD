@@ -14,7 +14,7 @@ Monsters come out of a green portal in a stone gate at a corner of the map, walk
 
 Play alone or with up to 4 players: each player gets their own gate at a corner of the square (see [Multiplayer](#multiplayer)). Or draw your own maps in the [Map editor](#map-editor).
 
-The 3D world is built mostly from simple shapes in code, plus free CC0 models from the KayKit packs by Kay Lousberg (trees, rocks and the skeleton monsters with their walk animations) and painted CC0 grass and dirt textures by Cethiel (see [assets/CREDITS.md](assets/CREDITS.md)). The Arrow tower models (a new look at levels 1-5, 10, 15, 20, 30 and 40), the logo and the game icon are by Gettic. The game has no sound files.
+The 3D world has a hand-painted look (painted shaders, warm light, a forest and a lake around the board). It uses free CC0 models from the KayKit packs by Kay Lousberg (trees, bushes, rocks and the skeleton mage boss with its walk) and painted CC0 grass and dirt textures by Cethiel (see [assets/CREDITS.md](assets/CREDITS.md)). The Cannon tower (a new look at levels 1-5, 10, 15, 20, 30 and 40 for each path) and the skeleton warrior (with its walk and death) were made for the game with a model kit; the Arrow tower models, the logo and the game icon are by Gettic. Some smaller things are still simple shapes built in code. The game has no sound files.
 
 ## Download
 
@@ -55,7 +55,7 @@ godot --path path/to/this/folder
 | **Y** / **N** | Say yes or no when another player asks to build in your area |
 | **Enter** | Chat: type a message and press **Enter** to send it (**Esc** cancels). Game keys are off while you type |
 | **Right-click** | Cancel |
-| **Esc** | Menu: pause / continue, see the **Leaderboard**, open the **Map editor**, host or join a multiplayer game, and open **Settings**: Graphics High / Low (Low is faster on older PCs; PCs with built-in graphics start on Low), Fullscreen / Windowed, 3D resolution (100 / 85 / 75 / 50%, lower is faster) and anti-aliasing |
+| **Esc** | Menu: pause / continue, pick the **Level** (Easy, Normal, Hard or Insane, before wave 1; see Waves), see the **Leaderboard**, open the **Map editor**, host or join a multiplayer game, and open **Settings**: Graphics High / Low (Low is faster on older PCs; PCs with built-in graphics start on Low), Fullscreen / Windowed, 3D resolution (100 / 85 / 75 / 50%, lower is faster) and anti-aliasing |
 | **F11** or **Alt+Enter** | Switch between fullscreen and a window (the game starts in fullscreen the first time and remembers your choice) |
 | **R** | Restart after winning or losing |
 
@@ -67,21 +67,21 @@ Towers can be upgraded up to level 60. Above level 4 a tower keeps its level-4 l
 |---|---|---|
 | **Arrow** | 50g | Cheap and fast, hits one enemy |
 | **Cannon** | 80g | Slow, but damages every enemy near the impact |
-| **Frost** | 70g | Low damage, slows enemies down |
+| **Frost** | 70g | Less damage, but slows enemies down |
 | **Spark** | 120g | Lightning that jumps between several enemies |
 
 **Specializations.** The upgrade from level 4 to 5 picks one of the tower's 2 paths: with a level 4 tower of yours selected, the tower buttons turn into its 2 paths (**Q** and **E**, price and a short text; hover for the numbers). **U** only reminds you to pick. The path is for good: selling is the only way back. Both paths cost the same, and the tower panel shows its path's name. Each path multiplies the tower's normal numbers from level 5 on, and some extras grow at levels 20 and 40:
 
 | Tower | Path | Good against | What it does |
 |---|---|---|---|
-| Arrow | **Sniper** | Bosses, armored | Damage ×1.8, fires half as often, range ×1.25, faster arrows. Starts on Strongest |
-| Arrow | **Volley** | Crowds | Shoots 3 monsters at once (4 at level 20, 5 at 40), each arrow ×0.4 damage |
-| Cannon | **Big Bomb** | Bosses, packs | Damage ×1.8, fires 1.6× slower, blast ×1.3 |
-| Cannon | **Cluster** | Long lines | Damage ×0.85, plus 3 bomblets (4 at 20, 5 at 40) on monsters near the blast, each a small blast with full damage |
-| Frost | **Deep Freeze** | Holding monsters | Damage ×1.5, 25% chance to freeze a monster for 1 second (32% at 20, 40% at 40; bosses half as long) |
-| Frost | **Blizzard** | Area slow | Hits and slows every monster within 60 of the target (80 at 20, 100 at 40), damage ×0.5 |
+| Arrow | **Sniper** | Bosses, armored | Damage ×1.6 (×2 more against bosses), fires half as often, range ×1.25, faster arrows. Starts on Strongest |
+| Arrow | **Volley** | Crowds | Shoots 3 monsters at once (4 at level 20, 5 at 40), each arrow ×0.5 damage |
+| Cannon | **Big Bomb** | Bosses, packs | Damage ×2 (×1.5 more against bosses), fires 1.6× slower, blast ×1.3 |
+| Cannon | **Cluster** | Crowds, long lines | Plus 3 bomblets (4 at 20, 5 at 40) on monsters near the blast, each a small blast with full damage. Each monster is hit only once per shot |
+| Frost | **Deep Freeze** | Holding monsters | Damage ×2, 25% chance to freeze a monster for 1 second (32% at 20, 40% at 40; bosses half as long). After a freeze, a monster can't be frozen again for 2 seconds |
+| Frost | **Blizzard** | Area slow | Hits and slows every monster within 60 of the target (80 at 20, 100 at 40), damage ×0.35 |
 | Spark | **Storm** | Crowds | Chains to 3 more monsters, each jump keeps 90% of the damage (instead of 80%) and reaches further, damage ×0.9 |
-| Spark | **Overload** | Bosses | Damage ×2.4, fires 1.2× slower, chains to only 2 monsters. Starts on Strongest |
+| Spark | **Overload** | Bosses | Damage ×2 (×2 more against bosses), fires 1.2× slower, chains to only 2 monsters. Starts on Strongest |
 
 **Targeting.** Each tower has a targeting mode that says which monster in range it shoots. Change it with **T** or the **Target** button in the tower panel (only on your own towers). **Shift** changes all your towers of that type at once. New towers start on **First**.
 
@@ -102,14 +102,26 @@ When two monsters are equal, the one that has walked furthest is picked.
 - Press **Space** to send the next wave early and get **bonus gold for every second** you skip (the wave's gold spread over 25 seconds, at least 1 a second). You can only do this once every monster of the current wave has spawned.
 - Every **3rd** wave is **armored**: armor reduces the damage of each hit, and it grows with the monsters' health.
 - Every **5th** wave is **fast**.
-- Every **10th** wave is a **boss** wave (up to 5 bosses). A boss counts as 5 monsters toward the limit.
-- The monsters: wave 1 is **unicorns**, after that normal monsters are skeleton minions, armored ones are skeleton warriors with shields, fast ones are bone spiders and bosses are big skeleton mages. Health bars show once a monster is hurt.
+- Every **10th** wave is a **boss** wave (up to 5 bosses, each with 18 times the health). A boss counts as 5 monsters toward the limit. Sniper, Big Bomb and Overload hit bosses harder.
+- **Wave preview:** under the wave number in the console, three small chips show the next 3 waves: the monster kind (by color and mark: speed lines for fast, a steel rim for armored, a crown for a boss), how many come (all gates together), and a blinking red **BOSS** chip before a boss wave. The seconds until the next wave are at the right of the wave number, with a thin gold bar under the first chip.
+- The monsters: wave 1 is **unicorns**, after that normal monsters are bone warriors with sword and shield, armored ones are bigger, steel-tinted bone warriors, fast ones are bone spiders and bosses are big skeleton mages. Health bars show once a monster is hurt.
 
-You start with 150 gold. You earn gold for each kill and a bonus at the start of each wave; both grow with the monsters' health (playing alone, kills pay about 15% more later on). The console at the bottom shows how many monsters are alive: you lose if it reaches **50** (per player, see below). You win when all 300 waves are out and every monster is dead (there are fireworks).
+You start with 150 gold (225 on Easy). You earn gold for each kill and a bonus at the start of each wave; both grow with the monsters' health (playing alone, kills pay about 15% more later on). The console at the bottom shows how many monsters are alive: you lose if it reaches **50** (per player, see below). You win when all 300 waves are out and every monster is dead (there are fireworks).
+
+**Stats at the end.** When the game is lost (after a moment) or won (after 3 seconds of fireworks), a panel shows each player's kills, damage, gold earned (wave gold, early bonus and kills) and gold spent on towers (minus what selling gave back), and the 5 towers that did the most damage (sold towers count too). Damage counts only the health a hit really took off. In multiplayer the **MVP** is the player who did the most damage (kills break a tie).
+
+**Levels.** Before wave 1, pick how hard the game is in the **Esc** menu (playing alone, or the host in multiplayer). Gold from waves and kills is the same on every level, so tougher monsters also mean less gold for their health.
+
+| Level | Monster health | Start gold |
+|---|---|---|
+| **Easy** | ×0.6 | 225 |
+| **Normal** | ×1 | 150 |
+| **Hard** | ×1.4 | 150 |
+| **Insane** | ×2 | 150 |
 
 ## Leaderboard
 
-The **Leaderboard** button in the Esc menu shows the online top 10 for the Default map: the highest wave first, then won before lost, then the shortest game time. Each team (the same player names) has one entry, its best game. When a game on the Default map ends, the host sends the team's names and how the game went (wave, result, game time) to the game server. Only the released game sends scores: test runs and debug builds never do. Custom maps don't count. A balance change starts a new board, so old and new scores aren't mixed (the tower specializations started board 2).
+The **Leaderboard** button in the Esc menu shows the online top 10 for the Default map: the highest wave first, then won before lost, then the shortest game time. Each team (the same player names) has one entry, its best game. When a game on the Default map ends, the host sends the team's names and how the game went (wave, result, game time) to the game server. Only the released game sends scores: test runs and debug builds never do. Custom maps don't count. A balance change starts a new board, so old and new scores aren't mixed (the tower specializations started board 2). From board 3 on, **each Level has its own board** (Easy, Normal, Hard and Insane): the box opens on the board of the level you're playing, and you can look at the other levels' boards too.
 
 ## Map editor
 
@@ -135,6 +147,8 @@ Up to 4 players can defend the map together: one player per gate on the map (the
 - **Sending a wave early is a vote**: pressing **Space** votes for it, and the wave comes once at least **75% of the players** agree (2 of 2, 3 of 3, or 3 of 4). The button shows the votes, like `2/3`. Press **Space** again to take your vote back. Starting the first wave doesn't need a vote.
 - **Everyone has their own gold.** Every player gets the wave bonus, and the gold for a kill goes to the player whose tower made it. Tower bases are tinted in the owner's color, and you can only upgrade or sell your own towers.
 - You can start hosting in the middle of a game and keep your towers. A player who joins late gets some extra gold to catch up. If a player leaves, their gate closes and their towers stay.
+- **The host picks the Level** (before wave 1), for everyone: the other players see it, also when they join later, and a won or lost game goes on that level's leaderboard.
+- **The stats at the end** are counted by the host and sent to everyone once when the game ends, so all players see the same numbers (a player who left still shows up; a player who joins a slot later starts fresh).
 - In multiplayer, **Esc doesn't pause** the game.
 - **Names and chat:** type your name in the **Your name** box in the **Esc** menu (up to 16 letters; the game remembers it). Leave it empty and you get a random silly name, like *Sir Wobbles* or *Captain Noodle*. Two players with the same name get a number added. Press **Enter** to chat: messages show above the small map in the bottom-left, in each player's color, and fade after a few seconds.
 
@@ -179,13 +193,14 @@ Good places to start:
 - `BOARD_SEASON` in `game_net.gd` is part of the leaderboard's name: raise it after a balance change, so new scores aren't mixed with old ones.
 - `GAME_SPEEDS` in `game_base.gd` are the speeds the **F** button goes through.
 - `wave_hp()`, `wave_count()`, `wave_income()` and `wave_bounty()` in `game_base.gd` set each wave's monster health, how many come out of each gate, the wave gold and the gold per kill.
+- `DIFFICULTIES`, `DIFFICULTY_HP` and `DIFFICULTY_GOLD` in `game_base.gd` are the levels and what each one does to monster health and start gold. To test a level before the menu has its button, start the game with `-- --level=hard` (or easy, normal, insane).
 - `START_GOLD`, `MAX_ALIVE`, `WAVE_INTERVAL` and `MAX_WAVE` set the starting gold, the monster limit (per player), the time between waves and the number of waves.
 - `EARLY_VOTE` sets the share of players (0.75 = 75%) who must agree to send a wave early in multiplayer.
 - `DEFAULT_MAP` in `game_base.gd` is the map, one letter per tile: `.` grass, `#` path, `1`-`4` a player's gate, `r` rock, `t` tree, `w` water (nothing can be built on these). `read_map()` checks it: the path must be one closed loop, one tile wide, and each gate must stand at the end of its own road to the loop. Monsters walk from their gate to the loop and then around it clockwise. Each player's area is the part of the map nearest to where their gate's road joins the loop.
 - `PLAYER_COLORS` and `PLAYER_NAMES` set each player's color and its name (used when a player has no name), and `SILLY_NAMES` is the list of random names for players who leave the name box empty.
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.
 - `start_wave()` and `spawn_enemy()` in `main.gd` start each wave and give each monster kind its health, armor and gold.
-- `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting and the ground (painted grass and dirt, see `assets/shaders/ground.gdshader`). `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Model files (like the Arrow tower's) are in `assets/`, with their sources in `assets/CREDITS.md`.
+- `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting, haze and effects; `build_map()` the ground (painted grass and dirt, see `assets/shaders/ground.gdshader`) and the land around the board. Models get the painted look of `assets/shaders/painted.gdshader` (see `painted()`). `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Model files (like the Arrow tower's) are in `assets/`, with their sources in `assets/CREDITS.md`.
 - `RELAY_URL` in `game_base.gd` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used for games on your own network.
 - `GAME_FOLDER` and `GAME_NAME` in `game_base.gd` set the names of the folder and files the downloaded `.exe` unpacks into.
 - The game server is a small Cloudflare Worker, kept outside this repository.

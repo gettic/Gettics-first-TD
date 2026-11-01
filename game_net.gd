@@ -476,24 +476,29 @@ func _on_games_listed(result: int, code: int, _headers: PackedStringArray, body:
 # the small "stats" part below. A game that is quit, left or restarted before
 # it ends sends nothing, so it isn't counted.
 
-# Each board is named after the last wave and this number: raise it after a
-# balance change, so new scores aren't mixed with ones from the old rules.
-const BOARD_SEASON := 2  # 2: tower specializations
+# Each board is named after the last wave, this number and the difficulty level
+# ("300w-3-hard"): raise the number after a balance change, so new scores aren't
+# mixed with ones from the old rules. Each level has its own board (and stats).
+const BOARD_SEASON := 3  # 2: tower specializations, 3: difficulty levels
 const BOARD_ROWS := 10
 
 var board_open := false  # the leaderboard box in the Esc menu
+var board_level := 1  # which level's board the box shows (index in DIFFICULTIES)
 var board_top: Array = []  # [{names, wave, won, ms}], best first
 var board_me := {}  # this player's best entry and its rank ({} if none)
 var board_status := ""
 var board_http: HTTPRequest
+var board_http_level := 1  # the level board_http asks for
 var board_asked := -100.0  # when the list was last asked for, in seconds
+var board_saved := {}  # level -> [when asked, top, me]: switching back doesn't ask again
 var run_time := 0.0  # host / alone: game seconds since wave 1 started
 var score_sent := false
 var score_http: HTTPRequest
 
 
-func board_id() -> String:
-	return "%dw-%d" % [MAX_WAVE, BOARD_SEASON]
+func board_id(level := -1) -> String:
+	var d := difficulty if level < 0 else level
+	return "%dw-%d-%s" % [MAX_WAVE, BOARD_SEASON, DIFFICULTIES[d].to_lower()]
 
 
 # Host / alone, every frame the game runs: counts the game time, and sends the
@@ -562,6 +567,7 @@ func _on_score_sent(result: int, code: int, _headers: PackedStringArray, body: P
 	if not (r is Dictionary and r.get("best") == true and r.get("rank") is float and r.rank >= 1):
 		return
 	board_asked = -100.0  # show the new list next time
+	board_saved.erase(difficulty)
 	var text := "You're #%d on the leaderboard!" % int(r.rank)
 	if player_count() > 1:
 		text = "Your team is #%d on the leaderboard!" % int(r.rank)
@@ -569,10 +575,39 @@ func _on_score_sent(result: int, code: int, _headers: PackedStringArray, body: P
 	send_all("net_message", [text])
 
 
+# Opens the box on the board of the level this game is played at.
 func open_board() -> void:
 	board_open = true
-	if Time.get_ticks_msec() / 1000.0 - board_asked > 30.0:
-		refresh_board()
+	show_board_level(difficulty)
+
+
+# Shows another level's board (index in DIFFICULTIES), for the box's level
+# switcher: from what was loaded in the last 30 seconds, or asks the server.
+func show_board_level(d: int) -> void:
+	if d < 0 or d >= DIFFICULTIES.size():
+		return
+	board_level = d
+	var now := Time.get_ticks_msec() / 1000.0
+	var saved: Array = board_saved.get(d, [])
+	if not saved.is_empty() and now - saved[0] < 30.0:
+		board_top = saved[1]
+		board_me = saved[2]
+		board_status = "Nobody is on the leaderboard yet. Be the first!" if board_top.is_empty() else ""
+		return
+	board_top = []
+	board_me = {}
+	# A list still loading for another level isn't needed any more
+	if board_http != null and board_http_level != d:
+		board_http.cancel_request()
+		board_http.queue_free()
+		board_http = null
+	if board_http == null:
+		load_board()
+
+
+# The next (step 1) or previous (step -1) level's board, going round.
+func step_board_level(step: int) -> void:
+	show_board_level(posmod(board_level + step, DIFFICULTIES.size()))
 
 
 # Refresh waits a few seconds between asks.
@@ -581,18 +616,22 @@ func can_refresh_board() -> bool:
 
 
 func refresh_board() -> void:
-	if not can_refresh_board():
-		return
+	if can_refresh_board():
+		load_board()
+
+
+func load_board() -> void:
 	if relay_url == "":
 		board_status = "The leaderboard needs the game server, and this game only uses your network."
 		return
 	board_asked = Time.get_ticks_msec() / 1000.0
 	board_status = "Loading the leaderboard..."
+	board_http_level = board_level
 	board_http = HTTPRequest.new()
 	board_http.timeout = 8.0
 	add_child(board_http)
 	board_http.request_completed.connect(_on_board_loaded)
-	var url := relay_url + "/scores?board=%s&me=%s" % [board_id(), my_name().to_lower().uri_encode()]
+	var url := relay_url + "/scores?board=%s&me=%s" % [board_id(board_level), my_name().to_lower().uri_encode()]
 	if board_http.request(url) != OK:
 		_on_board_loaded(HTTPRequest.RESULT_CANT_CONNECT, 0, PackedStringArray(), PackedByteArray())
 
@@ -600,6 +639,8 @@ func refresh_board() -> void:
 func _on_board_loaded(result: int, code: int, _headers: PackedStringArray, body: PackedByteArray) -> void:
 	board_http.queue_free()
 	board_http = null
+	if board_http_level != board_level:
+		return  # the box shows another level now
 	var r: Variant = JSON.parse_string(body.get_string_from_utf8()) if result == HTTPRequest.RESULT_SUCCESS else null
 	if code == 429:
 		board_status = "The game server is busy. Try again in a minute."
@@ -607,7 +648,7 @@ func _on_board_loaded(result: int, code: int, _headers: PackedStringArray, body:
 	if code != 200 or not (r is Dictionary and r.get("top") is Array):
 		board_status = "Couldn't reach the game server. Check your internet connection and try again."
 		return
-	board_top.clear()
+	board_top = []
 	for e: Variant in r.top:
 		var entry := board_entry(e)
 		if not entry.is_empty() and board_top.size() < BOARD_ROWS:
@@ -615,7 +656,15 @@ func _on_board_loaded(result: int, code: int, _headers: PackedStringArray, body:
 	board_me = board_entry(r.get("me"))
 	if not board_me.is_empty():
 		board_me.rank = int(r.me.get("rank", 0)) if r.me.get("rank") is float else 0
+	board_saved[board_level] = [board_asked, board_top, board_me]
 	board_status = "Nobody is on the leaderboard yet. Be the first!" if board_top.is_empty() else ""
+
+
+# Host: the difficulty level changed (see set_difficulty() in main.gd).
+func send_difficulty() -> void:
+	send_all("net_set_difficulty", [difficulty])
+	if board_open:
+		show_board_level(difficulty)
 
 
 # An entry from the server, checked and cleaned like anything from the network, or {}.
@@ -879,6 +928,7 @@ func _on_peer_disconnected(id: int) -> void:
 	for slot in MAX_PLAYERS:
 		if players[slot] != null and players[slot].peer == id:
 			var p_name: String = players[slot].name
+			stat_names[slot] = name_of(slot)  # still shown in the stats at the end
 			players[slot] = null
 			spawn_queues[slot].clear()
 			wave_votes.erase(slot)
@@ -987,11 +1037,22 @@ func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant) -
 	p.slot = slot
 	p.name = unique_name(their_name, slot)
 	# Joining late: half the gold the others could have earned by now (at least the start gold)
-	p.gold = maxi(START_GOLD, int(gold_before_wave(wave) / 2.0))
+	p.gold = maxi(start_gold(), int(gold_before_wave(wave) / 2.0))
 	players[slot] = p
+	# The stats start fresh for this slot (an earlier player there is forgotten)
+	stat_kills[slot] = 0
+	stat_damage[slot] = 0.0
+	stat_start[slot] = p.gold
+	stat_earned[slot] = 0
+	stat_spent[slot] = 0
+	stat_names[slot] = p.name
 	net_welcome.rpc_id(peer, slot, mine)
+	net_set_difficulty.rpc_id(peer, difficulty)
 	for t: Tower in towers.values():
 		net_tower.rpc_id(peer, t.cell, t.type, t.level, t.owner, t.spent, t.mode, t.path)
+	# Joining a game that just ended: its stats too
+	if not end_stats.is_empty():
+		net_stats.rpc_id(peer, end_stats)
 	send_players()
 	chat_note("%s joined the game" % p.name)
 
@@ -1112,6 +1173,20 @@ func net_message(text: String) -> void:
 	flash(text)
 
 
+# The host's difficulty level (index in DIFFICULTIES), when it changes and when
+# we join. Only shown and used for the leaderboard: monster health comes from
+# the host. Its name sorts after net_refused (see net_say).
+@rpc("authority", "call_remote", "reliable")
+func net_set_difficulty(d: Variant) -> void:
+	if net_mode != "client" or not (d is int and d >= 0 and d < DIFFICULTIES.size()):
+		return
+	difficulty = d
+	if board_open:
+		show_board_level(d)
+	else:
+		board_level = d
+
+
 # A chat line for everyone (slot -1: from the game itself). Its name sorts after
 # net_refused, so the messages older versions use to check the version keep
 # their numbers (Godot numbers the @rpc functions alphabetically).
@@ -1134,6 +1209,28 @@ func net_ask_closed(id: int) -> void:
 @rpc("authority", "call_remote", "reliable")
 func net_reset() -> void:
 	clear_world()
+	reset_stats()
+
+
+# The stats at the end of the game (see make_end_stats()), sent once by the host
+# when the game is won or lost. Its name sorts after net_refused (see net_say).
+@rpc("authority", "call_remote", "reliable")
+func net_stats(stats: Variant) -> void:
+	if net_mode != "client" or not stats is Dictionary:
+		return
+	# Only what the stats screen can show
+	var rows := []
+	for r: Variant in stats.get("players", []):
+		if r is Array and r.size() == 6 and r[0] is int and r[0] >= 0 and r[0] < MAX_PLAYERS:
+			rows.append([r[0], clean_text(str(r[1]), NAME_MAX), int(r[2]), float(r[3]), int(r[4]), int(r[5])])
+	var best := []
+	for r: Variant in stats.get("towers", []):
+		if r is Array and r.size() == 7 and TOWERS.has(r[0]) and r[1] is int and r[2] is int and r[3] is int \
+				and r[3] >= 0 and r[3] < MAX_PLAYERS:
+			best.append([r[0], clampi(r[1], 0, 2), clampi(r[2], 0, MAX_LEVEL - 1), r[3], clean_text(str(r[4]), NAME_MAX), float(r[5]), int(r[6])])
+	var mvp: Variant = stats.get("mvp", -1)
+	end_stats = {"wave": int(stats.get("wave", wave)), "won": stats.get("won") == true, "ms": int(stats.get("ms", 0)),
+			"players": rows, "towers": best.slice(0, 5), "mvp": mvp if mvp is int else -1}
 
 
 @rpc("authority", "call_remote", "reliable")
@@ -1249,6 +1346,6 @@ func net_snapshot(info: Array, data: PackedByteArray) -> void:
 		var e := enemies[i]
 		if e.id >= from and (end == 0 or e.id < end) and not seen.has(e.id):
 			e.dead = true
-			e.node.queue_free()
+			drop_corpse(e)
 			enemy_by_id.erase(e.id)
 			enemies.remove_at(i)

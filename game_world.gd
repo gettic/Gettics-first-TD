@@ -43,55 +43,67 @@ var grid_fade := 0.0  # grid lines on the grass, shown while placing a tower
 func build_world() -> void:
 	# Forward+ falls back to Compatibility by itself on PCs that can't run it
 	compat = RenderingServer.get_current_rendering_method() == "gl_compatibility"
+	# The painted look: warm late-afternoon light, a soft haze far away, and colors
+	# a little stronger. Compatibility renders brighter and more colorful, so it
+	# gets its own, lower values.
 	env = Environment.new()
 	env.background_mode = Environment.BG_COLOR
-	# Dark blue around the board. Set brighter than it looks: ACES and contrast
-	# darken it, and the two renderers do that differently.
-	env.background_color = Color(0.035, 0.041, 0.052) if compat else Color(0.13, 0.15, 0.19)
+	env.background_color = Color(0.62, 0.6, 0.55)
 	# A sky only for the ambient light and reflections: the camera never sees it
 	var sky_mat := ProceduralSkyMaterial.new()
-	sky_mat.sky_top_color = Color(0.32, 0.45, 0.68)
-	sky_mat.sky_horizon_color = Color(0.72, 0.68, 0.6)
+	sky_mat.sky_top_color = Color(0.35, 0.52, 0.8)
+	sky_mat.sky_horizon_color = Color(0.85, 0.75, 0.6)
 	sky_mat.ground_bottom_color = Color(0.12, 0.1, 0.08)
-	sky_mat.ground_horizon_color = Color(0.45, 0.4, 0.33)
+	sky_mat.ground_horizon_color = Color(0.85, 0.75, 0.6).darkened(0.3)
 	env.sky = Sky.new()
 	env.sky.sky_material = sky_mat
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
-	env.ambient_light_energy = 0.45 if compat else 0.55
+	env.ambient_light_energy = 0.48 if compat else 0.6
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
-	env.tonemap_exposure = 0.8 if compat else 1.05
+	env.tonemap_exposure = 0.72 if compat else 1.0
 	env.glow_enabled = true
-	env.glow_bloom = 0.05
-	env.glow_hdr_threshold = 0.9
+	env.glow_bloom = 0.1
+	env.glow_hdr_threshold = 0.85
 	env.adjustment_enabled = true
-	env.adjustment_contrast = 1.08
-	env.adjustment_saturation = 1.15
-	env.ssao_radius = 0.6
-	env.ssao_intensity = 2.0
+	env.adjustment_contrast = 1.1
+	env.adjustment_saturation = 1.02 if compat else 1.2
+	# Shadows a little cool, highlights a little warm
+	env.adjustment_color_correction = split_tone(0.5)
+	env.ssao_radius = 0.8
+	env.ssao_intensity = 2.5
 	env.ssao_power = 1.6
+	env.ssao_light_affect = 0.2
 	env.ssil_radius = 2.0
 	env.ssil_intensity = 0.8
+	# Haze over the land far around the board (see build_map() for its distance)
+	env.fog_enabled = true
+	env.fog_mode = Environment.FOG_MODE_DEPTH
+	env.fog_light_color = Color(0.75, 0.68, 0.55)
+	env.fog_density = 1.0
+	env.fog_depth_curve = 1.5
+	env.fog_sky_affect = 1.0
 	var world_env := WorldEnvironment.new()
 	world_env.environment = env
 	add_child(world_env)
 
-	# Warm sun from the side for long soft shadows, and a weak cool fill light
+	# Warm sun from the side for long soft shadows, and a cool fill light
 	# from the other side so the shadow sides aren't flat
 	sun = DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-42, -35, 0)
-	sun.light_color = Color(1.0, 0.9, 0.75)
-	sun.light_energy = 1.0 if compat else 1.4
+	sun.rotation_degrees = Vector3(-40, -40, 0)
+	sun.light_color = Color(1.0, 0.8, 0.58)
+	sun.light_energy = 1.3 if compat else 1.75
 	sun.shadow_enabled = true
 	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
 	sun.directional_shadow_max_distance = 60.0
 	add_child(sun)
 	var fill := DirectionalLight3D.new()
 	fill.rotation_degrees = Vector3(-30, 150, 0)
-	fill.light_color = Color(0.55, 0.65, 0.9)
-	fill.light_energy = 0.3 if compat else 0.35
+	fill.light_color = Color(0.5, 0.62, 1.0)
+	fill.light_energy = 0.4 if compat else 0.5
 	add_child(fill)
 	load_settings()
+	make_effects()
 	apply_graphics()
 
 	camera = Camera3D.new()
@@ -112,6 +124,96 @@ func build_world() -> void:
 	build_map()
 	build_monsters()  # at the start, so the first wave doesn't stutter
 	load_arrow_models()  # and upgrades don't either
+	load_cannon_models()
+
+
+# A 3D color table for env.adjustment_color_correction: shadows a little cool,
+# highlights a little warm (amount 0 = no change)
+func split_tone(amount: float) -> ImageTexture3D:
+	var n := 17
+	var imgs: Array[Image] = []
+	var shadow := Color(0.94, 0.98, 1.08).lerp(Color.WHITE, 1.0 - amount)
+	var light := Color(1.06, 1.01, 0.9).lerp(Color.WHITE, 1.0 - amount)
+	for b in n:
+		var img := Image.create(n, n, false, Image.FORMAT_RGB8)
+		for g in n:
+			for r in n:
+				var c := Color(r / (n - 1.0), g / (n - 1.0), b / (n - 1.0))
+				var lum := c.r * 0.3 + c.g * 0.59 + c.b * 0.11
+				var k := Color.WHITE.lerp(shadow, clampf(1.0 - lum * 2.0, 0.0, 1.0)).lerp(light, clampf(lum * 2.0 - 1.0, 0.0, 1.0))
+				img.set_pixel(r, g, Color(clampf(c.r * k.r, 0, 1), clampf(c.g * k.g, 0, 1), clampf(c.b * k.b, 0, 1)))
+		imgs.append(img)
+	var tex := ImageTexture3D.new()
+	tex.create(Image.FORMAT_RGB8, n, n, n, false, imgs)
+	return tex
+
+
+# ---------------------------------------------------------------- painted look
+
+# Model materials get the painted shader (see assets/shaders/painted.gdshader):
+# one copy per material, shared by everything that uses it.
+var painted_shader: Shader
+var painted_shader_2s: Shader  # the same, drawn from both sides (banners, flags)
+var painted_cache := {}
+
+
+func painted(m: Material) -> Material:
+	if not (m is StandardMaterial3D):
+		return m
+	var s := m as StandardMaterial3D
+	# See-through, unshaded and glowing-texture materials keep their own look
+	if s.transparency != BaseMaterial3D.TRANSPARENCY_DISABLED or s.shading_mode == BaseMaterial3D.SHADING_MODE_UNSHADED:
+		return m
+	if s.emission_enabled and s.emission_texture != null:
+		return m
+	if painted_cache.has(s):
+		return painted_cache[s]
+	load_painted()
+	var p := ShaderMaterial.new()
+	p.shader = painted_shader_2s if s.cull_mode == BaseMaterial3D.CULL_DISABLED else painted_shader
+	p.set_shader_parameter("albedo", s.albedo_color)
+	if s.albedo_texture != null:
+		p.set_shader_parameter("albedo_tex", s.albedo_texture)
+	p.set_shader_parameter("use_vcol", s.vertex_color_use_as_albedo)
+	if s.normal_enabled and s.normal_texture != null:
+		p.set_shader_parameter("normal_tex", s.normal_texture)
+		p.set_shader_parameter("use_normal", true)
+		p.set_shader_parameter("normal_depth", s.normal_scale)
+	if s.emission_enabled:
+		p.set_shader_parameter("emission", s.emission)
+		p.set_shader_parameter("emission_energy", s.emission_energy_multiplier)
+	p.set_shader_parameter("saturation", 1.15)
+	p.set_shader_parameter("rim_strength", 0.35)
+	p.set_shader_parameter("rim_color", Color(1.0, 0.85, 0.6))
+	p.set_shader_parameter("grad_low", 0.62)
+	p.set_shader_parameter("grad_high", 1.15)
+	p.set_shader_parameter("top_light", 0.2)
+	painted_cache[s] = p
+	return p
+
+
+func load_painted() -> void:
+	if painted_shader == null:
+		painted_shader = load("res://assets/shaders/painted.gdshader")
+		painted_shader_2s = Shader.new()
+		painted_shader_2s.code = painted_shader.code.replace("render_mode ", "render_mode cull_disabled, ")
+
+
+# Gives every model under n the painted look (see painted())
+func paint_tree(n: Node) -> void:
+	if n is MeshInstance3D and n != ghost and n != range_disc:
+		var mi := n as MeshInstance3D
+		if mi.material_override != null:
+			mi.material_override = painted(mi.material_override)
+		elif mi.mesh != null:
+			for i in mi.mesh.get_surface_count():
+				var m := mi.get_surface_override_material(i)
+				if m == null:
+					m = mi.mesh.surface_get_material(i)
+				if m != null:
+					mi.set_surface_override_material(i, painted(m))
+	for c in n.get_children():
+		paint_tree(c)
 
 
 const VIEW_TILES := Vector2(24, 18)  # the map size the camera's normal distance is made for
@@ -129,6 +231,7 @@ func clear_map() -> void:
 	area_planes = []
 	area_centers = []
 	ground_mats = []
+	pollen = null
 
 
 # Builds the map being played (see use_map()): ground, path, base, gates and areas.
@@ -146,6 +249,9 @@ func build_map() -> void:
 	camera.position = camera_home
 	camera.look_at(camera_focus)
 	sun.directional_shadow_max_distance = 60.0 * maxf(s, 1.0)
+	# The haze starts beyond the board, also on big maps
+	env.fog_depth_begin = 30.0 * s
+	env.fog_depth_end = 80.0 * s
 
 	# Ground: grass tiles, with the path sunk a little lower.
 	# Tiles are slightly bigger than one unit so they overlap and no gaps show between them.
@@ -198,6 +304,7 @@ func build_map() -> void:
 	base.size = Vector3(map_cols + 0.6, 1.0, map_rows + 0.6)
 	add_mesh(map_root, base, mat(Color(0.16, 0.12, 0.09)), Vector3(map_cols / 2.0, -0.85, map_rows / 2.0))
 	build_decor()
+	build_border()
 
 	# A gate only where the map has one; gate_parts stays one entry per player slot
 	for g in gate_cells.size():
@@ -205,7 +312,10 @@ func build_map() -> void:
 			gate_parts.append(null)
 		else:
 			build_gate(g)
+	paint_tree(map_root)
+	build_outer()
 	build_areas()
+	add_pollen()
 
 
 # Graphics High: ambient occlusion (dark contact shadows), bounced light, soft
@@ -215,7 +325,10 @@ func apply_graphics() -> void:
 	var high := graphics_high
 	env.ssao_enabled = high and not compat
 	env.ssil_enabled = high and not compat
-	env.glow_intensity = 0.6 if high else 0.35
+	env.glow_intensity = 0.75 if high else 0.45
+	# Half the floating pollen on Low
+	if pollen != null:
+		pollen.amount = POLLEN if high else POLLEN / 2
 	sun.shadow_blur = 1.5 if high else 1.0
 	sun.light_angular_distance = 1.5 if high else 0.0
 	RenderingServer.directional_shadow_atlas_set_size(4096 if high else 2048, true)
@@ -365,7 +478,7 @@ func build_gate(g: int) -> void:
 	portal_light.light_energy = 1.8
 	portal_light.position = Vector3(0, 0.7, 0.4)
 	gate.add_child(portal_light)
-	gate_parts.append({"surface": surface_node, "sparks": portal, "light": portal_light})
+	gate_parts.append({"surface": surface_node, "sparks": portal, "light": portal_light, "motes": add_motes(gate)})
 
 
 func box(x: float, y: float, z: float) -> BoxMesh:
@@ -503,6 +616,323 @@ func build_decor() -> void:
 	map_root.add_child(mmi)
 
 
+# A low curb of chunky stones along the board's edge, so the buildable area is clear.
+# One MultiMesh; each stone's tilt and height come from tile_hash().
+func build_border() -> void:
+	var stone := BoxMesh.new()
+	stone.size = Vector3(0.42, 0.2, 0.16)
+	var xf: Array[Transform3D] = []
+	var k := 0
+	for side in 4:
+		var along_x := side < 2
+		var length := map_cols if along_x else map_rows
+		var count := int(ceil(length / 0.45))
+		for i in count:
+			var t := (i + 0.5) * length / count
+			var h := tile_hash(Vector2i(k, side * 1000))
+			k += 1
+			var pos: Vector3
+			if along_x:
+				pos = Vector3(t, -0.04, -0.08 if side == 0 else map_rows + 0.08)
+			else:
+				pos = Vector3(-0.08 if side == 2 else map_cols + 0.08, -0.04, t)
+			pos.y += (h % 7) * 0.006
+			var turn := (0.0 if along_x else PI / 2) + ((h >> 3) % 9 - 4) * 0.03
+			xf.append(Transform3D(Basis(Vector3.UP, turn), pos))
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = stone
+	mm.instance_count = xf.size()
+	for i in xf.size():
+		mm.set_instance_transform(i, xf[i])
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.material_override = painted(mat(Color(0.62, 0.56, 0.48)))
+	map_root.add_child(mmi)
+
+
+# The land around the board: painted grass fading darker further out, a lake
+# beside the board, and forest, bushes, rocks and grass tufts, denser further
+# out. All from the map's size, gates and tile_hash(), so every player sees the
+# same, on every map size.
+const OUTER_TREES := ["Tree_1_A", "Tree_2_A", "Tree_4_A", "Tree_3_A"]
+const OUTER_BUSHES := ["Bush_1_B", "Bush_2_C", "Bush_3_A"]
+const OUTER_ROCKS := ["Rock_1_E", "Rock_3_C", "Rock_2_C"]
+const OUTER_TUFTS := ["Grass_1_B", "Grass_2_B"]
+
+
+func build_outer() -> void:
+	var s := view_scale
+	var ground: ShaderMaterial = ground_mats[0].duplicate()
+	ground.set_shader_parameter("outer", 1.0)
+	ground.set_shader_parameter("grid", 0.0)
+	ground_mats.append(ground)
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(map_cols, map_rows) + Vector2(60, 50) * s
+	add_mesh(map_root, plane, ground, Vector3(map_cols / 2.0, -0.12, map_rows / 2.0))
+
+	# The lake: beside the board's left or right edge (the one with fewer gates),
+	# sized by the map. Its square is big enough that the shore is never cut.
+	var k := clampf(map_rows / VIEW_TILES.y, 0.75, 2.0)
+	var radius := Vector2(2.4, 4.2) * k
+	var left := 0
+	var right := 0
+	for g in gate_cells:
+		if g != null:
+			if g.x <= 1:
+				left += 1
+			elif g.x >= map_cols - 2:
+				right += 1
+	var lake_x := -(radius.x + 1.6 * k) if left <= right else map_cols + radius.x + 1.6 * k
+	var lake_c := Vector2(lake_x, map_rows * 0.53)
+	var lake := ShaderMaterial.new()
+	lake.shader = load("res://assets/shaders/lake.gdshader")
+	lake.set_shader_parameter("center", lake_c)
+	lake.set_shader_parameter("radius", radius)
+	var lp := PlaneMesh.new()
+	lp.size = radius * 2.6
+	var lmi := add_mesh(map_root, lp, lake, Vector3(lake_c.x, -0.1, lake_c.y))
+	lmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	# Trees, bushes, rocks and grass tufts; none in the lake or in front of a gate
+	var gates: Array[Vector2] = []
+	for g in gate_cells:
+		if g != null:
+			gates.append(Vector2(g) + Vector2(0.5, 0.5))
+	var by_model := {}
+	var mx := int(ceil(10 * s))
+	for x in range(-mx, map_cols + mx):
+		for y in range(-int(ceil(11 * s)), map_rows + int(ceil(4 * s))):
+			var c := Vector2i(x, y)
+			var h := tile_hash(c + Vector2i(500, 500))
+			var r := (h % 1000) / 1000.0
+			var pos := Vector3(x + 0.5 + ((h >> 10) % 7 - 3) * 0.08, 0.0, y + 0.5 + ((h >> 14) % 7 - 3) * 0.08)
+			var turn := deg_to_rad((h >> 4) % 360)
+			if in_map(c):
+				# Grass tufts on the board's grass (not on the path, water, rocks or trees)
+				if r < 0.3 and not path_cells.has(c) and not blocked.has(c):
+					put_model(by_model, OUTER_TUFTS[h % 2], pos, turn, 0.18 + (h >> 8) % 10 * 0.01)
+				continue
+			# Round the lake, with a little room for its shore
+			if ((Vector2(x + 0.5, y + 0.5) - lake_c) / (radius + Vector2(0.9, 0.9))).length() < 1.0:
+				continue
+			var near_gate := false
+			for g in gates:
+				if g.distance_to(Vector2(x + 0.5, y + 0.5)) < 2.2:
+					near_gate = true
+			var dist := maxf(maxf(maxf(-x, x - map_cols + 1), maxf(-y, y - map_rows + 1)), 0)
+			var tree_chance := 0.0 if near_gate else clampf((dist - 1.5) / 3.0, 0.0, 0.7)
+			pos.y = -0.12
+			if r < tree_chance:
+				put_model(by_model, OUTER_TREES[h % OUTER_TREES.size()], pos, turn, 0.27 + (h >> 7) % 10 * 0.017)
+			elif r < tree_chance + 0.12:
+				put_model(by_model, OUTER_BUSHES[h % OUTER_BUSHES.size()], pos, turn, 0.35 + (h >> 7) % 10 * 0.02)
+			elif r < tree_chance + 0.17:
+				put_model(by_model, OUTER_ROCKS[h % OUTER_ROCKS.size()], pos, turn, 0.35 + (h >> 7) % 10 * 0.02)
+			elif r < tree_chance + 0.5:
+				put_model(by_model, OUTER_TUFTS[h % 2], pos, turn, 0.45)
+	for file: String in by_model:
+		for part: Array in pack_parts("nature/%s_Color1" % file):
+			var mm := MultiMesh.new()
+			mm.transform_format = MultiMesh.TRANSFORM_3D
+			mm.mesh = part[0]
+			mm.instance_count = by_model[file].size()
+			for i in mm.instance_count:
+				mm.set_instance_transform(i, by_model[file][i] * part[1])
+			var mmi := MultiMeshInstance3D.new()
+			mmi.multimesh = mm
+			var kind := "t" if file.begins_with("Tree") else ("g" if file.begins_with("Grass") else "r")
+			mmi.material_override = outer_mat(part[0], kind)
+			if kind == "g":
+				mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+			map_root.add_child(mmi)
+
+
+func put_model(by_model: Dictionary, file: String, pos: Vector3, turn: float, size: float) -> void:
+	if not by_model.has(file):
+		by_model[file] = []
+	by_model[file].append(Transform3D(Basis(Vector3.UP, turn).scaled(Vector3.ONE * size), pos))
+
+
+# The painted material of the land's trees ("t"), rocks ("r") and grass tufts ("g"), made once
+var outer_mats := {}
+
+
+func outer_mat(mesh: Mesh, kind: String) -> ShaderMaterial:
+	if not outer_mats.has(kind):
+		load_painted()
+		var p := ShaderMaterial.new()
+		p.shader = painted_shader
+		p.set_shader_parameter("albedo_tex", (mesh.surface_get_material(0) as BaseMaterial3D).albedo_texture)
+		p.set_shader_parameter("rim_strength", 0.35)
+		p.set_shader_parameter("rim_color", Color(1.0, 0.85, 0.6))
+		p.set_shader_parameter("grad_low", 0.62)
+		p.set_shader_parameter("grad_high", 1.15)
+		p.set_shader_parameter("top_light", 0.2)
+		p.set_shader_parameter("grad_top", 1.0 if kind == "t" else 0.3)
+		p.set_shader_parameter("saturation", 0.92)
+		p.set_shader_parameter("tint", Color(0.66, 0.66, 0.64) if kind == "r" else Color(0.6, 0.66, 0.48))
+		outer_mats[kind] = p
+	return outer_mats[kind]
+
+
+# ---------------------------------------------------------------- particles and effects
+
+const POLLEN := 260  # floating pollen over the board on High (half on Low)
+var pollen: GPUParticles3D
+var dot_mat: StandardMaterial3D  # a soft glowing dot, shared by all particles
+var hit_pool: Array[GPUParticles3D] = []  # sparks where arrows, frost and spark shots hit
+var hit_next := 0
+var boom_pool: Array[GPUParticles3D] = []  # fire bursts of the cannon's blasts
+var boom_next := 0
+var arrow_mesh: Mesh  # a glowing arrow streak
+
+
+# A soft round dot (white in the middle, see-through at the edge)
+func soft_dot() -> Texture2D:
+	var g := Gradient.new()
+	g.set_color(0, Color(1, 1, 1, 1))
+	g.set_color(1, Color(1, 1, 1, 0))
+	var tex := GradientTexture2D.new()
+	tex.gradient = g
+	tex.fill = GradientTexture2D.FILL_RADIAL
+	tex.fill_from = Vector2(0.5, 0.5)
+	tex.fill_to = Vector2(1.0, 0.5)
+	tex.width = 32
+	tex.height = 32
+	return tex
+
+
+# Particles fading in and out over their life
+func fade_ramp() -> GradientTexture1D:
+	var g := Gradient.new()
+	g.set_color(0, Color(1, 1, 1, 0))
+	g.set_color(1, Color(1, 1, 1, 0))
+	g.add_point(0.25, Color(1, 1, 1, 1))
+	g.add_point(0.75, Color(1, 1, 1, 1))
+	var tex := GradientTexture1D.new()
+	tex.gradient = g
+	return tex
+
+
+func particles(parent: Node3D, amount: int, life: float, size: float, pm: ParticleProcessMaterial) -> GPUParticles3D:
+	if dot_mat == null:
+		dot_mat = StandardMaterial3D.new()
+		dot_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		dot_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		dot_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		dot_mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+		dot_mat.vertex_color_use_as_albedo = true
+		dot_mat.albedo_texture = soft_dot()
+	var p := GPUParticles3D.new()
+	p.amount = amount
+	p.lifetime = life
+	p.process_material = pm
+	var q := QuadMesh.new()
+	q.size = Vector2(size, size)
+	q.material = dot_mat
+	p.draw_pass_1 = q
+	p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	parent.add_child(p)
+	return p
+
+
+# Warm pollen drifting over the board
+func add_pollen() -> void:
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	pm.emission_box_extents = Vector3(map_cols / 2.0 + 4, 0.6, map_rows / 2.0 + 4)
+	pm.color_ramp = fade_ramp()
+	pm.turbulence_enabled = true
+	pm.turbulence_noise_scale = 4.0
+	pm.turbulence_influence_min = 0.02
+	pm.turbulence_influence_max = 0.06
+	pm.direction = Vector3(0.3, 1, 0.1)
+	pm.spread = 60.0
+	pm.initial_velocity_min = 0.03
+	pm.initial_velocity_max = 0.1
+	pm.gravity = Vector3(0.05, 0.02, 0)
+	pm.color = Color(1.4, 1.25, 0.9, 0.8)
+	pm.scale_min = 0.5
+	pm.scale_max = 1.2
+	pollen = particles(map_root, POLLEN if graphics_high else POLLEN / 2, 9.0, 0.045, pm)
+	pollen.position = Vector3(map_cols / 2.0, 0.9, map_rows / 2.0)
+	pollen.visibility_aabb = AABB(-pm.emission_box_extents - Vector3(2, 2, 2), pm.emission_box_extents * 2 + Vector3(4, 6, 4))
+	pollen.preprocess = 10.0
+
+
+# Green motes rising out of a gate's portal
+func add_motes(gate: Node3D) -> GPUParticles3D:
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	pm.emission_box_extents = Vector3(0.35, 0.5, 0.1)
+	pm.direction = Vector3(0, 1, 0)
+	pm.spread = 25.0
+	pm.initial_velocity_min = 0.2
+	pm.initial_velocity_max = 0.5
+	pm.gravity = Vector3.ZERO
+	pm.color = Color(0.8, 2.5, 1.0)
+	pm.color_ramp = fade_ramp()
+	pm.scale_min = 0.5
+	pm.scale_max = 1.2
+	var p := particles(gate, 40, 1.6, 0.08, pm)
+	p.position = Vector3(0, 0.6, 0)
+	return p
+
+
+# The shared effects, made once: the glowing arrow and pools of spark and fire
+# bursts that are reused round-robin (no new nodes while playing)
+func make_effects() -> void:
+	var tip := CylinderMesh.new()
+	tip.top_radius = 0.0
+	tip.bottom_radius = 0.03
+	tip.height = 0.38
+	tip.radial_segments = 6
+	tip.rings = 1
+	var parts := Node3D.new()
+	add_mesh(parts, tip, mat(Color(1.0, 0.85, 0.5), 4.0)).rotation_degrees = Vector3(-90, 0, 0)  # points at -Z
+	arrow_mesh = merge_parts(parts)
+	for i in 24:
+		hit_pool.append(burst(10, 0.35, 0.05, 2.5))
+	for i in 8:
+		boom_pool.append(burst(36, 0.7, 0.12, 4.0))
+
+
+func burst(amount: int, life: float, size: float, speed: float) -> GPUParticles3D:
+	var pm := ParticleProcessMaterial.new()
+	pm.direction = Vector3(0, 1, 0)
+	pm.spread = 80.0
+	pm.initial_velocity_min = speed * 0.4
+	pm.initial_velocity_max = speed
+	pm.gravity = Vector3(0, -6, 0)
+	pm.damping_min = 2.0
+	pm.damping_max = 4.0
+	pm.color_ramp = fade_ramp()
+	pm.scale_min = 0.6
+	pm.scale_max = 1.4
+	var p := particles(self, amount, life, size, pm)
+	p.one_shot = true
+	p.explosiveness = 0.95
+	p.emitting = false
+	p.visibility_aabb = AABB(Vector3(-3, -3, -3), Vector3(6, 6, 6))
+	return p
+
+
+func fire_burst(p: GPUParticles3D, pos: Vector3, col: Color) -> void:
+	p.position = pos
+	(p.process_material as ParticleProcessMaterial).color = col
+	p.restart()
+
+
+# Sparks where a shot hits (cannon shots burst in add_boom() instead)
+func shot_spark(s: Shot) -> void:
+	if s.type == "cannon":
+		return
+	var col := Color(0.8, 1.6, 2.4) if s.type == "frost" else Color(1.6, 1.3, 0.7)
+	fire_burst(hit_pool[hit_next % hit_pool.size()], to3d(s.target_pos, 0.35), col)
+	hit_next += 1
+
+
 func build_markers_and_hud() -> void:
 	range_disc.visible = false
 	var ghost_mesh := BoxMesh.new()
@@ -539,22 +969,23 @@ func build_tower_node(t: Tower) -> void:
 		if t.type == "arrow":
 			model_head = build_arrow_tower(root, t.level, t.path, t.owner)
 		else:
-			model_head = build_cannon_tower(root, look, t.owner)
+			model_head = build_cannon_tower(root, t.level, t.path, t.owner)
 		add_pips(root, look, Vector3(0, 0.06, 0.44))
+		paint_tree(root)
 		t.node = root
 		t.head = model_head
 		return
 	# The base is tinted with the owner's color
 	var base := BoxMesh.new()
 	base.size = Vector3(0.8, 0.3, 0.8)
-	add_mesh(root, base, mat(stone_mat.albedo_color.lerp(PLAYER_COLORS[t.owner], 0.45)), Vector3(0, 0.15, 0))
+	add_mesh(root, base, model_mat(stone_mat.albedo_color.lerp(PLAYER_COLORS[t.owner], 0.45)), Vector3(0, 0.15, 0))
 	# The tower gets taller with each level
 	var h := 0.35 + look * 0.2
 	var body := CylinderMesh.new()
 	body.top_radius = 0.2
 	body.bottom_radius = 0.28
 	body.height = h
-	add_mesh(root, body, mat(col.darkened(0.3)), Vector3(0, 0.3 + h / 2.0, 0))
+	add_mesh(root, body, model_mat(col.darkened(0.3)), Vector3(0, 0.3 + h / 2.0, 0))
 	var head := Node3D.new()
 	head.position = Vector3(0, 0.3 + h + 0.15, 0)
 	root.add_child(head)
@@ -567,19 +998,20 @@ func build_tower_node(t: Tower) -> void:
 			cone.height = 0.35
 			cone.radial_segments = 4
 			cone.rings = 1
-			var crystal := mat(col, 1.2)
+			var crystal := model_mat(col, 1.2)
 			add_mesh(head, cone, crystal, Vector3(0, 0.17, 0))
 			add_mesh(head, cone, crystal, Vector3(0, -0.17, 0)).rotation_degrees.x = 180
 		"spark":
 			var orb := SphereMesh.new()
 			orb.radius = 0.2
 			orb.height = 0.4
-			add_mesh(head, orb, mat(col, 2.0), Vector3(0, 0.1, 0))
+			add_mesh(head, orb, model_mat(col, 2.0), Vector3(0, 0.1, 0))
 			var ring := TorusMesh.new()
 			ring.inner_radius = 0.26
 			ring.outer_radius = 0.31
 			add_mesh(head, ring, dark_mat, Vector3(0, 0.1, 0)).rotation_degrees.x = 60
 	add_pips(root, look, Vector3(0, 0.32, 0.36))
+	paint_tree(root)
 	t.node = root
 	t.head = head
 
@@ -595,17 +1027,7 @@ func add_pips(root: Node3D, level: int, pos: Vector3) -> void:
 	add_mesh(root, model_meshes[key], null, pos)
 
 
-# Colors and shared meshes for the code-built towers (the cannon tower)
-const DW_STONE := Color(0.58, 0.5, 0.4)
-const DW_STONE_DARK := Color(0.32, 0.31, 0.33)
-const DW_METAL := Color(0.42, 0.45, 0.5)
-const DW_IRON := Color(0.2, 0.2, 0.23)
-const DW_BRASS := Color(0.85, 0.62, 0.22)
-const DW_WOOD := Color(0.52, 0.32, 0.15)
-const DW_WOOD_DARK := Color(0.32, 0.19, 0.09)
-const DW_WOOD_LIGHT := Color(0.72, 0.52, 0.28)
-const DW_STRING := Color(0.95, 0.92, 0.8)
-const DW_SMOKE := Color(0.3, 0.3, 0.32)
+# Shared meshes and materials for the code-built parts (pips, frost and spark towers)
 var model_meshes := {}  # merged tower meshes by name
 var model_mats := {}  # their materials by color
 
@@ -763,106 +1185,124 @@ func pack_mat(mesh: Mesh, slot: int) -> ShaderMaterial:
 	return pack_mats[key]
 
 
-# Cannon tower: a dwarven mortar bunker. A squat eight-sided stone bunker with
-# buttresses and a band in the owner's color, and a fat iron mortar between
-# brass cheek plates that turns to aim (its front is -Z). Each level makes it
-# taller and the mortar bigger, and adds: level 2 iron straps, level 3 two
-# chimneys, level 4 spikes, smoke, glowing furnace slits and spare cannonballs.
-# Merged and shared like the arrow tower.
-const DW_FIRE := Color(1.0, 0.5, 0.1)
-const DW_BORE := Color(0.03, 0.03, 0.03)
+# Cannon tower: a dwarven mortar bunker (made for this game with the model kit,
+# see assets/CREDITS.md). An eight-sided stone bunker with a furnace, a banner in
+# the owner's color and a fat mortar on a turret that turns to aim (front -Z).
+# One model per look, like the arrow tower: levels 1-4, then Big Bomb and
+# Cluster each get a new model at levels 5, 10, 15, 20, 30 and 40 (Cluster's
+# mortars match its bomblets: 3, then 4 at level 20 and 5 at level 40). The
+# models have no textures of their own: all share the stone and metal atlas,
+# the team cloth (in the owner's color) and the furnace glow.
+const CANNON_FILE := "res://assets/towers/cannon/cannon_%d_%d.glb"  # path, look
+const CANNON_WIDTH := 0.8  # L1's width on a 1-unit tile
+var cannon_parts := {}  # Vector2i(path, look) -> {"body", "head": [[mesh, transform], ...], "pivot": Transform3D}
+var cannon_mats := {}  # shared painted materials by name (the team cloth also by owner)
+var cannon_scale := 0.0
 
 
-func build_cannon_tower(root: Node3D, level: int, slot: int) -> Node3D:
-	var top := 0.12 + 0.22 + level * 0.12
-	var body_key := "cannon body %d %d" % [level, slot]
-	if not model_meshes.has(body_key):
-		model_meshes[body_key] = merge_parts(cannon_body_parts(level, PLAYER_COLORS[slot]))
-	var head_key := "cannon head %d" % level
-	if not model_meshes.has(head_key):
-		model_meshes[head_key] = merge_parts(cannon_head_parts(level))
-	add_mesh(root, model_meshes[body_key], null)
+func build_cannon_tower(root: Node3D, level: int, path: int, slot: int) -> Node3D:
+	var d := cannon_model(cannon_look(level, path))
+	var model := Node3D.new()
+	model.scale = Vector3.ONE * cannon_scale
+	root.add_child(model)
+	add_cannon_part(model, d["body"], slot)
+	# The turret turns round its own axis; the model's front is +Z, the game's -Z
+	var pivot: Transform3D = d["pivot"]
 	var head := Node3D.new()
-	head.position = Vector3(0, top + 0.09, 0)
+	head.position = pivot.origin * cannon_scale
 	root.add_child(head)
-	add_mesh(head, model_meshes[head_key], null)
+	var turn := Node3D.new()
+	turn.transform = Transform3D(Basis(Vector3.UP, PI) * pivot.basis.scaled(Vector3.ONE * cannon_scale), Vector3.ZERO)
+	head.add_child(turn)
+	add_cannon_part(turn, d["head"], slot)
 	return head
 
 
-func cannon_body_parts(L: int, oc: Color) -> Node3D:
-	var root := Node3D.new()
-	var H := 0.22 + L * 0.12
-	var top := 0.12 + H
-	var oct := Vector3(0, 22.5, 0)
-	part_box(root, Vector3(0.86, 0.12, 0.86), DW_STONE_DARK, Vector3(0, 0.06, 0))
-	for sx in [-1, 1]:
-		for sz in [-1, 1]:
-			part_box(root, Vector3(0.16, 0.16, 0.16), DW_METAL, Vector3(sx * 0.36, 0.08, sz * 0.36))
-	part_cyl(root, 0.35, 0.4, H, DW_STONE, Vector3(0, 0.12 + H / 2.0, 0)).rotation_degrees = oct
-	# Band in the owner's color
-	part_cyl(root, 0.385, 0.395, 0.1, oc, Vector3(0, 0.12 + H * 0.4, 0)).rotation_degrees = oct
-	# Buttresses with brass caps, spiked at level 4
-	for k in 4:
-		var f := part_node(root, Vector3.ZERO, Vector3(0, 45 + k * 90, 0))
-		part_box(f, Vector3(0.14, H * 0.85, 0.14), DW_STONE_DARK, Vector3(0, 0.12 + H * 0.425, 0.37))
-		part_box(f, Vector3(0.17, 0.05, 0.17), DW_BRASS, Vector3(0, 0.12 + H * 0.85, 0.37))
-		if L >= 3:
-			part_cyl(f, 0.0, 0.05, 0.16, DW_IRON, Vector3(0, 0.12 + H * 0.85 + 0.1, 0.37), 6)
-	part_cyl(root, 0.42, 0.37, 0.08, DW_STONE_DARK, Vector3(0, top + 0.04, 0)).rotation_degrees = oct
-	# Iron straps from level 2
-	if L >= 1:
-		for k in 4:
-			var f := part_node(root, Vector3.ZERO, Vector3(0, k * 90, 0))
-			part_box(f, Vector3(0.06, H, 0.03), DW_METAL, Vector3(0, 0.12 + H / 2.0, 0.37))
-	# Chimneys from level 3, smoke and glowing furnace slits at level 4
-	if L >= 2:
-		for sx in [-1, 1]:
-			part_cyl(root, 0.05, 0.06, 0.34, DW_IRON, Vector3(sx * 0.2, top + 0.17, -0.3))
-			part_cyl(root, 0.07, 0.07, 0.04, DW_BRASS, Vector3(sx * 0.2, top + 0.34, -0.3))
-	if L >= 3:
-		for k in 3:
-			part_ball(root, 0.045 + k * 0.017, DW_SMOKE, Vector3(-0.2 + k * 0.05, top + 0.42 + k * 0.09, -0.3 - k * 0.03))
-		for sx in [-1, 1]:
-			add_mesh(root, box(0.05, 0.1, 0.03), model_mat(DW_FIRE, 3.0), Vector3(sx * 0.1, 0.12 + H * 0.7, 0.36))
-	return root
+# Which model a level shows: Vector2i(path, look), looks 1-4, then 5-10 per path
+func cannon_look(level: int, path: int) -> Vector2i:
+	var look := arrow_look(level)
+	if look <= 4 or path <= 0:
+		return Vector2i(0, mini(look, 4))
+	return Vector2i(path, look)
 
 
-func cannon_head_parts(L: int) -> Node3D:
-	var head := Node3D.new()
-	part_cyl(head, 0.28, 0.3, 0.08, DW_IRON, Vector3(0, 0.04, 0), 10)
-	# Stone cheek plates with brass tops, and the axle between them
-	for sx in [-1, 1]:
-		part_box(head, Vector3(0.06, 0.24, 0.3), DW_STONE_DARK, Vector3(sx * 0.19, 0.18, 0.02))
-		part_box(head, Vector3(0.065, 0.04, 0.31), DW_BRASS, Vector3(sx * 0.19, 0.3, 0.02))
-	part_cyl(head, 0.05, 0.05, 0.44, DW_IRON, Vector3(0, 0.2, 0.02)).rotation_degrees = Vector3(0, 0, 90)
-	var s := 1.0 + L * 0.06
-	part_mortar(head, Vector3(0, 0.2, 0.02), 40, 0.36 * s, 0.12 * s, 0.14 * s)
-	# Spare cannonballs behind the mortar at level 4
-	if L >= 3:
-		for x in [-0.08, 0.08]:
-			part_ball(head, 0.07, DW_IRON, Vector3(x, 0.15, 0.24))
-		part_ball(head, 0.07, DW_IRON, Vector3(0, 0.26, 0.24))
-	return head
+# Loads all the models at the start, so upgrading never stutters
+func load_cannon_models() -> void:
+	for look in range(1, 5):
+		cannon_model(Vector2i(0, look))
+	for path in [1, 2]:
+		for look in range(5, 11):
+			cannon_model(Vector2i(path, look))
 
 
-# A fat mortar barrel pointing at -Z, tilted up by elev degrees: a breech ball and
-# knob at the back, two brass bands, a flared brass muzzle and a dark bore
-func part_mortar(p: Node3D, pos: Vector3, elev: float, length: float, rb: float, rf: float) -> Node3D:
-	var n := part_node(p, pos, Vector3(elev, 0, 0))
-	var back := length * 0.2
-	var front := -length * 0.8
-	var lie := Vector3(-90, 0, 0)
-	part_cyl(n, rf, rb, length, DW_IRON, Vector3(0, 0, (back + front) / 2.0), 14).rotation_degrees = lie
-	part_ball(n, rb, DW_IRON, Vector3(0, 0, back))
-	part_ball(n, rb * 0.4, DW_BRASS, Vector3(0, 0, back + rb * 0.95))
-	for f in [0.12, 0.5]:
-		var r := lerpf(rb, rf, f) + 0.015
-		part_cyl(n, r, r, 0.04, DW_BRASS, Vector3(0, 0, back - length * f), 14).rotation_degrees = lie
-	part_cyl(n, rf * 1.3, rf * 1.12, 0.08, DW_BRASS, Vector3(0, 0, front + 0.04), 14).rotation_degrees = lie
-	part_cyl(n, rf * 0.75, rf * 0.75, 0.012, DW_BORE, Vector3(0, 0, front - 0.002), 14).rotation_degrees = lie
-	return n
+func cannon_model(k: Vector2i) -> Dictionary:
+	if not cannon_parts.has(k):
+		var scene: Node3D = load(CANNON_FILE % [k.x, k.y]).instantiate()
+		var turret: Node3D = scene.find_child("Turret", true, false)
+		var body := []
+		var head := []
+		collect_except(scene, Transform3D.IDENTITY, body, turret)
+		var pivot := Transform3D.IDENTITY
+		var up: Node = turret
+		while up != scene:
+			pivot = (up as Node3D).transform * pivot
+			up = up.get_parent()
+		collect_meshes(turret, turret.transform.affine_inverse(), head)
+		scene.free()
+		cannon_parts[k] = {"body": body, "head": head, "pivot": pivot}
+		# All looks use L1's size, so higher levels can grow
+		if cannon_scale == 0.0:
+			var box := AABB()
+			for p: Array in body:
+				box = box.merge(p[1] * (p[0] as Mesh).get_aabb())
+			cannon_scale = CANNON_WIDTH / maxf(box.size.x, box.size.z)
+	return cannon_parts[k]
 
 
+# Like collect_meshes(), but leaves out the node skip and what's under it
+func collect_except(n: Node, tr: Transform3D, out: Array, skip: Node) -> void:
+	if n == skip:
+		return
+	if n is Node3D:
+		tr = tr * n.transform
+	if n is MeshInstance3D:
+		out.append([n.mesh, tr])
+	for c in n.get_children():
+		collect_except(c, tr, out, skip)
+
+
+func add_cannon_part(parent: Node3D, parts: Array, slot: int) -> void:
+	for p: Array in parts:
+		var mesh: Mesh = p[0]
+		var mi := MeshInstance3D.new()
+		mi.mesh = mesh
+		mi.transform = p[1]
+		parent.add_child(mi)
+		for s in mesh.get_surface_count():
+			mi.set_surface_override_material(s, cannon_mat(mesh.surface_get_material(s).resource_name, slot))
+
+
+# The models' three materials: "Atlas" (stone, iron, brass, wood), "TeamColor"
+# (cloth in the owner's color, seen from both sides) and "Glow" (the furnaces).
+# The baked shading is in the models' vertex colors.
+func cannon_mat(name: String, slot: int) -> Material:
+	var key := "%s %d" % [name, slot] if name == "TeamColor" else name
+	if not cannon_mats.has(key):
+		var m := StandardMaterial3D.new()
+		m.vertex_color_use_as_albedo = true
+		match name:
+			"TeamColor":
+				m.albedo_texture = load("res://assets/towers/cannon/cannon_team.jpg")
+				m.albedo_color = PLAYER_COLORS[slot]
+				m.cull_mode = BaseMaterial3D.CULL_DISABLED
+			"Glow":
+				m.albedo_texture = load("res://assets/towers/cannon/cannon_glow.jpg")
+				m.emission_enabled = true
+				m.emission = Color(1.0, 0.75, 0.45)
+			_:
+				m.albedo_texture = load("res://assets/towers/cannon/cannon_atlas.jpg")
+		cannon_mats[key] = painted(m)
+	return cannon_mats[key]
 # Helpers that build model parts under a temporary node, for merge_parts()
 func part_node(p: Node3D, pos: Vector3, rot: Vector3) -> Node3D:
 	var n := Node3D.new()
@@ -992,10 +1432,15 @@ func update_visuals(delta: float) -> void:
 		var mesh: Mesh = poses[int((time / mob[2] + e.bob) * poses.size()) % poses.size()]
 		if e.node.mesh != mesh:
 			e.node.mesh = mesh
-		# Slowed monsters use their look's icy material
-		var m: Material = mob[1][1] if e.slow_time > 0.0 else mob[1][0]
+		# Slowed monsters use their look's icy material, frozen ones the frozen one
+		var m: Material = mob[1][0]
+		if e.freeze_time > 0.0:
+			m = mob[1][2]
+		elif e.slow_time > 0.0:
+			m = mob[1][1]
 		if e.node.material_override != m:
 			e.node.material_override = m
+	update_corpses(delta)
 	for t: Tower in towers.values():
 		if t.type == "arrow" or t.type == "cannon":
 			t.head.rotation.y = atan2(-t.aim.x, -t.aim.y)
@@ -1007,6 +1452,11 @@ func update_visuals(delta: float) -> void:
 			var left := clampf(s.pos.distance_to(s.target_pos) / s.node.get_meta("from_dist"), 0.0, 1.0)
 			y = lerpf(0.6, s.node.get_meta("from_y"), left)
 		s.node.position = to3d(s.pos, y)
+		# Arrows point where they fly
+		if s.type == "arrow":
+			var to := to3d(s.target_pos, 0.35)
+			if Vector2(to.x - s.node.position.x, to.z - s.node.position.z).length() > 0.02:
+				s.node.look_at(to, Vector3.UP)
 
 	# While placing a tower: your area goes dark, other players' areas glow in their color.
 	# Compatibility blends colors in sRGB, which makes the same alpha look much fainter.
@@ -1088,14 +1538,20 @@ func make_enemy(kind: String) -> Enemy:
 
 # ---------------------------------------------------------------- monster models
 
-# Monster kind -> its look. Skeletons are KayKit models (assets/monsters), the
-# others are built from simple shapes here.
+# Monster kind -> its look. Normal and armored monsters are the skeleton warrior
+# (made for this game, assets/monsters/bone_warrior.glb; armored a bit bigger and
+# cooler), the boss is a KayKit skeleton mage, the others are built from simple
+# shapes here.
 const MONSTER_LOOKS := {"normal": "minion", "armored": "warrior", "fast": "spider", "boss": "mage"}
 const SKELETON_SIZE := 0.31  # KayKit skeletons are about 2.2 tall: about 0.7 in the game
+const BONE_WARRIOR := "res://assets/monsters/bone_warrior.glb"
+const BONE_WARRIOR_HEIGHT := 0.68  # like the KayKit skeletons
+const DEATH_POSES := 12  # the fall when a monster dies (see drop_corpse())
 const MOB_WHITE := Color(0.97, 0.96, 1.0)
 const RAINBOW := [Color(1.0, 0.55, 0.7), Color(1.0, 0.72, 0.4), Color(1.0, 0.93, 0.45), Color(0.55, 0.9, 0.6), Color(0.5, 0.75, 1.0), Color(0.75, 0.55, 1.0)]
 
-# Look -> [walk poses (one shared mesh each), [normal, slowed] material, seconds per step, height]
+# Look -> [walk poses (one shared mesh each), [normal, slowed, frozen] material,
+# seconds per step, height, death poses (empty: the monster just vanishes)]
 var mobs := {}
 var walk_anims: AnimationLibrary
 var mob_ball: SphereMesh
@@ -1110,9 +1566,8 @@ func build_monsters() -> void:
 	if not mobs.is_empty():
 		return
 	walk_anims = load("res://assets/monsters/monster_walks.res")
-	add_skeleton("minion", "Skeleton_Minion", "Walking_A", SKELETON_SIZE, [], Color.WHITE)
-	add_skeleton("warrior", "Skeleton_Warrior", "Walking_B", SKELETON_SIZE * 1.1,
-			[["Skeleton_Shield_Large_A", "handslot.l"], ["Skeleton_Axe", "handslot.r"]], Color(0.85, 0.9, 1.0))
+	add_glb_monster("minion", BONE_WARRIOR, BONE_WARRIOR_HEIGHT, Color.WHITE)
+	add_glb_monster("warrior", BONE_WARRIOR, BONE_WARRIOR_HEIGHT * 1.1, Color(0.85, 0.9, 1.0))
 	add_skeleton("mage", "Skeleton_Mage", "Walking_C", SKELETON_SIZE * 1.8,
 			[["Skeleton_Staff", "handslot.r"]], Color(1.0, 0.75, 0.75))
 	mob_ball = SphereMesh.new()
@@ -1132,13 +1587,17 @@ func build_monsters() -> void:
 	add_creature("spider", spider_pose, 0.35)
 
 
-# The two materials of a look: normal, and icy for slowed monsters
+# The three painted materials of a look: normal, icy for slowed monsters, and
+# frozen solid (whiter, with a cold glow) for Deep Freeze
 func mob_mats(base: StandardMaterial3D) -> Array:
-	base.rim_enabled = true
-	base.rim = 0.4
 	var icy := base.duplicate() as StandardMaterial3D
 	icy.albedo_color = base.albedo_color * Color(0.6, 0.85, 1.3)
-	return [base, icy]
+	var frozen := base.duplicate() as StandardMaterial3D
+	frozen.albedo_color = base.albedo_color * Color(0.8, 1.0, 1.45)
+	frozen.emission_enabled = true
+	frozen.emission = Color(0.35, 0.65, 1.0)
+	frozen.emission_energy_multiplier = 0.45
+	return [painted(base), painted(icy), painted(frozen)]
 
 
 # One mesh from the collected parts, with simpler versions for far away
@@ -1219,7 +1678,90 @@ func add_skeleton(look: String, file: String, walk: String, size: float, weapons
 	# The .glb files' own copies of the texture aren't imported: all share this one
 	m.albedo_texture = load("res://assets/monsters/skeleton_texture.png")
 	m.albedo_color = tint
-	mobs[look] = [poses, mob_mats(m), anim.length, poses[0].get_aabb().end.y]
+	mobs[look] = [poses, mob_mats(m), anim.length, poses[0].get_aabb().end.y, []]
+
+
+# A monster from one .glb with its own "Walk" and "Death": 16 poses of the walk
+# and DEATH_POSES of the death, each one shared mesh, feet on the ground.
+func add_glb_monster(look: String, file: String, height: float, tint: Color) -> void:
+	var root: Node3D = load(file).instantiate()
+	add_child(root)
+	var player: AnimationPlayer = root.find_children("*", "AnimationPlayer", true, false)[0]
+	var walk := player.get_animation("Walk")
+	var death := player.get_animation("Death")
+	player.play("Walk")
+	# Pose 0 unscaled first, to fit the height and put the feet on the ground
+	var probe := glb_pose(root, player, 0.0, Transform3D.IDENTITY)
+	var box := AABB(probe.v[0], Vector3.ZERO)
+	for v: Vector3 in probe.v:
+		box = box.expand(v)
+	var s := height / box.size.y
+	var top := Transform3D(Basis.from_scale(Vector3.ONE * s), Vector3(0, -box.position.y * s, 0))
+	var poses := []
+	for f in 16:
+		poses.append(pose_mesh(glb_pose(root, player, walk.length * f / 16.0, top)))
+	var falls := []
+	player.play("Death")
+	for f in DEATH_POSES:
+		falls.append(pose_mesh(glb_pose(root, player, death.length * f / (DEATH_POSES - 1.0), top)))
+	var base: StandardMaterial3D = null
+	for mi: MeshInstance3D in root.find_children("*", "MeshInstance3D", true, false):
+		if mi.mesh != null and base == null:
+			base = mi.get_active_material(0)
+	root.free()
+	var m := base.duplicate() as StandardMaterial3D
+	m.albedo_color = tint
+	mobs[look] = [poses, mob_mats(m), walk.length, poses[0].get_aabb().end.y, falls]
+
+
+# Every mesh of the model at time t of the playing animation, in one set of parts
+func glb_pose(root: Node3D, player: AnimationPlayer, t: float, top: Transform3D) -> Dictionary:
+	player.seek(t, true)
+	var parts := new_parts()
+	for mi: MeshInstance3D in root.find_children("*", "MeshInstance3D", true, false):
+		if mi.mesh != null:
+			add_part(parts, mi.mesh, top * root.global_transform.affine_inverse() * mi.global_transform)
+	return parts
+
+
+# A killed monster falls apart where it stood (its look's death poses), sinks
+# into the ground and is gone after about a second. Only for looks: the
+# monster is already out of the game. Looks without a death just vanish.
+const CORPSE_FALL := 0.9  # seconds of the fall
+const CORPSE_SINK := 0.5  # then seconds of sinking
+var corpses: Array[MeshInstance3D] = []
+
+
+func drop_corpse(e: Enemy) -> void:
+	var falls: Array = e.node.get_meta("mob")[4]
+	if falls.is_empty():
+		e.node.queue_free()
+		return
+	e.node.set_meta("dead_time", 0.0)
+	e.node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	corpses.append(e.node)
+
+
+func update_corpses(delta: float) -> void:
+	for i in range(corpses.size() - 1, -1, -1):
+		var node := corpses[i]
+		var t: float = node.get_meta("dead_time") + delta
+		node.set_meta("dead_time", t)
+		var falls: Array = node.get_meta("mob")[4]
+		node.mesh = falls[mini(int(t / CORPSE_FALL * falls.size()), falls.size() - 1)]
+		if t > CORPSE_FALL:
+			node.position.y = -0.3 * (t - CORPSE_FALL) / CORPSE_SINK
+		if t > CORPSE_FALL + CORPSE_SINK:
+			node.queue_free()
+			corpses.remove_at(i)
+
+
+# The corpses go with the monsters when the game is cleared
+func clear_world() -> void:
+	for node in corpses:
+		node.queue_free()
+	corpses.clear()
+	super()
 
 
 # Adds a skinned mesh in the skeleton's current pose (the skinning is done here, once)
@@ -1268,7 +1810,7 @@ func add_creature(look: String, pose: Callable, step: float) -> void:
 	m.vertex_color_use_as_albedo = true
 	m.vertex_color_is_srgb = true
 	m.roughness = 0.6
-	mobs[look] = [poses, mob_mats(m), step, poses[0].get_aabb().end.y]
+	mobs[look] = [poses, mob_mats(m), step, poses[0].get_aabb().end.y, []]
 
 
 func shape(parts: Dictionary, mesh: Mesh, pos: Vector3, size: Vector3, col: Color, rot := Vector3.ZERO) -> void:
@@ -1344,6 +1886,7 @@ func launch_shot(t: Tower, target: Enemy, visual: bool) -> void:
 	s.level = t.level
 	s.path = t.path
 	s.owner = t.owner
+	s.tower = t
 	s.visual = visual
 	if t.type == "cannon":
 		s.speed = 300.0
@@ -1358,8 +1901,11 @@ func launch_shot(t: Tower, target: Enemy, visual: bool) -> void:
 		ball.rings = 8
 		shot_meshes[t.type] = ball
 	s.node = add_mesh(self, shot_meshes[t.type], shot_mats[t.type], to3d(s.pos, 0.6))
-	# Arrows start up at the crossbow and come down to the monster (just for looks)
+	s.node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# Arrows are glowing streaks that start up at the archer and come down to the monster (just for looks)
 	if t.type == "arrow":
+		s.node.mesh = arrow_mesh
+		s.node.material_override = null
 		s.node.set_meta("from_y", t.head.global_position.y + 0.08)
 		s.node.set_meta("from_dist", maxf(s.pos.distance_to(target.pos), 1.0))
 	shots.append(s)
@@ -1375,3 +1921,6 @@ func add_boom(pos: Vector2, r: float) -> void:
 	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	node.scale = Vector3.ZERO
 	effects.append({"kind": "boom", "node": node, "mat": m, "radius": r, "time": 0.3, "max": 0.3})
+	# and a burst of sparks and fire
+	fire_burst(boom_pool[boom_next % boom_pool.size()], to3d(pos, 0.2), Color(2.4, 1.2, 0.4))
+	boom_next += 1

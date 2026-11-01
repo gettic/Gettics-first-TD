@@ -3,13 +3,13 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://otpmhvx22l2r"
-path="res://.godot/imported/Skeleton_Axe.gltf-80104a4f07215977a9c469675c5e4ebb.scn"
+uid="uid://clw5p4bceywh5"
+path="res://.godot/imported/cannon_1_10.glb-69c96f4a6a1740af1a7d1a8bb6741b6a.scn"
 
 [deps]
 
-source_file="res://assets/monsters/Skeleton_Axe.gltf"
-dest_files=["res://.godot/imported/Skeleton_Axe.gltf-80104a4f07215977a9c469675c5e4ebb.scn"]
+source_file="res://assets/towers/cannon/cannon_1_10.glb"
+dest_files=["res://.godot/imported/cannon_1_10.glb-69c96f4a6a1740af1a7d1a8bb6741b6a.scn"]
 
 [params]
 

@@ -29,6 +29,10 @@ const MAX_WAVE := 300
 const MAX_LEVEL := 60  # endless in practice: level 30 already costs millions, level 60 about a trillion
 const WIN_TEXT := "GZ you have no life, go touch grass"  # shown when all waves are beaten
 const START_GOLD := 150
+# Difficulty levels (picked in the Esc menu before wave 1; the host picks in multiplayer)
+const DIFFICULTIES := ["Easy", "Normal", "Hard", "Insane"]
+const DIFFICULTY_HP := [0.6, 1.0, 1.4, 2.0]  # monster health
+const DIFFICULTY_GOLD := [1.5, 1.0, 1.0, 1.0]  # start gold
 const MAX_ALIVE := 50  # per player: you lose when this many monsters are alive at once (a boss counts as 5)
 const WAVE_INTERVAL := 25.0  # seconds between waves once the game has started
 const GAME_SPEEDS := [1, 2, 3, 5]  # the speed button (F) goes through these
@@ -119,7 +123,7 @@ const TOWER_BASE := {
 		"name": "Arrow", "color": Color(0.35, 0.85, 0.35),
 		"desc": "Fast single-target shots",
 		"cost": [50, 60, 130, 260],
-		"damage": [10, 22, 48, 110],
+		"damage": [11, 24, 52, 120],
 		"range": [120.0, 130.0, 145.0, 165.0],
 		"cooldown": [0.5, 0.45, 0.4, 0.32],
 	},
@@ -136,7 +140,7 @@ const TOWER_BASE := {
 		"name": "Frost", "color": Color(0.4, 0.85, 1.0),
 		"desc": "Slows enemies down",
 		"cost": [70, 70, 140, 280],
-		"damage": [4, 8, 16, 32],
+		"damage": [12, 24, 48, 96],
 		"range": [110.0, 120.0, 130.0, 140.0],
 		"cooldown": [0.9, 0.8, 0.7, 0.6],
 		"slow": [0.6, 0.5, 0.4, 0.3],
@@ -145,7 +149,7 @@ const TOWER_BASE := {
 		"name": "Spark", "color": Color(0.75, 0.5, 1.0),
 		"desc": "Lightning that chains",
 		"cost": [120, 120, 240, 480],
-		"damage": [30, 60, 120, 250],
+		"damage": [24, 48, 96, 200],
 		"range": [140.0, 150.0, 165.0, 185.0],
 		"cooldown": [1.2, 1.1, 1.0, 0.9],
 		"chain": [3, 4, 5, 6],
@@ -171,25 +175,26 @@ const LEVEL_RANGE_MAX := 60.0
 const PATH_LEVEL := 4  # the first level index with a path (level 5)
 const PATHS := {
 	"arrow": [
-		{"name": "Sniper", "desc": "Long range, huge hits", "damage": 1.8, "cooldown": 2.0, "range": 1.25, "shot_speed": 2.5, "mode": 2},
-		{"name": "Volley", "desc": "Shoots 3 monsters at once", "damage": 0.4, "arrows": [3, 4, 5]},
+		{"name": "Sniper", "desc": "Long range, huge hits", "damage": 1.6, "cooldown": 2.0, "range": 1.25, "shot_speed": 2.5, "mode": 2, "boss": 2.0},
+		{"name": "Volley", "desc": "Shoots 3 monsters at once", "damage": 0.5, "arrows": [3, 4, 5]},
 	],
 	"cannon": [
-		{"name": "Big Bomb", "desc": "Huge slow blasts", "damage": 1.8, "cooldown": 1.6, "splash": 1.3},
-		{"name": "Cluster", "desc": "Bomblets hit monsters nearby", "damage": 0.85, "bomblets": [3, 4, 5]},
+		{"name": "Big Bomb", "desc": "Huge slow blasts", "damage": 2.0, "cooldown": 1.6, "splash": 1.3, "boss": 1.5},
+		{"name": "Cluster", "desc": "Bomblets hit monsters nearby", "damage": 1.0, "bomblets": [3, 4, 5]},
 	],
 	"frost": [
-		{"name": "Deep Freeze", "desc": "Chance to freeze monsters", "damage": 1.5, "freeze": [0.25, 0.32, 0.4]},
-		{"name": "Blizzard", "desc": "Slows everything around the target", "damage": 0.5, "area": [60.0, 80.0, 100.0]},
+		{"name": "Deep Freeze", "desc": "Chance to freeze monsters", "damage": 2.0, "freeze": [0.25, 0.32, 0.4]},
+		{"name": "Blizzard", "desc": "Slows everything around the target", "damage": 0.35, "area": [60.0, 80.0, 100.0]},
 	],
 	"spark": [
 		{"name": "Storm", "desc": "Longer chains that fade less", "damage": 0.9, "chain_add": 3, "falloff": 0.9, "jump": 150.0},
-		{"name": "Overload", "desc": "One huge bolt, chains once", "damage": 2.4, "cooldown": 1.2, "chain_set": 2, "mode": 2},
+		{"name": "Overload", "desc": "One huge bolt, chains once", "damage": 2.0, "cooldown": 1.2, "chain_set": 2, "mode": 2, "boss": 2.0},
 	],
 }
 const BOMBLET_REACH := 130.0  # Cluster: bomblets land on monsters this close to the blast...
 const BOMBLET_RADIUS := 45.0  # ...each a small blast this big
 const FREEZE_TIME := 1.0  # Deep Freeze: seconds a frozen monster stands still (bosses half)
+const FREEZE_IMMUNE := 2.0  # ...and then it can't be frozen again for this long
 # Every tower level up to MAX_LEVEL, built from TOWER_BASE (same keys and shape).
 # TOWERS[type]["paths"] has the same for each of its 2 paths.
 var TOWERS := make_towers()
@@ -287,10 +292,11 @@ class Enemy:
 	var slow_factor := 1.0
 	var slow_time := 0.0
 	var freeze_time := 0.0  # Deep Freeze: stands still while above 0
+	var freeze_immune := 0.0  # host: can't be frozen again while above 0
 	var traveled := 0.0
 	var dead := false
 	var node: MeshInstance3D
-	var mat: StandardMaterial3D
+	var mat: Material
 	var bob := 0.0
 
 
@@ -305,6 +311,8 @@ class Tower:
 	var aim := Vector2.UP
 	var mode := 0  # which monster it shoots, an index in TARGET_MODES
 	var path := 0  # its specialization from level 5: 0 none yet, 1 or 2 (see PATHS)
+	var dealt := 0.0  # host: damage done, for the stats at the end
+	var kills := 0
 	var node: Node3D
 	var head: Node3D
 
@@ -317,6 +325,7 @@ class Shot:
 	var level := 0
 	var path := 0
 	var owner := 0
+	var tower: Tower  # host: the tower that fired it, for the stats at the end
 	var visual := false  # other players' copy of a host's shot: just for show, does no damage
 	var speed := 420.0
 	var done := false
@@ -360,6 +369,7 @@ var gold: int:
 var next_wave_timer := 0.0
 var wave_votes: Array = []  # player slots that want the next wave early (see EARLY_VOTE)
 var wave := 0
+var difficulty := 1  # index in DIFFICULTIES
 var spawn_queues: Array = [[], [], [], []]  # monster kinds still to come out of each gate
 var spawn_timers := [0.0, 0.0, 0.0, 0.0]
 var spawn_hp := 0.0
@@ -795,7 +805,7 @@ func wave_bounty(w: int) -> int:
 # All the gold a player who killed everything would have earned before wave w
 # (for players joining late).
 func gold_before_wave(w: int) -> int:
-	var total := START_GOLD
+	var total := start_gold()
 	for i in range(1, mini(w, MAX_WAVE + 1)):
 		var bounty := wave_bounty(i)
 		if kind_for_wave(i) == "boss":
@@ -862,6 +872,13 @@ func path_step(level: int, values: Array) -> Variant:
 	return values[0 if level < 19 else (1 if level < 39 else 2)]
 
 
+# Damage factor against bosses for a tower (its path's "boss", from level 5 on).
+func boss_bonus(type: String, path: int, level: int) -> float:
+	if path <= 0 or level < PATH_LEVEL:
+		return 1.0
+	return PATHS[type][path - 1].get("boss", 1.0)
+
+
 # Does this tower's next upgrade pick its path?
 func needs_path(t: Tower) -> bool:
 	return t.level == PATH_LEVEL - 1 and t.path == 0
@@ -883,6 +900,17 @@ func round_nicely(x: float) -> float:
 		return roundf(x)
 	var step := pow(10.0, floorf(log(x) / log(10.0)) - 1.0)
 	return roundf(x / step) * step
+
+
+func start_gold() -> int:
+	return int(START_GOLD * DIFFICULTY_GOLD[difficulty])
+
+
+# Host: tells the other players the difficulty level after it changes. Empty
+# here; game_net.gd fills it in (the other players only show the level and
+# open its leaderboard: monster health always comes from the host).
+func send_difficulty() -> void:
+	pass
 
 
 # How many players must agree to send the next wave early.
@@ -919,3 +947,31 @@ func remove_tower(c: Vector2i) -> void:
 	towers.erase(c)
 	if selected == t:
 		selected = null
+
+
+# ---------------------------------------------------------------- stats at the end
+
+# The host (or a player alone) counts per player slot, so a player who leaves
+# still shows up at the end. Cheap: a few additions per hit and per kill.
+# Their gold always adds up: gold = stat_start + stat_earned - stat_spent.
+var stat_kills := [0, 0, 0, 0]
+var stat_damage := [0.0, 0.0, 0.0, 0.0]  # health really taken off (no overkill)
+var stat_start := [0, 0, 0, 0]  # start gold (joining late: the gold they got then)
+var stat_earned := [0, 0, 0, 0]  # wave gold, early bonus and kill gold
+var stat_spent := [0, 0, 0, 0]  # gold put into towers, minus what selling gave back
+var stat_names := ["", "", "", ""]  # names, kept for players who left
+var sold_towers := []  # sold towers' stats: [type, path, level, owner, damage, kills]
+# Everything the stats screen shows, made once by the host when the game ends
+# (see make_end_stats()); the other players get it in net_stats. {}: not yet.
+var end_stats := {}
+
+
+func reset_stats() -> void:
+	stat_kills = [0, 0, 0, 0]
+	stat_damage = [0.0, 0.0, 0.0, 0.0]
+	stat_start = [0, 0, 0, 0]
+	stat_earned = [0, 0, 0, 0]
+	stat_spent = [0, 0, 0, 0]
+	stat_names = ["", "", "", ""]
+	sold_towers = []
+	end_stats = {}

@@ -3,13 +3,13 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://cwm7ovlt87bgk"
-path="res://.godot/imported/Skeleton_Shield_Large_A.gltf-6cb11b3e6986908f06ddddf5506ac6f1.scn"
+uid="uid://bsiww3byv11id"
+path="res://.godot/imported/cannon_1_7.glb-29c5f96757d9538ed9c6658154bddc34.scn"
 
 [deps]
 
-source_file="res://assets/monsters/Skeleton_Shield_Large_A.gltf"
-dest_files=["res://.godot/imported/Skeleton_Shield_Large_A.gltf-6cb11b3e6986908f06ddddf5506ac6f1.scn"]
+source_file="res://assets/towers/cannon/cannon_1_7.glb"
+dest_files=["res://.godot/imported/cannon_1_7.glb-29c5f96757d9538ed9c6658154bddc34.scn"]
 
 [params]
 

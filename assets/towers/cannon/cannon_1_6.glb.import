@@ -3,13 +3,13 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://c4hoonakbiuse"
-path="res://.godot/imported/Skeleton_Minion.glb-e8e2ff6c4f2869301923595aae8dc3c3.scn"
+uid="uid://ceiab45ds6kq2"
+path="res://.godot/imported/cannon_1_6.glb-cd2860fa75a72f1e7448a49f486b5ddf.scn"
 
 [deps]
 
-source_file="res://assets/monsters/Skeleton_Minion.glb"
-dest_files=["res://.godot/imported/Skeleton_Minion.glb-e8e2ff6c4f2869301923595aae8dc3c3.scn"]
+source_file="res://assets/towers/cannon/cannon_1_6.glb"
+dest_files=["res://.godot/imported/cannon_1_6.glb-cd2860fa75a72f1e7448a49f486b5ddf.scn"]
 
 [params]
 
@@ -41,5 +41,5 @@ materials/extract_format=0
 materials/extract_path=""
 _subresources={}
 gltf/naming_version=2
-gltf/embedded_image_handling=0
+gltf/embedded_image_handling=1
 gltf/texture_map_mode=1

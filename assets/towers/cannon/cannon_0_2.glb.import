@@ -3,13 +3,13 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://b1hm75dfjuefx"
-path="res://.godot/imported/Skeleton_Warrior.glb-915f9fe6d6b377e21c3831b736208787.scn"
+uid="uid://cc5a28771yctf"
+path="res://.godot/imported/cannon_0_2.glb-0add6d3897f7080468ebd0bd8c8a9757.scn"
 
 [deps]
 
-source_file="res://assets/monsters/Skeleton_Warrior.glb"
-dest_files=["res://.godot/imported/Skeleton_Warrior.glb-915f9fe6d6b377e21c3831b736208787.scn"]
+source_file="res://assets/towers/cannon/cannon_0_2.glb"
+dest_files=["res://.godot/imported/cannon_0_2.glb-0add6d3897f7080468ebd0bd8c8a9757.scn"]
 
 [params]
 
@@ -41,5 +41,5 @@ materials/extract_format=0
 materials/extract_path=""
 _subresources={}
 gltf/naming_version=2
-gltf/embedded_image_handling=0
+gltf/embedded_image_handling=1
 gltf/texture_map_mode=1

@@ -8,6 +8,8 @@ const UI_GOLD_DARK := Color(0.4, 0.28, 0.1)
 const UI_TEXT := Color(0.95, 0.91, 0.82)
 const UI_GREY := Color(0.72, 0.69, 0.63)
 const UI_DIM := Color(0.55, 0.52, 0.47)
+# Each difficulty level's color (see DIFFICULTIES): Easy, Normal, Hard, Insane
+const LEVEL_COLORS := [Color(0.5, 0.92, 0.42), Color(0.95, 0.91, 0.82), Color(1.0, 0.62, 0.25), Color(1.0, 0.32, 0.28)]
 
 # The leaderboard: its button next to Resume in the Esc menu, and its box
 const LEADERBOARD_RECT := Rect2(710, 640, 140, 44)
@@ -25,6 +27,8 @@ const NOTES_STEP := 50.0  # pixels per mouse wheel notch or arrow key
 var title_font: Font  # big titles; the normal font unless a style says otherwise
 var map_hud: Node2D  # 2D layer under the console: health bars, lightning, area labels
 var console_layer: Node2D  # the console's stone, drawn once (and again when the map changes)
+var end_layer: Node2D  # the end screen's dark cover, under the overlay
+var stats_layer: Node2D  # the end screen's stats panel, fading in (a child of end_layer)
 var portrait_view: SubViewport  # a close-up of the selected tower, shown in the console
 var portrait_cam: Camera3D
 var notes_clip: Control  # cuts the update notes off at their box's edges
@@ -61,6 +65,15 @@ func build_hud() -> void:
 	portrait_cam = Camera3D.new()
 	portrait_cam.fov = 30.0
 	portrait_view.add_child(portrait_cam)
+	# The end screen's dark cover and stats panel: under the rest, so chat and
+	# popups stay on top. The panel is its own node so it can fade in.
+	end_layer = Node2D.new()
+	end_layer.visible = false
+	layer.add_child(end_layer)
+	end_layer.draw.connect(draw_on.bind(end_layer, draw_end_cover))
+	stats_layer = Node2D.new()
+	end_layer.add_child(stats_layer)
+	stats_layer.draw.connect(draw_on.bind(stats_layer, draw_stats_panel))
 	hud = Node2D.new()
 	layer.add_child(hud)
 	hud.draw.connect(draw_hud)
@@ -159,6 +172,7 @@ func update_visuals(delta: float) -> void:
 	super(delta)
 	update_fireworks(delta)
 	map_hud.queue_redraw()
+	update_end_layer()
 	update_notes_box()
 	if selected == null:
 		portrait_view.render_target_update_mode = SubViewport.UPDATE_DISABLED
@@ -172,6 +186,10 @@ func update_visuals(delta: float) -> void:
 
 func draw_hud() -> void:
 	draw_panel()
+	if state == "playing":
+		end_at_ms = -1
+	elif end_at_ms < 0:
+		end_at_ms = Time.get_ticks_msec()
 	if state != "playing":
 		hud.draw_set_transform(Vector2(0, ui_extra / 2.0))
 		draw_end_screen()
@@ -277,6 +295,9 @@ func wrap_words(s: String, first_width: float, width: float, size: int) -> Packe
 
 # Health bars, lightning and area labels: under the console.
 func draw_map_overlays() -> void:
+	# The end screen covers the map: no bars, badges or labels on top of it
+	if state != "playing":
+		return
 	draw_health_bars()
 	draw_level_badges()
 	for fx in effects:
@@ -507,6 +528,11 @@ func update_notes_box() -> void:
 
 # Scrolling the notes: mouse wheel, arrow keys, Page Up/Down, Home/End, or the scrollbar.
 func _input(event: InputEvent) -> void:
+	# The leaderboard box: Left / Right switch the level's board
+	if board_open and menu_open and event is InputEventKey and event.pressed and event.keycode in [KEY_LEFT, KEY_RIGHT]:
+		step_board_level(-1 if event.keycode == KEY_LEFT else 1)
+		get_viewport().set_input_as_handled()
+		return
 	if update_dialog != "ask" or notes_max() <= 0.0:
 		return
 	var max_y := notes_max()
@@ -707,9 +733,30 @@ func draw_top_bar() -> void:
 	x = resource(x, "v" + version, 13, ui_title_dim(), "")
 	if is_debug_game():
 		x = resource(x, "DEBUG", 13, Color(1.0, 0.45, 0.4), "")
+	x = resource(x, level_name(), 15, level_color(), "") + 8
 	x = resource(x, "%d / %d" % [wave, MAX_WAVE], 18, UI_TEXT, "wave")
 	x = resource(x, "%d / %d" % [alive_count(), max_alive()], 18, danger_color(), "alive")
 	resource(x, short(gold), 18, Color(1, 0.85, 0.3), "gold")
+
+
+func level_name() -> String:
+	return DIFFICULTIES[difficulty]
+
+
+func level_color() -> Color:
+	return LEVEL_COLORS[difficulty]
+
+
+# What the level changes, for the Esc menu's Level tooltip: one or two lines.
+func level_tip() -> Array:
+	var hp: float = DIFFICULTY_HP[difficulty]
+	var lines := ["Monsters have normal health."]
+	if hp != 1.0:
+		lines = ["Monsters have %d%% %s health." % [roundi(absf(hp - 1.0) * 100.0), "more" if hp > 1.0 else "less"]]
+	var g: float = DIFFICULTY_GOLD[difficulty]
+	if g != 1.0:
+		lines.append("You start with %d%% %s gold." % [roundi(absf(g - 1.0) * 100.0), "more" if g > 1.0 else "less"])
+	return lines
 
 
 # A number with its icon in front, ending at x. Returns where the next one ends.
@@ -775,7 +822,7 @@ func screen_to_ground(p: Vector2) -> Vector2:
 func draw_wave_info() -> void:
 	var x := float(INFO_X)
 	ui_title(Rect2(x - 14, BAR_TOP + 10, 236, 36), Vector2(x, BAR_TOP + 40), "WAVE %d / %d" % [wave, MAX_WAVE], 24)
-	text(Vector2(x, BAR_TOP + 70), next_wave_text(), 15, UI_GREY)
+	draw_wave_preview(x)
 	text(Vector2(x, BAR_TOP + 98), "Alive: %d / %d" % [alive_count(), max_alive()], 17, danger_color())
 	ui_bar(Rect2(x, BAR_TOP + 108, 204, 6), danger(), danger_color())
 	if net_mode == "host" or net_mode == "client":
@@ -791,6 +838,82 @@ func draw_wave_info() -> void:
 		text(Vector2(px + 4, BAR_TOP + 145), "You: %s" % name_of(local_slot), 14, PLAYER_COLORS[local_slot])
 	else:
 		text(Vector2(x, BAR_TOP + 145), "Build: keys 1-4   Upgrade: U   Sell: X", 13, UI_DIM)
+
+
+# ----- wave preview: the next 3 waves under the wave title
+
+# Each monster kind's color in the preview (like its old look).
+const KIND_COLORS := {"normal": Color(0.95, 0.5, 0.6), "fast": Color(1.0, 0.9, 0.3),
+		"armored": Color(0.6, 0.65, 0.75), "boss": Color(0.95, 0.2, 0.15)}
+
+
+# The countdown at the title's right end, then a chip per wave: the monster
+# kind and how many come (all gates together). Every player sees the same: it's
+# all worked out from the wave number, which comes with the host's updates.
+func draw_wave_preview(x: float) -> void:
+	if state != "playing":
+		return
+	var right := x + 208.0
+	# Before wave 1 there's no countdown: the first wave comes with Space
+	if wave > 0 and wave < MAX_WAVE:
+		var timer := "%ds" % ceili(next_wave_timer)
+		var tw := font.get_string_size(timer, HORIZONTAL_ALIGNMENT_LEFT, -1, 14).x
+		text(Vector2(right - tw, BAR_TOP + 38), timer, 14, UI_GREY)
+	if wave >= MAX_WAVE:
+		text(Vector2(x, BAR_TOP + 70), "Last wave! Kill them all", 15, UI_GREY)
+		return
+	var cx := x
+	for i in 3:
+		var n := wave + 1 + i
+		if n > MAX_WAVE:
+			break
+		var label := wave_chip_label(n)
+		var w := 32.0 + font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 13).x
+		if cx + w > right + 4.0:
+			break  # no room for a third wide chip
+		wave_chip(Rect2(cx, BAR_TOP + 54, w, 22), n, label)
+		# The next wave's countdown as a thin gold bar under its chip
+		if i == 0 and wave > 0:
+			hud.draw_rect(Rect2(cx, BAR_TOP + 79, w * clampf(next_wave_timer / WAVE_INTERVAL, 0.0, 1.0), 2), UI_GOLD)
+		cx += w + 5.0
+
+
+func wave_chip_label(n: int) -> String:
+	var count := wave_count(n) * maxi(player_count(), 1)
+	return ("BOSS x%d" if kind_for_wave(n) == "boss" else "x%d") % count
+
+
+func wave_chip(r: Rect2, n: int, label: String) -> void:
+	var kind := kind_for_wave(n)
+	var boss := kind == "boss"
+	var col: Color = KIND_COLORS[kind]
+	ui_button_bg(r, true, boss)
+	hud.draw_rect(r.grow(-2), Color(col, 0.16))
+	if boss:
+		# A boss wave blinks red
+		var a := 0.55 + 0.45 * sin(Time.get_ticks_msec() / 160.0)
+		hud.draw_rect(r.grow(2), Color(1, 0.3, 0.2, a), false, 2.0)
+	kind_icon(r.position + Vector2(13, r.size.y / 2.0 + 1), kind, 7.0)
+	text(r.position + Vector2(25, r.size.y / 2.0 + 5), label, 13, Color(1, 0.55, 0.45) if boss else UI_TEXT)
+
+
+# A monster blob in its kind's color with the kind's mark: speed lines (fast),
+# a steel rim (armored) or a crown (boss).
+func kind_icon(c: Vector2, kind: String, r: float) -> void:
+	var col: Color = KIND_COLORS[kind]
+	if kind == "fast":
+		for k in 3:
+			hud.draw_line(c + Vector2(-r - 7, -3 + k * 3), c + Vector2(-r - 2, -3 + k * 3), col, 1.5)
+	hud.draw_circle(c, r + 1.0, Color(0, 0, 0, 0.75))
+	hud.draw_circle(c, r, col.darkened(0.4))
+	hud.draw_circle(c + Vector2(0, -1), r - 2.0, col)
+	if kind == "armored":
+		hud.draw_arc(c, r - 1.0, PI * 1.05, PI * 1.95, 10, Color(0.85, 0.9, 1.0), 2.5)
+	if kind == "boss":
+		quad(PackedVector2Array([c + Vector2(-r * 0.8, -r * 0.55), c + Vector2(-r * 0.8, -r * 1.35), c + Vector2(0, -r * 0.8), c + Vector2(0, -r * 0.55)]), UI_GOLD_LIGHT)
+		quad(PackedVector2Array([c + Vector2(0, -r * 0.55), c + Vector2(0, -r * 0.8), c + Vector2(r * 0.8, -r * 1.35), c + Vector2(r * 0.8, -r * 0.55)]), UI_GOLD_LIGHT)
+	hud.draw_circle(c + Vector2(-r * 0.35, 0), 1.6, Color(0.1, 0.05, 0.05))
+	hud.draw_circle(c + Vector2(r * 0.35, 0), 1.6, Color(0.1, 0.05, 0.05))
 
 
 # The selected tower: its picture, level and stats.
@@ -948,19 +1071,20 @@ func draw_path_buttons() -> void:
 		hud.draw_multiline_string(font, r.position + Vector2(32, 27), p["desc"], HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 36, 10, 2, UI_GREY)
 
 
-# One line about what a path does besides its numbers.
+# What a path does besides its numbers: one or two lines (split by "\n").
 func path_extra(type: String, path: int) -> String:
 	var p: Dictionary = PATHS[type][path - 1]
 	var d := tower_data(type, path, PATH_LEVEL)
+	var boss := "\nx%s damage to bosses." % str(p["boss"]).trim_suffix(".0") if p.has("boss") else ""
 	match p["name"]:
-		"Sniper": return "Faster arrows. Starts on Strongest."
+		"Sniper": return "Faster arrows. Starts on Strongest." + boss
 		"Volley": return "%d arrows (%d at level 20, %d at level 40)." % p["arrows"]
-		"Big Bomb": return "Blast radius %d (Cannon: %d)." % [d["splash"][PATH_LEVEL], TOWERS[type]["splash"][PATH_LEVEL]]
-		"Cluster": return "%d bomblets (%d at level 20, %d at level 40)." % p["bomblets"]
-		"Deep Freeze": return "Freezes 1s: %d%% chance (%d%% at 20, %d%% at 40)." % [roundi(p["freeze"][0] * 100), roundi(p["freeze"][1] * 100), roundi(p["freeze"][2] * 100)]
+		"Big Bomb": return "Blast radius %d (Cannon: %d)." % [d["splash"][PATH_LEVEL], TOWERS[type]["splash"][PATH_LEVEL]] + boss
+		"Cluster": return "%d bomblets (%d at level 20, %d at level 40).\nEach monster is hit only once." % p["bomblets"]
+		"Deep Freeze": return "Freezes %ss: %d%% chance (%d%% at 20, %d%% at 40).\nThen it can't be frozen for %ss." % [str(FREEZE_TIME).trim_suffix(".0"), roundi(p["freeze"][0] * 100), roundi(p["freeze"][1] * 100), roundi(p["freeze"][2] * 100), str(FREEZE_IMMUNE).trim_suffix(".0")]
 		"Blizzard": return "Hits all within %d (%d at level 20, %d at level 40)." % p["area"]
 		"Storm": return "Chains to %d monsters, jumps further." % d["chain"][PATH_LEVEL]
-		"Overload": return "Chains to %d monsters. Starts on Strongest." % d["chain"][PATH_LEVEL]
+		"Overload": return "Chains to %d monsters. Starts on Strongest." % d["chain"][PATH_LEVEL] + boss
 	return ""
 
 
@@ -1043,8 +1167,9 @@ func draw_card_tip(i: int) -> void:
 		var p: Dictionary = PATHS[selected.type][i - 9]
 		var d := tower_data(selected.type, i - 8, PATH_LEVEL)
 		title = "%s (%s)  -  %s gold" % [p["name"], "Q" if i == 9 else "E", short(d["cost"][PATH_LEVEL])]
-		lines = [p["desc"] + ".", "Level 5: Damage %s   Range %d   Speed %.2fs" % [short(d["damage"][PATH_LEVEL]), d["range"][PATH_LEVEL], d["cooldown"][PATH_LEVEL]],
-				path_extra(selected.type, i - 8), "For good: selling is the only way back."]
+		lines = [p["desc"] + ".", "Level 5: Damage %s   Range %d   Speed %.2fs" % [short(d["damage"][PATH_LEVEL]), d["range"][PATH_LEVEL], d["cooldown"][PATH_LEVEL]]]
+		lines.append_array(path_extra(selected.type, i - 8).split("\n"))
+		lines.append("For good: selling is the only way back.")
 	elif i == 8:
 		title = "Target: %s (T)" % TARGET_MODES[selected.mode]
 		lines = ["Shoots: " + TARGET_TIPS[selected.mode]]
@@ -1135,9 +1260,9 @@ func draw_menu() -> void:
 	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 40).x
 	ui_title(Rect2(m.position.x, m.position.y, m.size.x, 66), Vector2((SCREEN_W - tw) / 2.0, m.position.y + 50), title, 40)
 	var sub := "The game is paused." if net_mode == "" else "The game keeps running while this menu is open."
-	centered(m.position.y + 84, sub, 15, UI_GREY)
+	centered(m.position.y + 78, sub, 15, UI_GREY)
 	button(GRAPHICS_RECT, "Settings")
-	ui_heading(Vector2(left, 196), "MULTIPLAYER", width)
+	ui_heading(Vector2(left, 203), "MULTIPLAYER", width)  # under Map: and Level: (see map_editor.gd)
 	var grey := UI_GREY
 	var gold_col := Color(1, 0.85, 0.3)
 	match net_mode:
@@ -1181,19 +1306,31 @@ func draw_board() -> void:
 	var title := "LEADERBOARD"
 	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 36).x
 	ui_title(Rect2(b.position.x, b.position.y, b.size.x, 62), Vector2((SCREEN_W - tw) / 2.0, b.position.y + 46), title, 36)
-	centered(b.position.y + 86, "Default map, %d waves. Highest wave first, then the fastest game time." % MAX_WAVE, 15, UI_GREY)
+	centered(b.position.y + 82, "%s level, Default map, %d waves. Highest wave first, then the fastest time." % [DIFFICULTIES[board_level], MAX_WAVE], 15, UI_GREY)
+	# A tab per level, in the level's color (Left / Right arrows switch too)
+	for i in DIFFICULTIES.size():
+		var r := board_tab_rect(i)
+		var on := i == board_level
+		ui_button_bg(r, true, on)
+		var col: Color = LEVEL_COLORS[i] if on else LEVEL_COLORS[i].darkened(0.3)
+		var w := font.get_string_size(DIFFICULTIES[i], HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
+		var pos := Vector2(r.get_center().x - w / 2.0, r.position.y + 18)
+		hud.draw_string(font, pos + Vector2(0, 1), DIFFICULTIES[i], HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color(0, 0, 0, 0.7))
+		text(pos, DIFFICULTIES[i], 15, col)
+		if on:
+			hud.draw_rect(Rect2(r.position.x + 10, r.end.y - 4, r.size.x - 20, 2), LEVEL_COLORS[i])
 	var gold_col := Color(1, 0.85, 0.3)
 	var x_rank := b.position.x + 40
 	var x_names := b.position.x + 90
 	var x_wave := b.position.x + 470  # right edge of the wave column
 	var x_time := b.end.x - 40  # right edge of the time column
-	var y := b.position.y + 124
+	var y := b.position.y + 144
 	text(Vector2(x_rank, y), "#", 15, gold_col)
 	text(Vector2(x_names, y), "Players", 15, gold_col)
 	right_text(Vector2(x_wave, y), "Wave", 15, gold_col)
 	right_text(Vector2(x_time, y), "Time", 15, gold_col)
 	ui_divider(b.position.x + 24, b.end.x - 24, y + 10)
-	var top := b.position.y + 140
+	var top := b.position.y + 160
 	for i in BOARD_ROWS:
 		var row := Rect2(b.position.x + 24, top + i * BOARD_ROW_H, b.size.x - 48, BOARD_ROW_H - 2)
 		var e: Dictionary = board_top[i] if i < board_top.size() else {}
@@ -1214,7 +1351,7 @@ func draw_board() -> void:
 	if board_status != "":
 		centered(below, board_status, 15, Color(1, 0.75, 0.5))
 	elif board_me.is_empty():
-		centered(below, "Finish a game on the Default map to get on the list.", 15, UI_GREY)
+		centered(below, "Finish a game on the Default map at %s to get on this list." % DIFFICULTIES[board_level], 15, UI_GREY)
 	else:
 		var where := "#%d" % board_me.rank if board_me.rank > 0 else "not in the top 1000"
 		centered(below, "Your best: %s, wave %d%s, %s" % [where, board_me.wave, " (won)" if board_me.won else "", board_time_text(board_me.ms)], 15, gold_col)
@@ -1278,7 +1415,20 @@ func settings_click(p: Vector2) -> void:
 			save_settings()
 
 
+# The leaderboard's level tabs, centered under its subtitle.
+func board_tab_rect(i: int) -> Rect2:
+	var w := 110.0
+	var gap := 8.0
+	var left := (SCREEN_W - DIFFICULTIES.size() * (w + gap) + gap) / 2.0
+	return Rect2(left + i * (w + gap), BOARD_RECT.position.y + 96, w, 28)
+
+
 func board_click(p: Vector2) -> void:
+	for i in DIFFICULTIES.size():
+		if board_tab_rect(i).has_point(p):
+			if i != board_level:
+				show_board_level(i)
+			return
 	if BOARD_BACK_RECT.has_point(p):
 		board_open = false
 	elif BOARD_REFRESH_RECT.has_point(p):
@@ -1624,22 +1774,166 @@ func menu_click(p: Vector2) -> void:
 				leave_game("You left the game.")
 
 
+# ----- the end screen and its stats
+
+const STATS_WIN_DELAY := 3.0  # seconds of title and fireworks alone before the stats on a win
+const STATS_LOSE_DELAY := 0.8
+const STATS_TOP := 152.0  # the stats panel's top (the title goes above it)
+var end_at_ms := -1  # when the end screen showed up (-1: still playing)
+
+
+func showing_stats() -> bool:
+	if state == "playing" or end_at_ms < 0:
+		return false
+	var wait := STATS_WIN_DELAY if state == "won" else STATS_LOSE_DELAY
+	return Time.get_ticks_msec() - end_at_ms >= wait * 1000.0
+
+
+# The stats panel's place: its height grows with the players.
+func stats_rect() -> Rect2:
+	var n := maxi((end_stats.get("players", []) as Array).size(), 1)
+	var m := maxi((end_stats.get("towers", []) as Array).size(), 1)
+	return Rect2(250, STATS_TOP, 780, 30 + 28 + n * 26 + 24 + 26 + m * 24 + 30)
+
+
+const STATS_FADE := 0.45  # seconds for the stats panel to fade in and the title to move up
+
+
+# 0 before the stats show, then up to 1 over STATS_FADE seconds (eased).
+func stats_fade() -> float:
+	if not showing_stats():
+		return 0.0
+	var wait := STATS_WIN_DELAY if state == "won" else STATS_LOSE_DELAY
+	var t := clampf((Time.get_ticks_msec() - end_at_ms - wait * 1000.0) / (STATS_FADE * 1000.0), 0.0, 1.0)
+	return 1.0 - pow(1.0 - t, 3.0)
+
+
+# The end screen's nodes under the overlay (see build_hud): shown, placed and faded.
+func update_end_layer() -> void:
+	end_layer.visible = state != "playing"
+	if not end_layer.visible:
+		return
+	end_layer.position = Vector2(0, ui_extra / 2.0)
+	end_layer.queue_redraw()
+	var k := stats_fade()
+	stats_layer.visible = showing_stats() and not menu_open and update_dialog == ""
+	stats_layer.modulate.a = k
+	stats_layer.position = Vector2(0, (1.0 - k) * 18.0)  # rises a little as it fades in
+	stats_layer.queue_redraw()
+
+
+# Darkens the map under the end screen; less when won, so the fireworks show.
+func draw_end_cover() -> void:
+	var won := state == "won"
+	var a := lerpf(0.4 if won else 0.6, 0.55 if won else 0.65, stats_fade())
+	hud.draw_rect(Rect2(0, TOP_BAR_H - ui_extra / 2.0, SCREEN_W, BAR_TOP - TOP_BAR_H + ui_extra), Color(0, 0, 0, a))
+
+
+# The title and the lines under it. When the stats come, the title shrinks and
+# moves up over the panel, and the lines under it change to one shorter line.
 func draw_end_screen() -> void:
 	var won := state == "won"
-	# Less dark when won, so the map shows under the fireworks
-	hud.draw_rect(Rect2(0, TOP_BAR_H - ui_extra / 2.0, SCREEN_W, BAR_TOP - TOP_BAR_H + ui_extra), Color(0, 0, 0, 0.4 if won else 0.6))
+	var k := stats_fade()
 	var title := WIN_TEXT if won else "GAME OVER"
-	var sub := "You survived all %d waves." % MAX_WAVE if won else "Too many monsters! You reached wave %d." % wave
 	# The win text is long, so it's smaller (it fits FW_KEEP, where no fireworks burst)
-	var big := 48 if won else 64
+	var big := roundi(lerpf(48 if won else 64, 40 if won else 52, k))
 	var size := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, big)
-	var pos := Vector2((SCREEN_W - size.x) / 2.0, END_Y)
+	var pos := Vector2((SCREEN_W - size.x) / 2.0, lerpf(END_Y, STATS_TOP - 58, k))
 	hud.draw_string_outline(title_font, pos, title, HORIZONTAL_ALIGNMENT_LEFT, -1, big, 6, Color(0, 0, 0, 0.8))
 	hud.draw_string(title_font, pos, title, HORIZONTAL_ALIGNMENT_LEFT, -1, big, Color(1, 0.85, 0.3) if won else Color(1, 0.35, 0.35))
-	size = font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 22)
-	text(Vector2((SCREEN_W - size.x) / 2.0, END_Y + 50), sub, 22, UI_TEXT)
-	size = font.get_string_size("Press R to play again", HORIZONTAL_ALIGNMENT_LEFT, -1, 18)
-	text(Vector2((SCREEN_W - size.x) / 2.0, END_Y + 90), "Press R to play again", 18, UI_GREY)
+	var shown_wave: int = end_stats.get("wave", wave)
+	var sub := "You survived all %d waves." % MAX_WAVE if won else "Too many monsters! You reached wave %d." % shown_wave
+	var a := clampf(1.0 - k * 3.0, 0.0, 1.0)  # gone quickly, so they don't mix with the panel
+	if a > 0.0:
+		size = font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 22)
+		text(Vector2((SCREEN_W - size.x) / 2.0, END_Y + 50), sub, 22, Color(UI_TEXT, a))
+		outlined(Vector2(SCREEN_W / 2.0, END_Y + 84), "Level: " + level_name(), 18, Color(level_color(), a))
+		size = font.get_string_size("Press R to play again", HORIZONTAL_ALIGNMENT_LEFT, -1, 16)
+		text(Vector2((SCREEN_W - size.x) / 2.0, END_Y + 112), "Press R to play again", 16, Color(UI_GREY, a))
+	# The short line comes in once the title has moved past it
+	k = clampf(k * 2.0 - 1.0, 0.0, 1.0)
+	if k <= 0.0:
+		return
+	var lv := "Level: " + level_name()
+	if end_stats.has("ms"):
+		var sec := int(end_stats["ms"] / 1000.0)
+		lv += "    Time %d:%02d" % [int(sec / 60.0), sec % 60]
+	var sw := font.get_string_size(sub, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x
+	var lw := font.get_string_size(lv, HORIZONTAL_ALIGNMENT_LEFT, -1, 16).x
+	var sx := (SCREEN_W - sw - 24.0 - lw) / 2.0
+	text(Vector2(sx, STATS_TOP - 20), sub, 18, Color(UI_TEXT, k))
+	hud.draw_string_outline(font, Vector2(sx + sw + 24.0, STATS_TOP - 20), lv, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, 4, Color(0, 0, 0, 0.8 * k))
+	text(Vector2(sx + sw + 24.0, STATS_TOP - 20), lv, 16, Color(level_color(), k))
+
+
+# The stats panel (on its own node, see update_end_layer()): each player's kills,
+# damage and gold (the MVP did the most damage) and the 5 towers that did the
+# most damage. The host made the stats (see make_end_stats()).
+func draw_stats_panel() -> void:
+	var size: Vector2
+	var panel := stats_rect()
+	hud.draw_rect(panel.grow(4), Color(0, 0, 0, 0.35))
+	vgrad(panel, Color(0.12, 0.115, 0.11, 0.94), Color(0.07, 0.065, 0.06, 0.94))
+	bevel(panel, 3, UI_GOLD_LIGHT, UI_GOLD_DARK)
+	var again := "Press R to play again"
+	size = font.get_string_size(again, HORIZONTAL_ALIGNMENT_LEFT, -1, 16)
+	text(Vector2((SCREEN_W - size.x) / 2.0, panel.end.y + 22), again, 16, UI_GREY)
+	if end_stats.is_empty():
+		outlined(panel.get_center(), "Getting the stats from the host...", 16, UI_GREY)
+		return
+	var rows: Array = end_stats["players"]
+	var team := rows.size() > 1  # alone: no MVP and no owner column
+	var left := panel.position.x + 24
+	var cols := [left, left + 246, left + 336, left + 436, left + 556]
+	# ---- players
+	var y := panel.position.y + 30
+	ui_title(Rect2(panel.position.x + 10, y - 26, 760, 34), Vector2(left, y), "PLAYERS" if team else "YOU", 18)
+	var heads := ["", "Kills", "Damage", "Gold earned", "Spent on towers"]
+	for i in range(1, 5):
+		text(Vector2(cols[i], y), heads[i], 13, UI_DIM)
+	y += 28
+	var kills := 0
+	var damage := 0.0
+	for row: Array in rows:
+		var slot: int = row[0]
+		kills += row[2]
+		damage += row[3]
+		hud.draw_circle(Vector2(left + 6, y - 5), 6, PLAYER_COLORS[slot])
+		text(Vector2(left + 20, y), row[1], 16, PLAYER_COLORS[slot].lightened(0.3))
+		if slot == end_stats["mvp"]:
+			var nw := font.get_string_size(row[1], HORIZONTAL_ALIGNMENT_LEFT, -1, 16).x
+			var mr := Rect2(left + 28 + nw, y - 15, 42, 19)
+			ui_button_bg(mr, true, true)
+			text(mr.position + Vector2(7, 14), "MVP", 13, UI_GOLD_LIGHT)
+		text(Vector2(cols[1], y), short(row[2]), 16, UI_TEXT)
+		text(Vector2(cols[2], y), short(row[3]), 16, UI_TEXT)
+		text(Vector2(cols[3], y), gold_text(row[4]), 16, Color(1, 0.85, 0.3))
+		text(Vector2(cols[4], y), gold_text(row[5]), 16, Color(1, 0.85, 0.3))
+		y += 26
+	# ---- best towers
+	y += 24
+	ui_title(Rect2(panel.position.x + 10, y - 26, 760, 34), Vector2(left, y), "BEST TOWERS", 18)
+	text(Vector2(left + 496, y), "Damage", 13, UI_DIM)
+	text(Vector2(left + 640, y), "Kills", 13, UI_DIM)
+	y += 26
+	var best: Array = end_stats["towers"]
+	if best.is_empty():
+		text(Vector2(left, y), "No tower did any damage.", 15, UI_GREY)
+	var most: float = best[0][5] if not best.is_empty() else 1.0
+	for i in best.size():
+		var t: Array = best[i]
+		gem(Vector2(left + 8, y - 5), 7.0, TOWERS[t[0]]["color"])
+		var tname: String = tower_data(t[0], t[1], t[2])["name"]
+		text(Vector2(left + 26, y), "%s  Lv %d" % [tname, t[2] + 1], 15, UI_GOLD_LIGHT if i == 0 else UI_TEXT)
+		if team:
+			text(Vector2(left + 176, y), t[4], 14, PLAYER_COLORS[t[3]].lightened(0.3))
+		ui_bar(Rect2(left + 306, y - 10, 180, 8), t[5] / maxf(most, 1.0), Color(0.9, 0.45, 0.2))
+		text(Vector2(left + 496, y), short(t[5]), 15, UI_TEXT)
+		text(Vector2(left + 640, y), short(t[6]), 15, UI_TEXT)
+		y += 24
+	var foot := "Monsters killed: %s     Damage done: %s" % [short(kills), short(damage)]
+	size = font.get_string_size(foot, HORIZONTAL_ALIGNMENT_LEFT, -1, 14)
+	text(Vector2((SCREEN_W - size.x) / 2.0, panel.end.y - 12), foot, 14, UI_GREY)
 
 
 # ---------------------------------------------------------------- fireworks
@@ -1839,13 +2133,16 @@ func fw_colors() -> Array:
 
 # A rocket from the bottom of the map to a spot away from the text.
 func fw_launch() -> void:
-	# Left of the text, right of it, or above it
-	var top := Vector2(randf_range(80, FW_KEEP.position.x - 50), randf_range(TOP_BAR_H + 90, BAR_TOP - 150))
-	match randi() % 3:
+	# Left of the text, right of it, or above it (not above the stats: no room)
+	var keep := FW_KEEP
+	if showing_stats():
+		keep = stats_rect().grow_individual(0, 110, 0, 30)  # with the title above it
+	var top := Vector2(randf_range(80, keep.position.x - 50), randf_range(TOP_BAR_H + 90, BAR_TOP - 150))
+	match randi() % (2 if keep.position.y - 75 < TOP_BAR_H + 100 else 3):
 		1:
-			top.x = randf_range(FW_KEEP.end.x + 50, SCREEN_W - 80)
+			top.x = randf_range(keep.end.x + 50, SCREEN_W - 80)
 		2:
-			top = Vector2(randf_range(110, SCREEN_W - 110), randf_range(TOP_BAR_H + 80, FW_KEEP.position.y - 75))
+			top = Vector2(randf_range(110, SCREEN_W - 110), randf_range(TOP_BAR_H + 80, keep.position.y - 75))
 	var kinds := ["ball", "ball", "ball", "ring", "ring", "smiley", "heart", "tower", "unicorn", "fizzle"]
 	var kind: String = kinds.pick_random()
 	var start := Vector2(top.x + randf_range(-60, 60), BAR_TOP)

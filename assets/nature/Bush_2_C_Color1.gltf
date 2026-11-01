@@ -15,24 +15,24 @@
     "nodes" : [
         {
             "mesh" : 0,
-            "name" : "Skeleton_Axe"
+            "name" : "Bush_2_C_Color1"
         }
     ],
     "materials" : [
         {
-            "name" : "skeleton",
+            "name" : "forest",
             "pbrMetallicRoughness" : {
                 "baseColorTexture" : {
                     "index" : 0
                 },
                 "metallicFactor" : 0,
-                "roughnessFactor" : 0.5
+                "roughnessFactor" : 0.6000000238418579
             }
         }
     ],
     "meshes" : [
         {
-            "name" : "Cylinder.002",
+            "name" : "Bush_2_C_Color1",
             "primitives" : [
                 {
                     "attributes" : {
@@ -55,69 +55,69 @@
     "images" : [
         {
             "mimeType" : "image/png",
-            "name" : "skeleton_texture",
-            "uri" : "skeleton_texture.png"
+            "name" : "forest_texture",
+            "uri" : "forest_texture.png"
         }
     ],
     "accessors" : [
         {
             "bufferView" : 0,
             "componentType" : 5126,
-            "count" : 692,
+            "count" : 56,
             "max" : [
-                0.4942930340766907,
-                1.0012037754058838,
-                0.1409231275320053
+                0.6600000262260437,
+                1.3199999332427979,
+                0.6600000262260437
             ],
             "min" : [
-                -0.4942930340766907,
-                -0.2508419454097748,
-                -0.14094749093055725
+                -0.6599999666213989,
+                -7.867813422990366e-08,
+                -0.6600000262260437
             ],
             "type" : "VEC3"
         },
         {
             "bufferView" : 1,
             "componentType" : 5126,
-            "count" : 692,
+            "count" : 56,
             "type" : "VEC2"
         },
         {
             "bufferView" : 2,
             "componentType" : 5126,
-            "count" : 692,
+            "count" : 56,
             "type" : "VEC3"
         },
         {
             "bufferView" : 3,
             "componentType" : 5123,
-            "count" : 1602,
+            "count" : 324,
             "type" : "SCALAR"
         }
     ],
     "bufferViews" : [
         {
             "buffer" : 0,
-            "byteLength" : 8304,
+            "byteLength" : 672,
             "byteOffset" : 0,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 5536,
-            "byteOffset" : 8304,
+            "byteLength" : 448,
+            "byteOffset" : 672,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 8304,
-            "byteOffset" : 13840,
+            "byteLength" : 672,
+            "byteOffset" : 1120,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 3204,
-            "byteOffset" : 22144,
+            "byteLength" : 648,
+            "byteOffset" : 1792,
             "target" : 34963
         }
     ],
@@ -129,8 +129,8 @@
     ],
     "buffers" : [
         {
-            "byteLength" : 25348,
-            "uri" : "Skeleton_Axe.bin"
+            "byteLength" : 2440,
+            "uri" : "Bush_2_C_Color1.bin"
         }
     ]
 }

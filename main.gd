@@ -25,15 +25,23 @@ func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--relay="):
 			relay_url = arg.trim_prefix("--relay=")
+		# For tests until the Esc menu has its Level button: --level=easy / normal / hard / insane
+		if arg.begins_with("--level="):
+			var d := DIFFICULTIES.find(arg.trim_prefix("--level=").capitalize())
+			if d >= 0:
+				difficulty = d
 	play_alone()
 	check_for_update()
 
 
 func new_game() -> void:
 	clear_world()
+	reset_stats()
 	for p in players:
 		if p != null:
-			p.gold = START_GOLD
+			p.gold = start_gold()
+			stat_start[p.slot] = p.gold
+			stat_names[p.slot] = name_of(p.slot)
 	wave = 0
 	next_wave_timer = 0.0
 	game_speed = 1
@@ -70,6 +78,7 @@ func start_wave() -> void:
 	for p in players:
 		if p != null:
 			p.gold += income + early_bonus
+			stat_earned[p.slot] += income + early_bonus
 	var text := "Wave %d! +%s gold" % [wave, short(income)]
 	if early_bonus > 0:
 		text = "Wave %d! +%s gold (+%s for calling early)" % [wave, short(income), short(early_bonus)]
@@ -124,7 +133,7 @@ func spawn_enemy(kind: String, g: int) -> void:
 	e.route = routes[g]
 	e.loop_wp = loop_starts[g]
 	e.pos = e.route[0]
-	e.max_hp = spawn_hp
+	e.max_hp = spawn_hp * DIFFICULTY_HP[difficulty]
 	e.bounty = wave_bounty(wave)
 	match kind:
 		"fast":
@@ -135,7 +144,7 @@ func spawn_enemy(kind: String, g: int) -> void:
 			# Later on, armor grows with the monsters' health
 			e.armor = maxf(2.0 + mini(wave, 30) * 0.6, spawn_hp * 0.0085)
 		"boss":
-			e.max_hp *= 15.0
+			e.max_hp *= 18.0
 			e.speed *= 0.7
 			e.bounty = 40 + e.bounty * 12
 			e.weight = 5
@@ -200,6 +209,10 @@ func _process(delta: float) -> void:
 			state = "lost"
 		elif wave >= MAX_WAVE and monsters_left_to_spawn() == 0 and enemies.is_empty():
 			state = "won"
+		if state != "playing":
+			# The stats screen: made once, and sent once to the other players
+			end_stats = make_end_stats()
+			send_all("net_stats", [end_stats])
 	if net_mode != "client":
 		track_score(dt)
 	if net_mode == "host":
@@ -261,9 +274,12 @@ func update_enemies(dt: float) -> void:
 			e.slow_time -= dt
 			if e.slow_time <= 0.0:
 				e.slow_factor = 1.0
-		# Frozen by Deep Freeze: stands still
+		e.freeze_immune = maxf(e.freeze_immune - dt, 0.0)
+		# Frozen by Deep Freeze: stands still, and can't be frozen again for a while after
 		if e.freeze_time > 0.0:
 			e.freeze_time -= dt
+			if e.freeze_time <= 0.0:
+				e.freeze_immune = FREEZE_IMMUNE
 			continue
 		var move := e.speed * e.slow_factor * dt
 		while move > 0.0:
@@ -362,9 +378,10 @@ func fire_lightning(t: Tower, first: Enemy) -> void:
 	if t.path > 0 and t.level >= PATH_LEVEL:
 		falloff = PATHS["spark"][t.path - 1].get("falloff", falloff)
 		jump = PATHS["spark"][t.path - 1].get("jump", jump)
+	var boss := boss_bonus(t.type, t.path, t.level)
 	var hit: Array[Enemy] = [first]
 	var points := PackedVector3Array([t.node.position + t.head.position + Vector3(0, 0.1, 0), first.node.position])
-	damage_enemy(first, dmg, t.owner)
+	damage_enemy(first, dmg * (boss if first.kind == "boss" else 1.0), t.owner, t)
 	var current := first
 	for i in range(data["chain"][t.level] - 1):
 		dmg *= falloff
@@ -381,7 +398,7 @@ func fire_lightning(t: Tower, first: Enemy) -> void:
 			break
 		hit.append(next)
 		points.append(next.node.position)
-		damage_enemy(next, dmg, t.owner)
+		damage_enemy(next, dmg * (boss if next.kind == "boss" else 1.0), t.owner, t)
 		current = next
 	add_bolt(points)
 	send_all("net_bolt", [points])
@@ -395,6 +412,7 @@ func update_shots(dt: float) -> void:
 		var step := s.speed * dt
 		if to.length() <= step:
 			s.pos = s.target_pos
+			shot_spark(s)
 			if not s.visual:
 				shot_hit(s)
 			s.done = true
@@ -415,23 +433,33 @@ func shot_hit(s: Shot) -> void:
 		"cannon":
 			var r: float = data["splash"][s.level]
 			var near := []  # Cluster: [traveled, monster] near the blast but outside it
+			var hit := {}  # Cluster: monsters already hit by this shell (each is hit once)
 			for e in enemies:
 				if e.dead:
 					continue
 				var d := e.pos.distance_to(s.pos)
 				if d <= r:
-					damage_enemy(e, dmg, s.owner)
+					hit[e] = true
+					damage_enemy(e, dmg * (boss_bonus(s.type, s.path, s.level) if e.kind == "boss" else 1.0), s.owner, s.tower)
 				elif path == 2 and d <= BOMBLET_REACH:
 					near.append([e.traveled, e])
 			blast(s.pos, r)
 			if path == 2:
-				# Bomblets land on the monsters furthest along near the blast
+				# Bomblets land on the monsters furthest along near the blast that
+				# no blast has hit yet
 				near.sort_custom(func(a: Array, b: Array) -> bool: return a[0] > b[0])
-				for i in mini(path_step(s.level, PATHS["cannon"][1]["bomblets"]), near.size()):
-					var at: Vector2 = near[i][1].pos
+				var left: int = path_step(s.level, PATHS["cannon"][1]["bomblets"])
+				for n: Array in near:
+					if left <= 0:
+						break
+					if hit.has(n[1]):
+						continue
+					left -= 1
+					var at: Vector2 = n[1].pos
 					for e in enemies:
-						if not e.dead and e.pos.distance_to(at) <= BOMBLET_RADIUS:
-							damage_enemy(e, dmg, s.owner)
+						if not e.dead and not hit.has(e) and e.pos.distance_to(at) <= BOMBLET_RADIUS:
+							hit[e] = true
+							damage_enemy(e, dmg, s.owner, s.tower)
 					blast(at, BOMBLET_RADIUS)
 		"frost":
 			if alive:
@@ -449,13 +477,14 @@ func shot_hit(s: Shot) -> void:
 				for e in hit:
 					e.slow_factor = minf(e.slow_factor, slow)
 					e.slow_time = 2.0
-					# Deep Freeze: a chance to stop it for a moment (bosses half as long)
-					if path == 1 and randf() < path_step(s.level, PATHS["frost"][0]["freeze"]):
+					# Deep Freeze: a chance to stop it for a moment (bosses half as long),
+					# unless it was just frozen
+					if path == 1 and e.freeze_time <= 0.0 and e.freeze_immune <= 0.0 and randf() < path_step(s.level, PATHS["frost"][0]["freeze"]):
 						e.freeze_time = FREEZE_TIME * (0.5 if e.kind == "boss" else 1.0)
-					damage_enemy(e, dmg, s.owner)
+					damage_enemy(e, dmg, s.owner, s.tower)
 		_:
 			if alive:
-				damage_enemy(s.target, dmg, s.owner)
+				damage_enemy(s.target, dmg * (boss_bonus(s.type, s.path, s.level) if s.target.kind == "boss" else 1.0), s.owner, s.tower)
 
 
 func blast(at: Vector2, r: float) -> void:
@@ -464,21 +493,32 @@ func blast(at: Vector2, r: float) -> void:
 
 
 # The gold for a kill goes to the player who owns the tower that made it.
-func damage_enemy(e: Enemy, amount: float, owner_slot: int) -> void:
+# t: that tower (counted for the stats at the end).
+func damage_enemy(e: Enemy, amount: float, owner_slot: int, t: Tower = null) -> void:
 	if e.dead:
 		return
 	# Armor removes a flat amount, but at least 25% of the hit always goes through.
-	e.hp -= maxf(amount - e.armor, amount * 0.25)
+	var hit := maxf(amount - e.armor, amount * 0.25)
+	# The stats count only the health it really took off (no overkill)
+	var done := minf(hit, e.hp)
+	stat_damage[owner_slot] += done
+	if t != null:
+		t.dealt += done
+	e.hp -= hit
 	if e.hp <= 0.0:
 		e.dead = true
+		stat_kills[owner_slot] += 1
+		if t != null:
+			t.kills += 1
 		if players[owner_slot] != null:
 			players[owner_slot].gold += e.bounty
+			stat_earned[owner_slot] += e.bounty
 
 
 func remove_dead() -> void:
 	for i in range(enemies.size() - 1, -1, -1):
 		if enemies[i].dead:
-			enemies[i].node.queue_free()
+			drop_corpse(enemies[i])
 			enemy_by_id.erase(enemies[i].id)
 			enemies.remove_at(i)
 
@@ -724,9 +764,39 @@ func perform(slot: int, action: String, args: Array) -> String:
 		"restart":
 			if state != "playing":
 				new_game()
+		"difficulty":
+			if args.size() == 1 and args[0] is int:
+				return set_difficulty(slot, args[0])
 		"answer":
 			if args.size() == 2 and args[0] is int and args[1] is bool:
 				answer_request(slot, args[0], args[1])
+	return ""
+
+
+# The difficulty level (index in DIFFICULTIES): only the host (or a player
+# alone), and only before wave 1. Start gold changes with it (Easy gives more).
+func set_difficulty(slot: int, d: int) -> String:
+	if slot != local_slot:
+		return "Only the host can change the level"
+	if wave > 0 or state != "playing":
+		return "The level can only change before wave 1"
+	if d < 0 or d >= DIFFICULTIES.size() or d == difficulty:
+		return ""
+	var old_gold := start_gold()
+	difficulty = d
+	for p in players:
+		if p != null:
+			var before: int = p.gold
+			p.gold = maxi(p.gold + start_gold() - old_gold, 0)
+			# The stats' start gold changes by what the player really got (or lost)
+			stat_start[p.slot] += p.gold - before
+	send_difficulty()
+	var text := "Level: %s" % DIFFICULTIES[d]
+	var hp: float = DIFFICULTY_HP[d]
+	if hp != 1.0:
+		text += " (monsters have %d%% %s health)" % [roundi(absf(hp - 1.0) * 100.0), "more" if hp > 1.0 else "less"]
+	flash(text)
+	send_all("net_message", [text])
 	return ""
 
 
@@ -818,6 +888,7 @@ func build_tower(slot: int, c: Vector2i, type: String, allowed := false) -> Stri
 	t.spent = cost
 	t.owner = slot
 	players[slot].gold -= cost
+	stat_spent[slot] += cost
 	towers[c] = t
 	build_tower_node(t)
 	send_tower(t)
@@ -844,6 +915,7 @@ func upgrade_tower(slot: int, c: Vector2i, path: int) -> String:
 	if players[slot].gold < cost:
 		return "Not enough gold"
 	players[slot].gold -= cost
+	stat_spent[slot] += cost
 	t.spent += cost
 	t.level += 1
 	if path != 0:
@@ -880,6 +952,37 @@ func sell_tower(slot: int, c: Vector2i) -> String:
 	if t.owner != slot:
 		return "That's %s's tower" % name_of(t.owner)
 	players[slot].gold += int(t.spent * 0.7)
+	stat_spent[slot] -= int(t.spent * 0.7)
+	sold_towers.append(t)  # its damage and kills still count at the end
 	remove_tower(c)
 	send_all("net_tower_removed", [c])
 	return ""
+
+
+# ---------------------------------------------------------------- stats at the end
+
+# Host / alone, once when the game ends: everything the stats screen shows.
+# players: [slot, name, kills, damage, gold earned, gold spent] for everyone who
+# played; towers: the 5 that did the most damage, [type, path, level, owner,
+# owner's name, damage, kills]; mvp: the slot with the most damage (kills break a
+# tie), -1 alone.
+func make_end_stats() -> Dictionary:
+	var rows := []
+	var mvp := -1
+	for slot in MAX_PLAYERS:
+		if players[slot] != null:
+			stat_names[slot] = name_of(slot)
+		elif stat_names[slot] == "":
+			continue
+		rows.append([slot, stat_names[slot], stat_kills[slot], stat_damage[slot], stat_earned[slot], stat_spent[slot]])
+		if mvp < 0 or stat_damage[slot] > stat_damage[mvp] or \
+				(stat_damage[slot] == stat_damage[mvp] and stat_kills[slot] > stat_kills[mvp]):
+			mvp = slot
+	var list: Array = sold_towers + towers.values()
+	list = list.filter(func(t: Tower) -> bool: return t.dealt > 0.0)
+	list.sort_custom(func(a: Tower, b: Tower) -> bool: return a.dealt > b.dealt)
+	var best := []
+	for t: Tower in list.slice(0, 5):
+		best.append([t.type, t.path, t.level, t.owner, stat_names[t.owner], t.dealt, t.kills])
+	return {"wave": wave, "won": state == "won", "ms": int(run_time * 1000.0), "players": rows,
+			"towers": best, "mvp": mvp if rows.size() > 1 else -1}

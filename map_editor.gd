@@ -5,8 +5,9 @@ extends "res://game_ui.gd"
 
 # Esc menu: the editor button, left of Graphics, and the box asking before a game ends
 const EDITOR_RECT := Rect2(400, 50, 124, 28)
-# Esc menu: the map being played, under the title
-const MAP_PICK_RECT := Rect2(530, 136, 320, 30)
+# Esc menu: the map being played and the difficulty level, under the title
+const MAP_PICK_RECT := Rect2(530, 125, 320, 27)
+const LEVEL_RECT := Rect2(530, 156, 320, 27)
 # Joining a game on a map you don't have: the preview and Download / Cancel
 const JOIN_BOX := Rect2(312, 100, 656, 470)
 const JOIN_PREVIEW := Rect2(336, 206, 296, 222)
@@ -676,12 +677,15 @@ func draw_menu() -> void:
 	if net_mode == "":
 		button(EDITOR_RECT, "Map editor")
 	# The map being played; alone or as the host it can be changed before wave 1
-	text(Vector2(HOST_RECT.position.x, MAP_PICK_RECT.position.y + 21), "Map:", 16, UI_TEXT)
+	text(Vector2(HOST_RECT.position.x, MAP_PICK_RECT.position.y + 19), "Map:", 16, UI_TEXT)
 	if net_mode == "client":
-		text(Vector2(MAP_PICK_RECT.position.x, MAP_PICK_RECT.position.y + 21), fit_text(map_name, MAP_PICK_RECT.size.x, 16), 16, Color(1, 0.85, 0.3))
+		text(Vector2(MAP_PICK_RECT.position.x, MAP_PICK_RECT.position.y + 19), fit_text(map_name, MAP_PICK_RECT.size.x, 16), 16, Color(1, 0.85, 0.3))
 	else:
 		var label := map_name + ("   (change)" if can_pick_map() else "")
 		button(MAP_PICK_RECT, label, can_pick_map(), false)
+	draw_level_row()
+	if not (pick_open or ed_ask_open or board_open or settings_open or net_mode == "map_offer") and level_row().has_point(ui_mouse(true)):
+		draw_level_tip()
 	if pick_open:
 		ed_draw_list("CHOOSE A MAP", map_name)
 	if net_mode == "map_offer" and not map_offer.is_empty():
@@ -729,6 +733,11 @@ func menu_click(p: Vector2) -> void:
 	if MAP_PICK_RECT.has_point(p) and net_mode != "client":
 		open_picker()
 		return
+	if LEVEL_RECT.has_point(p):
+		if can_pick_level():
+			# act() is in main.gd, after this file
+			call("act", "difficulty", [(difficulty + 1) % DIFFICULTIES.size()])
+		return
 	if net_mode == "" and EDITOR_RECT.has_point(p):
 		if state == "playing" and (wave > 0 or not towers.is_empty()):
 			ed_ask_open = true
@@ -750,6 +759,52 @@ func toggle_menu() -> void:
 	ed_ask_open = false
 	if map_name_input != null:
 		map_name_input.release_focus()
+
+
+# The difficulty level: alone or as the host it can be changed before wave 1
+# (the host checks it again, see set_difficulty()).
+func can_pick_level() -> bool:
+	return wave == 0 and state == "playing" and net_mode not in ["client", "connecting", "map_offer"]
+
+
+# "Level:" and its button, or just its name (dimmed) when it can't change.
+func draw_level_row() -> void:
+	var r := LEVEL_RECT
+	text(Vector2(HOST_RECT.position.x, r.position.y + 19), "Level:", 16, UI_TEXT)
+	var s := level_name()
+	if not can_pick_level():
+		text(Vector2(r.position.x, r.position.y + 19), s, 16, level_color().darkened(0.3))
+		return
+	ui_button_bg(r, true, false)
+	var more := "   (change)"
+	var w := font.get_string_size(s + more, HORIZONTAL_ALIGNMENT_LEFT, -1, 16).x
+	var pos := r.position + Vector2((r.size.x - w) / 2.0, r.size.y / 2.0 + 6.0)
+	hud.draw_string(font, pos + Vector2(0, 1), s + more, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color(0, 0, 0, 0.7))
+	text(pos, s, 16, level_color())
+	text(pos + Vector2(font.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, 16).x, 0), more, 16, UI_TEXT)
+
+
+# The whole Level row, label included: the mouse over it shows draw_level_tip().
+func level_row() -> Rect2:
+	return Rect2(HOST_RECT.position.x, LEVEL_RECT.position.y, LEVEL_RECT.end.x - HOST_RECT.position.x, LEVEL_RECT.size.y)
+
+
+# Right of the menu: what the level does, and how (or why not) to change it.
+func draw_level_tip() -> void:
+	var lines := level_tip()
+	if can_pick_level():
+		lines.append("Click: next level (Easy, Normal, Hard, Insane).")
+	elif net_mode in ["client", "connecting", "map_offer"]:
+		lines.append("Only the host can change the level.")
+	else:
+		lines.append("The level can only change before wave 1.")
+	var r := Rect2(MENU_RECT.end.x + 8, LEVEL_RECT.position.y - 6, 370, 34 + lines.size() * 20 + 10)
+	hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.9), false, 1.0)
+	hud.draw_rect(r, Color(0.05, 0.05, 0.055, 0.92))
+	hud.draw_rect(r, UI_GOLD_DARK, false, 1.0)
+	text(r.position + Vector2(12, 24), "Level: " + level_name(), 16, level_color())
+	for j in lines.size():
+		text(r.position + Vector2(12, 48 + j * 20), lines[j], 14, UI_TEXT)
 
 
 func ed_draw_menu() -> void:

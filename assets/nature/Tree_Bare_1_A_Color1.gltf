@@ -15,24 +15,24 @@
     "nodes" : [
         {
             "mesh" : 0,
-            "name" : "Skeleton_Shield_Large_A"
+            "name" : "Tree_Bare_1_A_Color1"
         }
     ],
     "materials" : [
         {
-            "name" : "skeleton",
+            "name" : "forest",
             "pbrMetallicRoughness" : {
                 "baseColorTexture" : {
                     "index" : 0
                 },
                 "metallicFactor" : 0,
-                "roughnessFactor" : 0.5
+                "roughnessFactor" : 0.6000000238418579
             }
         }
     ],
     "meshes" : [
         {
-            "name" : "Cylinder.001",
+            "name" : "Tree_Bare_1_A_Color1",
             "primitives" : [
                 {
                     "attributes" : {
@@ -55,69 +55,69 @@
     "images" : [
         {
             "mimeType" : "image/png",
-            "name" : "skeleton_texture",
-            "uri" : "skeleton_texture.png"
+            "name" : "forest_texture",
+            "uri" : "forest_texture.png"
         }
     ],
     "accessors" : [
         {
             "bufferView" : 0,
             "componentType" : 5126,
-            "count" : 923,
+            "count" : 306,
             "max" : [
-                0.4408198893070221,
-                0.5674780011177063,
-                0.1931430995464325
+                0.6163973212242126,
+                2.5956156253814697,
+                0.4397116005420685
             ],
             "min" : [
-                -0.43632492423057556,
-                -0.5675097703933716,
-                -0.16934584081172943
+                -0.5122185945510864,
+                -0.26131799817085266,
+                -0.5943763256072998
             ],
             "type" : "VEC3"
         },
         {
             "bufferView" : 1,
             "componentType" : 5126,
-            "count" : 923,
+            "count" : 306,
             "type" : "VEC2"
         },
         {
             "bufferView" : 2,
             "componentType" : 5126,
-            "count" : 923,
+            "count" : 306,
             "type" : "VEC3"
         },
         {
             "bufferView" : 3,
             "componentType" : 5123,
-            "count" : 1878,
+            "count" : 972,
             "type" : "SCALAR"
         }
     ],
     "bufferViews" : [
         {
             "buffer" : 0,
-            "byteLength" : 11076,
+            "byteLength" : 3672,
             "byteOffset" : 0,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 7384,
-            "byteOffset" : 11076,
+            "byteLength" : 2448,
+            "byteOffset" : 3672,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 11076,
-            "byteOffset" : 18460,
+            "byteLength" : 3672,
+            "byteOffset" : 6120,
             "target" : 34962
         },
         {
             "buffer" : 0,
-            "byteLength" : 3756,
-            "byteOffset" : 29536,
+            "byteLength" : 1944,
+            "byteOffset" : 9792,
             "target" : 34963
         }
     ],
@@ -129,8 +129,8 @@
     ],
     "buffers" : [
         {
-            "byteLength" : 33292,
-            "uri" : "Skeleton_Shield_Large_A.bin"
+            "byteLength" : 11736,
+            "uri" : "Tree_Bare_1_A_Color1.bin"
         }
     ]
 }
