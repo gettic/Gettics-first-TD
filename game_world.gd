@@ -950,7 +950,7 @@ func update_visuals(delta: float) -> void:
 	range_disc.visible = false
 	ghost.visible = false
 	if selected != null:
-		show_range(selected.pos, TOWERS[selected.type]["range"][selected.level])
+		show_range(selected.pos, tower_data(selected.type, selected.path, selected.level)["range"][selected.level])
 	elif build_type != "" and not mouse_over_panel() and state == "playing":
 		var c := mouse_cell()
 		if in_map(c):
@@ -1267,10 +1267,13 @@ func launch_shot(t: Tower, target: Enemy, visual: bool) -> void:
 	s.target_pos = target.pos
 	s.type = t.type
 	s.level = t.level
+	s.path = t.path
 	s.owner = t.owner
 	s.visual = visual
 	if t.type == "cannon":
 		s.speed = 300.0
+	if t.path > 0 and t.level >= PATH_LEVEL:
+		s.speed *= PATHS[t.type][t.path - 1].get("shot_speed", 1.0)
 	if not shot_mats.has(t.type):
 		shot_mats[t.type] = mat(TOWERS[t.type]["color"], 2.0)
 		var ball := SphereMesh.new()

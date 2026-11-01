@@ -44,7 +44,10 @@ godot --path path/to/this/folder
 | **Left-click** on grass | Build the chosen tower |
 | **Left-click** on a tower | Select it |
 | **U** | Upgrade the selected tower |
+| **Q** / **E** or the 2 path buttons | Upgrade a level 4 tower to level 5 and pick its path (see Towers) |
 | **X** / **Delete** | Sell the selected tower (70% refund) |
+| **T** or the **Target** button in the tower panel | Change which monster the selected tower shoots (see Towers) |
+| **Shift+T** or **Shift+click** the Target button | The same, for all your towers of that type |
 | **W A S D** | Move the camera |
 | **Scroll wheel** | Zoom in and out |
 | **Space** | Start the game / send the next wave early (bonus gold, once the current wave has fully spawned; in multiplayer it's a vote, press again to take it back) |
@@ -66,6 +69,31 @@ Towers can be upgraded up to level 60. Above level 4 a tower keeps its level-4 l
 | **Frost** | 70g | Low damage, slows enemies down |
 | **Spark** | 120g | Lightning that jumps between several enemies |
 
+**Specializations.** The upgrade from level 4 to 5 picks one of the tower's 2 paths: with a level 4 tower of yours selected, the tower buttons turn into its 2 paths (**Q** and **E**, price and a short text; hover for the numbers). **U** only reminds you to pick. The path is for good: selling is the only way back. Both paths cost the same, and the tower panel shows its path's name. Each path multiplies the tower's normal numbers from level 5 on, and some extras grow at levels 20 and 40:
+
+| Tower | Path | Good against | What it does |
+|---|---|---|---|
+| Arrow | **Sniper** | Bosses, armored | Damage ×1.8, fires half as often, range ×1.25, faster arrows. Starts on Strongest |
+| Arrow | **Volley** | Crowds | Shoots 3 monsters at once (4 at level 20, 5 at 40), each arrow ×0.4 damage |
+| Cannon | **Big Bomb** | Bosses, packs | Damage ×1.8, fires 1.6× slower, blast ×1.3 |
+| Cannon | **Cluster** | Long lines | Damage ×0.85, plus 3 bomblets (4 at 20, 5 at 40) on monsters near the blast, each a small blast with full damage |
+| Frost | **Deep Freeze** | Holding monsters | Damage ×1.5, 25% chance to freeze a monster for 1 second (32% at 20, 40% at 40; bosses half as long) |
+| Frost | **Blizzard** | Area slow | Hits and slows every monster within 60 of the target (80 at 20, 100 at 40), damage ×0.5 |
+| Spark | **Storm** | Crowds | Chains to 3 more monsters, each jump keeps 90% of the damage (instead of 80%) and reaches further, damage ×0.9 |
+| Spark | **Overload** | Bosses | Damage ×2.4, fires 1.2× slower, chains to only 2 monsters. Starts on Strongest |
+
+**Targeting.** Each tower has a targeting mode that says which monster in range it shoots. Change it with **T** or the **Target** button in the tower panel (only on your own towers). **Shift** changes all your towers of that type at once. New towers start on **First**.
+
+| Mode | Shoots |
+|---|---|
+| **First** | The monster that has walked furthest. The path loops forever, so this is the oldest one, which has counted toward the limit the longest |
+| **Last** | The monster that has walked the least (the newest, near the gates) |
+| **Strongest** | The monster with the most health left |
+| **Fastest** | The fastest monster right now (slowed ones count as slow, so Frost on Fastest goes for the ones that aren't slowed yet) |
+| **Closest** | The monster nearest to the tower |
+
+When two monsters are equal, the one that has walked furthest is picked.
+
 ## Waves
 
 - **300 waves.** Monsters get tougher every wave: health grows fast up to wave 25, then by 2.5% a wave. Each gate sends one more monster per wave, up to 32.
@@ -80,7 +108,7 @@ You start with 150 gold. You earn gold for each kill and a bonus at the start of
 
 ## Leaderboard
 
-The **Leaderboard** button in the Esc menu shows the online top 10 for the Default map: the highest wave first, then won before lost, then the shortest game time. Each team (the same player names) has one entry, its best game. When a game on the Default map ends, the host sends the team's names and how the game went (wave, result, game time) to the game server. Only the released game sends scores: test runs and debug builds never do. Custom maps don't count.
+The **Leaderboard** button in the Esc menu shows the online top 10 for the Default map: the highest wave first, then won before lost, then the shortest game time. Each team (the same player names) has one entry, its best game. When a game on the Default map ends, the host sends the team's names and how the game went (wave, result, game time) to the game server. Only the released game sends scores: test runs and debug builds never do. Custom maps don't count. A balance change starts a new board, so old and new scores aren't mixed (the tower specializations started board 2).
 
 ## Map editor
 
@@ -146,7 +174,8 @@ The game code is split into a few files, each building on the one before:
 
 Good places to start:
 
-- `TOWER_BASE` in `game_base.gd` sets each tower's cost, damage, range and fire rate for levels 1-4. `LEVEL_GAIN`, `LEVEL_COST` and the other `LEVEL_` values set how the levels after that grow (`make_towers()` works them out).
+- `TOWER_BASE` in `game_base.gd` sets each tower's cost, damage, range and fire rate for levels 1-4. `LEVEL_GAIN`, `LEVEL_COST` and the other `LEVEL_` values set how the levels after that grow (`make_towers()` works them out). `PATHS` sets the 2 specializations of each tower (their numbers times the normal ones from level 5 on); their rules are in `update_towers()`, `fire_lightning()` and `shot_hit()` in `main.gd`.
+- `BOARD_SEASON` in `game_net.gd` is part of the leaderboard's name: raise it after a balance change, so new scores aren't mixed with old ones.
 - `GAME_SPEEDS` in `game_base.gd` are the speeds the **F** button goes through.
 - `wave_hp()`, `wave_count()`, `wave_income()` and `wave_bounty()` in `game_base.gd` set each wave's monster health, how many come out of each gate, the wave gold and the gold per kill.
 - `START_GOLD`, `MAX_ALIVE`, `WAVE_INTERVAL` and `MAX_WAVE` set the starting gold, the monster limit (per player), the time between waves and the number of waves.

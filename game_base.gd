@@ -107,6 +107,13 @@ const RELAY_URL := "https://gtd-relay.gtd-relay.workers.dev"
 # the rest are upgrade prices. Levels go on after 4 (see make_towers()): the
 # game uses TOWERS, which has every level up to MAX_LEVEL.
 const TOWER_TYPES := ["arrow", "cannon", "frost", "spark"]
+# Which monster in range a tower shoots (T or the button in the tower panel picks it).
+# The path loops forever, so "First" is the monster that has walked furthest: the
+# oldest one, which has counted toward the limit the longest. New towers use First.
+const TARGET_MODES := ["First", "Last", "Strongest", "Fastest", "Closest"]
+const TARGET_TIPS := ["The monster that has walked furthest.", "The monster that has walked the least.",
+		"The monster with the most health left.", "The fastest monster (slowed ones count as slow).",
+		"The monster nearest to the tower."]
 const TOWER_BASE := {
 	"arrow": {
 		"name": "Arrow", "color": Color(0.35, 0.85, 0.35),
@@ -156,7 +163,35 @@ const LEVEL_COST := 1.38
 const LEVEL_COST_BIG := 1.8
 const LEVEL_RANGE := 3.0  # range added a level, up to LEVEL_RANGE_MAX in all
 const LEVEL_RANGE_MAX := 60.0
-# Every tower level up to MAX_LEVEL, built from TOWER_BASE (same keys and shape)
+# Specializations: the upgrade to level 5 (index PATH_LEVEL) picks one of a
+# tower's 2 paths, for good (selling is the only way back). From then on its
+# numbers are the normal ones times the path's: "damage", "cooldown", "range"
+# and "splash" multiply, "chain_add" / "chain_set" change the chain. Lists of 3
+# are the path's extra at levels 5, 20 and 40 (see path_step()).
+const PATH_LEVEL := 4  # the first level index with a path (level 5)
+const PATHS := {
+	"arrow": [
+		{"name": "Sniper", "desc": "Long range, huge hits", "damage": 1.8, "cooldown": 2.0, "range": 1.25, "shot_speed": 2.5, "mode": 2},
+		{"name": "Volley", "desc": "Shoots 3 monsters at once", "damage": 0.4, "arrows": [3, 4, 5]},
+	],
+	"cannon": [
+		{"name": "Big Bomb", "desc": "Huge slow blasts", "damage": 1.8, "cooldown": 1.6, "splash": 1.3},
+		{"name": "Cluster", "desc": "Bomblets hit monsters nearby", "damage": 0.85, "bomblets": [3, 4, 5]},
+	],
+	"frost": [
+		{"name": "Deep Freeze", "desc": "Chance to freeze monsters", "damage": 1.5, "freeze": [0.25, 0.32, 0.4]},
+		{"name": "Blizzard", "desc": "Slows everything around the target", "damage": 0.5, "area": [60.0, 80.0, 100.0]},
+	],
+	"spark": [
+		{"name": "Storm", "desc": "Longer chains that fade less", "damage": 0.9, "chain_add": 3, "falloff": 0.9, "jump": 150.0},
+		{"name": "Overload", "desc": "One huge bolt, chains once", "damage": 2.4, "cooldown": 1.2, "chain_set": 2, "mode": 2},
+	],
+}
+const BOMBLET_REACH := 130.0  # Cluster: bomblets land on monsters this close to the blast...
+const BOMBLET_RADIUS := 45.0  # ...each a small blast this big
+const FREEZE_TIME := 1.0  # Deep Freeze: seconds a frozen monster stands still (bosses half)
+# Every tower level up to MAX_LEVEL, built from TOWER_BASE (same keys and shape).
+# TOWERS[type]["paths"] has the same for each of its 2 paths.
 var TOWERS := make_towers()
 
 # Interface layout (screen pixels): a resource bar along the top and a console along the bottom
@@ -174,6 +209,10 @@ const UPGRADE_RECT := Rect2(CARD_X, CARD_Y + CARD_SIZE + CARD_GAP, CARD_SIZE, CA
 const SELL_RECT := Rect2(CARD_X + (CARD_SIZE + CARD_GAP), CARD_Y + CARD_SIZE + CARD_GAP, CARD_SIZE, CARD_SIZE)
 const WAVE_RECT := Rect2(CARD_X + (CARD_SIZE + CARD_GAP) * 2, CARD_Y + CARD_SIZE + CARD_GAP, CARD_SIZE, CARD_SIZE)
 const SPEED_RECT := Rect2(CARD_X + (CARD_SIZE + CARD_GAP) * 3, CARD_Y + CARD_SIZE + CARD_GAP, CARD_SIZE, CARD_SIZE)
+const MODE_RECT := Rect2(STATS_X + 196, BAR_TOP + 50, 140, 24)  # the selected tower's targeting mode
+# Picking a path (a level 4 tower of yours selected): two wide buttons over the build row
+const PATH_RECTS := [Rect2(CARD_X, CARD_Y, CARD_SIZE * 2 + CARD_GAP, CARD_SIZE),
+		Rect2(CARD_X + (CARD_SIZE + CARD_GAP) * 2, CARD_Y, CARD_SIZE * 2 + CARD_GAP, CARD_SIZE)]
 const UPDATE_RECT := Rect2(560, 3, 240, 24)  # in the top bar
 const ARCH_R := 92.0  # the round arch over the portrait
 const ARCH_DROP := 62.0  # how far below the console's top its center is
@@ -242,6 +281,7 @@ class Enemy:
 	var color := Color.WHITE
 	var slow_factor := 1.0
 	var slow_time := 0.0
+	var freeze_time := 0.0  # Deep Freeze: stands still while above 0
 	var traveled := 0.0
 	var dead := false
 	var node: MeshInstance3D
@@ -258,6 +298,8 @@ class Tower:
 	var cooldown := 0.0
 	var spent := 0
 	var aim := Vector2.UP
+	var mode := 0  # which monster it shoots, an index in TARGET_MODES
+	var path := 0  # its specialization from level 5: 0 none yet, 1 or 2 (see PATHS)
 	var node: Node3D
 	var head: Node3D
 
@@ -268,6 +310,7 @@ class Shot:
 	var target_pos: Vector2
 	var type: String
 	var level := 0
+	var path := 0
 	var owner := 0
 	var visual := false  # other players' copy of a host's shot: just for show, does no damage
 	var speed := 420.0
@@ -761,8 +804,51 @@ func make_towers() -> Dictionary:
 				d["slow"].append(snappedf(0.15 + (d["slow"][top] - 0.15) * pow(0.95, n), 0.01))
 			if d.has("chain"):
 				d["chain"].append(mini(d["chain"][top] + n / 4, 12))
+		# Each path: the same levels, times the path's numbers from level 5 on
+		var paths := []
+		for p: Dictionary in PATHS[type]:
+			var pd: Dictionary = d.duplicate(true)
+			pd["name"] = p["name"]
+			pd["desc"] = p["desc"]
+			for lv in range(PATH_LEVEL, MAX_LEVEL):
+				pd["damage"][lv] = int(round_nicely(d["damage"][lv] * p.get("damage", 1.0)))
+				pd["cooldown"][lv] = snappedf(d["cooldown"][lv] * p.get("cooldown", 1.0), 0.01)
+				pd["range"][lv] = roundf(d["range"][lv] * p.get("range", 1.0))
+				if pd.has("splash"):
+					pd["splash"][lv] = roundf(d["splash"][lv] * p.get("splash", 1.0))
+				if pd.has("chain"):
+					pd["chain"][lv] = p["chain_set"] if p.has("chain_set") else mini(d["chain"][lv] + p.get("chain_add", 0), 15)
+			paths.append(pd)
+		d["paths"] = paths
 		out[type] = d
 	return out
+
+
+# A tower's numbers: its path's from level 5 on, the plain ones before.
+func tower_data(type: String, path: int, level: int) -> Dictionary:
+	if path <= 0 or level < PATH_LEVEL:
+		return TOWERS[type]
+	return TOWERS[type]["paths"][path - 1]
+
+
+# A path's extra that grows: the first of 3 values at levels 5-19, the second at 20-39, then the third.
+func path_step(level: int, values: Array) -> Variant:
+	return values[0 if level < 19 else (1 if level < 39 else 2)]
+
+
+# Does this tower's next upgrade pick its path?
+func needs_path(t: Tower) -> bool:
+	return t.level == PATH_LEVEL - 1 and t.path == 0
+
+
+# Is a level 4 tower of ours selected, so the command card shows its 2 paths?
+func picking_path() -> bool:
+	return selected != null and selected.owner == local_slot and needs_path(selected)
+
+
+# "Sniper" once an arrow tower has that path, "Arrow" before.
+func tower_name(t: Tower) -> String:
+	return tower_data(t.type, t.path, t.level)["name"]
 
 
 # Rounds to 2 significant digits above 100 (1234 -> 1200), so prices stay readable.

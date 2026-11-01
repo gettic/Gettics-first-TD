@@ -757,8 +757,10 @@ func draw_wave_info() -> void:
 
 # The selected tower: its picture, level and stats.
 func draw_selected() -> void:
-	var data: Dictionary = TOWERS[selected.type]
 	var lv := selected.level
+	var data := tower_data(selected.type, selected.path, lv)
+	# The next level's numbers (the same path; before level 5 the plain ones)
+	var after := tower_data(selected.type, selected.path, lv + 1)
 	hud.draw_texture_rect(portrait_view.get_texture(), PORTRAIT_RECT, false)
 	inner_shadow(PORTRAIT_RECT, 6, 0.4)
 	var x := float(STATS_X)
@@ -776,9 +778,10 @@ func draw_selected() -> void:
 		diamond(c, 5.5, data["color"])
 		text(Vector2(x + 20, BAR_TOP + 65), "Level %d" % (lv + 1), 17, UI_GOLD_LIGHT)
 	var mine := selected.owner == local_slot
-	var next := lv < MAX_LEVEL - 1 and mine
-	stat_row(Vector2(x, BAR_TOP + 96), "Damage", short(data["damage"][lv]), short(data["damage"][lv + 1]) if next else "")
-	stat_row(Vector2(x, BAR_TOP + 118), "Range", "%d" % data["range"][lv], "%d" % data["range"][lv + 1] if next else "")
+	# Before level 5 the next level depends on the path, so no "> next" then
+	var next := lv < MAX_LEVEL - 1 and mine and not needs_path(selected)
+	stat_row(Vector2(x, BAR_TOP + 96), "Damage", short(data["damage"][lv]), short(after["damage"][lv + 1]) if next else "")
+	stat_row(Vector2(x, BAR_TOP + 118), "Range", "%d" % data["range"][lv], "%d" % after["range"][lv + 1] if next else "")
 	stat_row(Vector2(x, BAR_TOP + 140), "Speed", "%.2fs" % data["cooldown"][lv], "")
 	var right := x + 196
 	hud.draw_multiline_string(font, Vector2(right, BAR_TOP + 96), data["desc"], HORIZONTAL_ALIGNMENT_LEFT, 130, 14, 2, UI_GREY)
@@ -786,6 +789,12 @@ func draw_selected() -> void:
 		text(Vector2(right, BAR_TOP + 140), "Built by %s" % name_of(selected.owner), 14, PLAYER_COLORS[selected.owner])
 	elif lv >= MAX_LEVEL - 1:
 		text(Vector2(right, BAR_TOP + 140), "Max level", 14, UI_GOLD_LIGHT)
+	elif needs_path(selected):
+		text(Vector2(right, BAR_TOP + 140), "Next: pick a path (Q / E)", 14, UI_GOLD_LIGHT)
+	# Targeting mode: a plain text button (placeholder until it gets an icon)
+	ui_button_bg(MODE_RECT, mine, false)
+	text(MODE_RECT.position + Vector2(5, 16), "T", 11, UI_GOLD_LIGHT if mine else UI_DIM)
+	text(MODE_RECT.position + Vector2(20, 17), "Target: " + TARGET_MODES[selected.mode], 14, UI_TEXT if mine else UI_DIM)
 
 
 # "Damage  120  > 250": the value now and, in green, after the next upgrade.
@@ -835,20 +844,31 @@ func hovered_card() -> int:
 	if menu_open or update_dialog != "":
 		return -1
 	var p := get_viewport().get_mouse_position()
+	# 9 and 10: the 2 path buttons over the build row (a level 4 tower of yours selected)
+	if picking_path():
+		for i in 2:
+			if PATH_RECTS[i].has_point(p):
+				return 9 + i
 	var rects := card_rects()
 	for i in rects.size():
 		if rects[i].has_point(p):
 			return i
+	# 8: the targeting mode button in the selected tower's panel
+	if selected != null and asks.is_empty() and MODE_RECT.has_point(p):
+		return 8
 	return -1
 
 
 func draw_command_card() -> void:
-	for i in TOWER_TYPES.size():
-		var data: Dictionary = TOWERS[TOWER_TYPES[i]]
-		var r := tower_button_rect(i)
-		var affordable: bool = gold >= data["cost"][0]
-		card_button(r, str(i + 1), data["name"], gold_text(data["cost"][0]), true, build_type == TOWER_TYPES[i], affordable)
-		gem(r.get_center() + Vector2(0, -2), 11.0, data["color"] if affordable else data["color"].darkened(0.4))
+	if picking_path():
+		draw_path_buttons()
+	else:
+		for i in TOWER_TYPES.size():
+			var data: Dictionary = TOWERS[TOWER_TYPES[i]]
+			var r := tower_button_rect(i)
+			var affordable: bool = gold >= data["cost"][0]
+			card_button(r, str(i + 1), data["name"], gold_text(data["cost"][0]), true, build_type == TOWER_TYPES[i], affordable)
+			gem(r.get_center() + Vector2(0, -2), 11.0, data["color"] if affordable else data["color"].darkened(0.4))
 	# Upgrade and Sell only work on your own selected tower
 	var mine := selected != null and selected.owner == local_slot
 	var up_label := "Upgrade"
@@ -860,6 +880,8 @@ func draw_command_card() -> void:
 		can_up = gold >= cost
 	elif mine:
 		up_label = "Max"
+	if picking_path():
+		up_label = "Q or E"  # level 5 picks a path: the 2 buttons above
 	card_button(UPGRADE_RECT, "U", up_label, up_cost, can_up, false, can_up)
 	icon_upgrade(UPGRADE_RECT.get_center() + Vector2(0, -2), UI_GOLD_LIGHT if can_up else UI_DIM)
 	card_button(SELL_RECT, "X", "Sell", "+" + gold_text(selected.spent * 0.7) if mine else "", mine, false, true)
@@ -870,6 +892,38 @@ func draw_command_card() -> void:
 	icon_flag(WAVE_RECT.get_center() + Vector2(0, -2), 12.0, can_wave)
 	card_button(SPEED_RECT, "F", "x%d" % game_speed, "", net_mode != "client", game_speed > 1, true)
 	icon_speed(SPEED_RECT.get_center() + Vector2(0, -2), UI_GOLD_LIGHT if net_mode != "client" else UI_DIM)
+
+
+# The selected level 4 tower's 2 paths, as wide buttons over the build row: hotkey,
+# price, name and a short line. Placeholder look (a gem with the path's number)
+# until the graphics get path icons.
+func draw_path_buttons() -> void:
+	var cost: int = TOWERS[selected.type]["cost"][selected.level + 1]
+	var affordable := gold >= cost
+	var col: Color = TOWERS[selected.type]["color"]
+	for i in 2:
+		var r: Rect2 = PATH_RECTS[i]
+		var p: Dictionary = PATHS[selected.type][i]
+		card_button(r, "Q" if i == 0 else "E", p["name"], gold_text(cost), true, false, affordable)
+		gem(r.position + Vector2(17, 32), 9.0, col if affordable else col.darkened(0.4))
+		text(r.position + Vector2(14, 36), str(i + 1), 11, Color(0, 0, 0, 0.8))
+		hud.draw_multiline_string(font, r.position + Vector2(32, 27), p["desc"], HORIZONTAL_ALIGNMENT_LEFT, r.size.x - 36, 10, 2, UI_GREY)
+
+
+# One line about what a path does besides its numbers.
+func path_extra(type: String, path: int) -> String:
+	var p: Dictionary = PATHS[type][path - 1]
+	var d := tower_data(type, path, PATH_LEVEL)
+	match p["name"]:
+		"Sniper": return "Faster arrows. Starts on Strongest."
+		"Volley": return "%d arrows (%d at level 20, %d at level 40)." % p["arrows"]
+		"Big Bomb": return "Blast radius %d (Cannon: %d)." % [d["splash"][PATH_LEVEL], TOWERS[type]["splash"][PATH_LEVEL]]
+		"Cluster": return "%d bomblets (%d at level 20, %d at level 40)." % p["bomblets"]
+		"Deep Freeze": return "Freezes 1s: %d%% chance (%d%% at 20, %d%% at 40)." % [roundi(p["freeze"][0] * 100), roundi(p["freeze"][1] * 100), roundi(p["freeze"][2] * 100)]
+		"Blizzard": return "Hits all within %d (%d at level 20, %d at level 40)." % p["area"]
+		"Storm": return "Chains to %d monsters, jumps further." % d["chain"][PATH_LEVEL]
+		"Overload": return "Chains to %d monsters. Starts on Strongest." % d["chain"][PATH_LEVEL]
+	return ""
 
 
 # Short label and corner text for the wave button: [label, corner].
@@ -931,8 +985,12 @@ func draw_card_tip(i: int) -> void:
 		title = "Upgrade (U)"
 		if selected == null or selected.owner != local_slot:
 			lines = ["Select one of your towers first."]
+		elif needs_path(selected):
+			title = "Upgrade to level 5: pick a path"
+			lines = ["Q: %s   E: %s" % [PATHS[selected.type][0]["name"], PATHS[selected.type][1]["name"]],
+					"The path is for good (selling is the only way back)."]
 		elif selected.level < MAX_LEVEL - 1:
-			var data: Dictionary = TOWERS[selected.type]
+			var data := tower_data(selected.type, selected.path, selected.level + 1)
 			title = "Upgrade to level %d (U)  -  %s gold" % [selected.level + 2, short(data["cost"][selected.level + 1])]
 			lines = ["Damage %s   Range %d" % [short(data["damage"][selected.level + 1]), data["range"][selected.level + 1]]]
 		else:
@@ -943,6 +1001,20 @@ func draw_card_tip(i: int) -> void:
 	elif i == 6:
 		title = "Next wave (SPACE)"
 		lines = [wave_tip(), next_wave_text()]
+	elif i == 9 or i == 10:
+		var p: Dictionary = PATHS[selected.type][i - 9]
+		var d := tower_data(selected.type, i - 8, PATH_LEVEL)
+		title = "%s (%s)  -  %s gold" % [p["name"], "Q" if i == 9 else "E", short(d["cost"][PATH_LEVEL])]
+		lines = [p["desc"] + ".", "Level 5: Damage %s   Range %d   Speed %.2fs" % [short(d["damage"][PATH_LEVEL]), d["range"][PATH_LEVEL], d["cooldown"][PATH_LEVEL]],
+				path_extra(selected.type, i - 8), "For good: selling is the only way back."]
+	elif i == 8:
+		title = "Target: %s (T)" % TARGET_MODES[selected.mode]
+		lines = ["Shoots: " + TARGET_TIPS[selected.mode]]
+		if selected.owner == local_slot:
+			lines.append_array(["Click or T: next mode. Shift: all your %s towers." % TOWERS[selected.type]["name"],
+					"First, Last, Strongest, Fastest, Closest"])
+		else:
+			lines.append("Only %s can change it." % name_of(selected.owner))
 	else:
 		title = "Game speed x%d (F)" % game_speed
 		lines = ["Only the host can change the speed."] if net_mode == "client" else ["Switches between x1, x2, x3 and x5 speed."]
@@ -1145,7 +1217,8 @@ func draw_public_games() -> void:
 		text(Vector2(left, REFRESH_RECT.end.y + 34), games_status, 15, UI_GREY)
 	for i in mini(public_games.size(), GAME_ROWS):
 		var g: Dictionary = public_games[i]
-		button(game_row_rect(i), "Join  %s      %d / %d players      wave %d" % [g.code, int(g.players), MAX_PLAYERS, int(g.wave)])
+		var most := clampi(int(g.get("max", MAX_PLAYERS)), 1, MAX_PLAYERS)  # older game servers don't say: 4
+		button(game_row_rect(i), "Join  %s      %d / %d players      wave %d" % [g.code, int(g.players), most, int(g.wave)])
 
 
 func draw_player_list(pos: Vector2) -> void:

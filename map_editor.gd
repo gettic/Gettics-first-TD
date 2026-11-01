@@ -51,6 +51,8 @@ var ed_dirty := false  # the 3D map needs building again
 var ed_changed := false  # changes since the last save or load
 var ed_painting := 0  # mouse button held on the map: 1 paints, 2 erases
 var ed_last_cell := Vector2i(-1, -1)
+const NO_CELL := Vector2i(-1000, -1000)
+var ed_drag_cell := NO_CELL  # the tile under the mouse at the drag's last event
 var ed_list_open := false
 var ed_list: Array = []  # names of the maps to load, Default first
 var ed_list_top := 0
@@ -383,6 +385,8 @@ func ed_show() -> void:
 	build_map()
 	if same_size:
 		camera_pan = pan
+	# build_map() put the camera back at its start (no zoom, no pan): put it where the player has it
+	camera.position = camera_focus + Vector3(camera_pan.x, 0.0, camera_pan.y) + (camera_home - camera_focus) * zoom
 
 
 func update_visuals(delta: float) -> void:
@@ -397,12 +401,13 @@ func update_visuals(delta: float) -> void:
 		map_name_input.visible = show_name
 	if editing:
 		# Grid lines always on, and every player's area in their color
+		# (stronger on Compatibility, which makes the same alpha look fainter)
 		grid_fade = 0.0
 		if not ground_mats.is_empty():
 			ground_mats[0].set_shader_parameter("grid", 1.0)
 		for slot in area_planes.size():
 			area_planes[slot].visible = ed_areas
-			area_planes[slot].material_override.albedo_color = Color(PLAYER_COLORS[slot], 0.035)
+			area_planes[slot].material_override.albedo_color = Color(PLAYER_COLORS[slot], 0.105 if compat else 0.035)
 
 
 # ---------------------------------------------------------------- editing
@@ -448,6 +453,32 @@ func ed_paint(c: Vector2i, dragging: bool) -> void:
 	ed_set(c, ch)
 	ed_changed = true
 	ed_update()
+
+
+# Paints every tile from the last tile the drag was on to c, one side-by-side
+# step at a time, so a fast drag doesn't skip tiles and the path stays joined up.
+# (The 3D map is built again once per frame, not once per tile: see ed_update().)
+func ed_drag(c: Vector2i) -> void:
+	var from := ed_drag_cell
+	ed_drag_cell = c
+	var d := c - from
+	var nx := absi(d.x)
+	var ny := absi(d.y)
+	if from == NO_CELL or nx + ny > 400:
+		ed_paint(c, true)
+		return
+	var cur := from
+	var ix := 0
+	var iy := 0
+	while ix < nx or iy < ny:
+		# Step along x or y, whichever keeps closer to the straight line
+		if iy >= ny or (ix < nx and (1 + 2 * ix) * ny < (1 + 2 * iy) * nx):
+			cur.x += signi(d.x)
+			ix += 1
+		else:
+			cur.y += signi(d.y)
+			iy += 1
+		ed_paint(cur, true)
 
 
 # Adds or removes columns on the right and rows at the bottom.
@@ -503,15 +534,19 @@ func editor_input(event: InputEvent) -> void:
 				else:
 					ed_painting = 1 if event.button_index == MOUSE_BUTTON_LEFT else 2
 					ed_last_cell = Vector2i(-1, -1)
-					ed_paint(mouse_cell(), false)
+					ed_drag_cell = mouse_cell()
+					ed_paint(ed_drag_cell, false)
 			MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN:
 				var step := -1 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1
 				if ed_list_open:
 					ed_list_top = clampi(ed_list_top + step, 0, maxi(ed_list.size() - ED_LIST_ROWS, 0))
 				elif not ed_over_console(p):
 					target_zoom = clampf(target_zoom + step * ZOOM_STEP, ZOOM_MIN, ZOOM_MAX)
-	elif event is InputEventMouseMotion and ed_painting != 0 and not ed_over_console(p):
-		ed_paint(mouse_cell(), true)
+	elif event is InputEventMouseMotion and ed_painting != 0:
+		if ed_over_console(p):
+			ed_drag_cell = NO_CELL
+		else:
+			ed_drag(mouse_cell())
 	elif event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode >= KEY_1 and event.keycode <= KEY_4:
 			ed_gate = event.keycode - KEY_1

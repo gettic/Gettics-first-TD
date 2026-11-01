@@ -211,6 +211,9 @@ func map_slots() -> int:
 	return MAX_PLAYERS - gate_cells.count(null)
 
 
+var game_info_sent := {}  # host: the last "info" sent to the game server
+
+
 # Why a map from the host can't be used, or "" if it's fine. Only plain text
 # of the right size gets as far as read_map().
 func offer_problem(title: Variant, host_name: Variant, rows: Variant) -> String:
@@ -423,10 +426,13 @@ func update_relay_host(delta: float) -> void:
 		net_status = "Lost the connection to the game server, so the other players were dropped."
 		flash("Lost the connection to the game server")
 		return
+	# Every 3 seconds, and right away when something in it changes (like the map)
+	var info := {"t": "info", "public": public_game, "players": player_count(), "wave": wave, "max": map_slots()}
 	game_info_timer -= delta
-	if game_info_timer <= 0.0:
+	if game_info_timer <= 0.0 or info != game_info_sent:
 		game_info_timer = 3.0
-		relay.send_text({"t": "info", "public": public_game, "players": player_count(), "wave": wave})
+		game_info_sent = info
+		relay.send_text(info)
 
 
 # Asks the game server for the public games with this version of the game.
@@ -472,7 +478,7 @@ func _on_games_listed(result: int, code: int, _headers: PackedStringArray, body:
 
 # Each board is named after the last wave and this number: raise it after a
 # balance change, so new scores aren't mixed with ones from the old rules.
-const BOARD_SEASON := 1
+const BOARD_SEASON := 2  # 2: tower specializations
 const BOARD_ROWS := 10
 
 var board_open := false  # the leaderboard box in the Esc menu
@@ -891,7 +897,7 @@ func send_players() -> void:
 
 
 func send_tower(t: Tower) -> void:
-	send_all("net_tower", [t.cell, t.type, t.level, t.owner, t.spent])
+	send_all("net_tower", [t.cell, t.type, t.level, t.owner, t.spent, t.mode, t.path])
 
 
 # Where every monster is, 9 bytes each (see net_snapshot). On the local network
@@ -926,7 +932,7 @@ func send_snapshot() -> void:
 			data.encode_u16(at + 2, clampi(roundi(e.pos.x * 32.0), 0, 65535))
 			data.encode_u16(at + 4, clampi(roundi(e.pos.y * 32.0), 0, 65535))
 			data.encode_u16(at + 6, clampi(roundi(e.hp / e.max_hp * 65535.0), 0, 65535))
-			data[at + 8] = ENEMY_KINDS.find(e.kind) | (128 if e.slow_time > 0.0 else 0)
+			data[at + 8] = ENEMY_KINDS.find(e.kind) | (128 if e.slow_time > 0.0 else 0) | (64 if e.freeze_time > 0.0 else 0)
 			at += 9
 		# The wave, timer and gold only go with the first message
 		send_all("net_snapshot", [info if start == 0 else [], data])
@@ -985,7 +991,7 @@ func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant) -
 	players[slot] = p
 	net_welcome.rpc_id(peer, slot, mine)
 	for t: Tower in towers.values():
-		net_tower.rpc_id(peer, t.cell, t.type, t.level, t.owner, t.spent)
+		net_tower.rpc_id(peer, t.cell, t.type, t.level, t.owner, t.spent, t.mode, t.path)
 	send_players()
 	chat_note("%s joined the game" % p.name)
 
@@ -1131,7 +1137,7 @@ func net_reset() -> void:
 
 
 @rpc("authority", "call_remote", "reliable")
-func net_tower(cell: Vector2i, type: String, level: int, owner_slot: int, spent: int) -> void:
+func net_tower(cell: Vector2i, type: String, level: int, owner_slot: int, spent: int, mode: int, path: int) -> void:
 	var t: Tower = towers.get(cell)
 	if t == null:
 		t = Tower.new()
@@ -1142,7 +1148,17 @@ func net_tower(cell: Vector2i, type: String, level: int, owner_slot: int, spent:
 	t.level = level
 	t.owner = owner_slot
 	t.spent = spent
+	t.mode = mode
+	t.path = path
 	build_tower_node(t)
+
+
+# A tower's targeting mode changed (only the panel shows it; the host does the aiming).
+@rpc("authority", "call_remote", "reliable")
+func net_tower_mode(cell: Vector2i, mode: int) -> void:
+	var t: Tower = towers.get(cell)
+	if t != null:
+		t.mode = mode
 
 
 @rpc("authority", "call_remote", "reliable")
@@ -1170,12 +1186,28 @@ func net_boom(pos: Vector2, r: float) -> void:
 	add_boom(pos, r)
 
 
+@rpc("authority", "call_remote", "unreliable_ordered")
+func net_frost_ring(pos: Vector2, r: float) -> void:
+	add_frost_ring(pos, r)
+
+
+# Blizzard's hit: a pale blue ring the size of its area. A placeholder (the
+# cannon's blast in ice colors) until the graphics get a real one; it fades
+# like the blast does (the "boom" effect in update_effects()).
+func add_frost_ring(pos: Vector2, r: float) -> void:
+	var m := mat(Color(0.55, 0.85, 1.0), 1.5, 0.5)
+	var node := add_mesh(self, boom_mesh, m, to3d(pos, 0.15))
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.scale = Vector3.ZERO
+	effects.append({"kind": "boom", "node": node, "mat": m, "radius": r, "time": 0.35, "max": 0.35})
+
+
 # Where the monsters are (some or all of them, see send_snapshot). The first
 # message of each update also has the wave, timer and everyone's gold.
 # data: the first monster's id (u32), the id after the last one this message
 # covers (u32, 0: no end), then per monster 9 bytes: id minus the first id
 # (u16), x and y in 1/32 pixels (u16 each), health share of 65535 (u16), and
-# its kind with 128 added when it's slowed (u8).
+# its kind with 128 added when it's slowed and 64 when it's frozen (u8).
 @rpc("authority", "call_remote", "unreliable_ordered")
 func net_snapshot(info: Array, data: PackedByteArray) -> void:
 	if net_mode != "client" or data.size() < 8:
@@ -1202,7 +1234,7 @@ func net_snapshot(info: Array, data: PackedByteArray) -> void:
 		var p := Vector2(data.decode_u16(at + 2), data.decode_u16(at + 4)) / 32.0
 		var e: Enemy = enemy_by_id.get(id)
 		if e == null:
-			e = make_enemy(ENEMY_KINDS[data[at + 8] & 127])
+			e = make_enemy(ENEMY_KINDS[data[at + 8] & 63])
 			e.id = id
 			e.pos = p
 			enemies.append(e)
@@ -1211,6 +1243,7 @@ func net_snapshot(info: Array, data: PackedByteArray) -> void:
 		e.max_hp = 1.0
 		e.hp = data.decode_u16(at + 6) / 65535.0
 		e.slow_time = 1.0 if data[at + 8] & 128 else 0.0
+		e.freeze_time = 1.0 if data[at + 8] & 64 else 0.0
 	# Monsters in this message's id range that the host no longer has were killed
 	for i in range(enemies.size() - 1, -1, -1):
 		var e := enemies[i]

@@ -10,6 +10,13 @@ func _ready() -> void:
 	use_map(read_map(DEFAULT_MAP))
 	build_world()
 	build_hud()
+	# Esc leaves the Esc menu's name and invite-code boxes, like the chat and map-name boxes
+	# (the next Esc closes the menu)
+	for box: LineEdit in [name_input, code_input]:
+		box.gui_input.connect(func(e: InputEvent) -> void:
+			if e is InputEventKey and e.pressed and e.keycode == KEY_ESCAPE:
+				box.release_focus()
+				box.accept_event())
 	multiplayer.peer_connected.connect(_on_peer_connected)
 	multiplayer.peer_disconnected.connect(_on_peer_disconnected)
 	multiplayer.connected_to_server.connect(_on_connected_to_host)
@@ -142,7 +149,7 @@ func spawn_enemy(kind: String, g: int) -> void:
 func _process(delta: float) -> void:
 	if debug_log:
 		update_log_window()
-	code_input.visible = menu_open and net_mode == "" and not editing and not ed_ask_open and not pick_open and not board_open
+	code_input.visible = menu_open and net_mode == "" and not editing and not ed_ask_open and not pick_open and not board_open and update_dialog == ""
 	name_input.visible = code_input.visible
 	if net_mode == "searching":
 		update_search(delta)
@@ -254,6 +261,10 @@ func update_enemies(dt: float) -> void:
 			e.slow_time -= dt
 			if e.slow_time <= 0.0:
 				e.slow_factor = 1.0
+		# Frozen by Deep Freeze: stands still
+		if e.freeze_time > 0.0:
+			e.freeze_time -= dt
+			continue
 		var move := e.speed * e.slow_factor * dt
 		while move > 0.0:
 			var target := e.route[e.wp]
@@ -277,8 +288,8 @@ func update_towers(dt: float) -> void:
 		t.cooldown -= dt
 		if t.cooldown > 0.0:
 			continue
-		var data: Dictionary = TOWERS[t.type]
-		var target := find_target(t.pos, data["range"][t.level])
+		var data := tower_data(t.type, t.path, t.level)
+		var target := find_target(t.pos, data["range"][t.level], t.mode)
 		if target == null:
 			continue
 		t.aim = (target.pos - t.pos).normalized()
@@ -286,32 +297,79 @@ func update_towers(dt: float) -> void:
 		t.cooldown = data["cooldown"][t.level] + maxf(t.cooldown, -dt)
 		if t.type == "spark":
 			fire_lightning(t, target)
+		elif t.type == "arrow" and t.path == 2 and t.level >= PATH_LEVEL:
+			# Volley: one arrow each at the best few monsters in range
+			for e in find_targets(t.pos, data["range"][t.level], t.mode, path_step(t.level, PATHS["arrow"][1]["arrows"])):
+				launch_shot(t, e, false)
+				send_all("net_shot", [t.cell, e.id])
 		else:
 			launch_shot(t, target, false)
 			send_all("net_shot", [t.cell, target.id])
 
 
-# Picks the enemy in range that is furthest along the path.
-func find_target(from: Vector2, rng: float) -> Enemy:
+# Picks the enemy in range that fits the tower's targeting mode best (see
+# TARGET_MODES). Ties go to the one that has walked furthest.
+func find_target(from: Vector2, rng: float, mode := 0) -> Enemy:
 	var best: Enemy = null
+	var best_score := -INF
+	var r2 := rng * rng
 	for e in enemies:
-		if not e.dead and e.pos.distance_to(from) <= rng:
-			if best == null or e.traveled > best.traveled:
-				best = e
+		if e.dead:
+			continue
+		var d2 := e.pos.distance_squared_to(from)
+		if d2 > r2:
+			continue
+		var s := target_score(e, d2, mode)
+		if best == null or s > best_score or (s == best_score and e.traveled > best.traveled):
+			best_score = s
+			best = e
 	return best
 
 
+# How much a tower in this targeting mode wants to shoot e (d2: its distance squared).
+func target_score(e: Enemy, d2: float, mode: int) -> float:
+	match mode:
+		1: return -e.traveled
+		2: return e.hp
+		3: return e.speed * e.slow_factor
+		4: return -d2
+	return e.traveled
+
+
+# Volley: the best n different monsters in range, by the targeting mode.
+func find_targets(from: Vector2, rng: float, mode: int, n: int) -> Array[Enemy]:
+	var list := []  # [score, traveled, enemy]
+	var r2 := rng * rng
+	for e in enemies:
+		if e.dead:
+			continue
+		var d2 := e.pos.distance_squared_to(from)
+		if d2 <= r2:
+			list.append([target_score(e, d2, mode), e.traveled, e])
+	list.sort_custom(func(a: Array, b: Array) -> bool: return a[0] > b[0] or (a[0] == b[0] and a[1] > b[1]))
+	var out: Array[Enemy] = []
+	for i in mini(n, list.size()):
+		out.append(list[i][2])
+	return out
+
+
 func fire_lightning(t: Tower, first: Enemy) -> void:
-	var data: Dictionary = TOWERS["spark"]
+	var data := tower_data("spark", t.path, t.level)
 	var dmg: float = data["damage"][t.level]
+	# Storm: each jump keeps more of the damage and reaches further
+	var falloff := 0.8
+	var jump := 110.0
+	if t.path > 0 and t.level >= PATH_LEVEL:
+		falloff = PATHS["spark"][t.path - 1].get("falloff", falloff)
+		jump = PATHS["spark"][t.path - 1].get("jump", jump)
 	var hit: Array[Enemy] = [first]
 	var points := PackedVector3Array([t.node.position + t.head.position + Vector3(0, 0.1, 0), first.node.position])
 	damage_enemy(first, dmg, t.owner)
 	var current := first
 	for i in range(data["chain"][t.level] - 1):
-		dmg *= 0.8
+		dmg *= falloff
 		var next: Enemy = null
-		var best_dist := 110.0
+		var best_dist := jump
 		for e in enemies:
 			if e.dead or hit.has(e):
 				continue
@@ -349,26 +407,60 @@ func update_shots(dt: float) -> void:
 
 
 func shot_hit(s: Shot) -> void:
-	var data: Dictionary = TOWERS[s.type]
+	var data := tower_data(s.type, s.path, s.level)
 	var dmg: float = data["damage"][s.level]
 	var alive := s.target != null and not s.target.dead
+	var path := s.path if s.level >= PATH_LEVEL else 0
 	match s.type:
 		"cannon":
 			var r: float = data["splash"][s.level]
+			var near := []  # Cluster: [traveled, monster] near the blast but outside it
 			for e in enemies:
-				if not e.dead and e.pos.distance_to(s.pos) <= r:
+				if e.dead:
+					continue
+				var d := e.pos.distance_to(s.pos)
+				if d <= r:
 					damage_enemy(e, dmg, s.owner)
-			add_boom(s.pos, r)
-			send_all("net_boom", [s.pos, r])
+				elif path == 2 and d <= BOMBLET_REACH:
+					near.append([e.traveled, e])
+			blast(s.pos, r)
+			if path == 2:
+				# Bomblets land on the monsters furthest along near the blast
+				near.sort_custom(func(a: Array, b: Array) -> bool: return a[0] > b[0])
+				for i in mini(path_step(s.level, PATHS["cannon"][1]["bomblets"]), near.size()):
+					var at: Vector2 = near[i][1].pos
+					for e in enemies:
+						if not e.dead and e.pos.distance_to(at) <= BOMBLET_RADIUS:
+							damage_enemy(e, dmg, s.owner)
+					blast(at, BOMBLET_RADIUS)
 		"frost":
 			if alive:
 				var slow: float = data["slow"][s.level]
-				s.target.slow_factor = minf(s.target.slow_factor, slow)
-				s.target.slow_time = 2.0
-				damage_enemy(s.target, dmg, s.owner)
+				var hit: Array[Enemy] = [s.target]
+				if path == 2:
+					# Blizzard: everything around the target
+					var area: float = path_step(s.level, PATHS["frost"][1]["area"])
+					hit = []
+					for e in enemies:
+						if not e.dead and e.pos.distance_to(s.target.pos) <= area:
+							hit.append(e)
+					add_frost_ring(s.target.pos, area)
+					send_all("net_frost_ring", [s.target.pos, area])
+				for e in hit:
+					e.slow_factor = minf(e.slow_factor, slow)
+					e.slow_time = 2.0
+					# Deep Freeze: a chance to stop it for a moment (bosses half as long)
+					if path == 1 and randf() < path_step(s.level, PATHS["frost"][0]["freeze"]):
+						e.freeze_time = FREEZE_TIME * (0.5 if e.kind == "boss" else 1.0)
+					damage_enemy(e, dmg, s.owner)
 		_:
 			if alive:
 				damage_enemy(s.target, dmg, s.owner)
+
+
+func blast(at: Vector2, r: float) -> void:
+	add_boom(at, r)
+	send_all("net_boom", [at, r])
 
 
 # The gold for a kill goes to the player who owns the tower that made it.
@@ -455,6 +547,12 @@ func _unhandled_input(event: InputEvent) -> void:
 				upgrade_selected()
 			KEY_X, KEY_DELETE:
 				sell_selected()
+			KEY_T:
+				cycle_target_mode(event.shift_pressed)
+			KEY_Q:
+				choose_path(1)
+			KEY_E:
+				choose_path(2)
 			KEY_F:
 				act("speed", [])
 			KEY_Y:
@@ -477,13 +575,21 @@ func on_click(p: Vector2) -> void:
 			answer_ask(false)
 			return
 	if over_panel(p):
-		for i in TOWER_TYPES.size():
-			if tower_button_rect(i).has_point(p):
-				choose_build(TOWER_TYPES[i])
+		# A level 4 tower of yours: the build row shows its 2 paths instead
+		if picking_path():
+			for i in 2:
+				if PATH_RECTS[i].has_point(p):
+					choose_path(i + 1)
+		else:
+			for i in TOWER_TYPES.size():
+				if tower_button_rect(i).has_point(p):
+					choose_build(TOWER_TYPES[i])
 		if selected != null and UPGRADE_RECT.has_point(p):
 			upgrade_selected()
 		if selected != null and SELL_RECT.has_point(p):
 			sell_selected()
+		if selected != null and asks.is_empty() and MODE_RECT.has_point(p):
+			cycle_target_mode(Input.is_key_pressed(KEY_SHIFT))
 		if WAVE_RECT.has_point(p):
 			act("wave", [])
 		if SPEED_RECT.has_point(p):
@@ -537,14 +643,36 @@ func try_build(c: Vector2i) -> void:
 
 
 func upgrade_selected() -> void:
-	if selected != null:
-		act("upgrade", [selected.cell])
+	if selected == null:
+		return
+	if needs_path(selected) and selected.owner == local_slot:
+		flash(path_hint(selected))
+		return
+	act("upgrade", [selected.cell])
+
+
+# Upgrades the selected level 4 tower to level 5 with path 1 or 2 (Q / E, or the path buttons).
+func choose_path(path: int) -> void:
+	if selected != null and needs_path(selected):
+		act("upgrade", [selected.cell, path])
+
+
+func path_hint(t: Tower) -> String:
+	var p: Array = PATHS[t.type]
+	return "Pick a path: Q %s or E %s" % [p[0]["name"], p[1]["name"]]
 
 
 func sell_selected() -> void:
 	if selected != null:
 		act("sell", [selected.cell])
 		selected = null
+
+
+# The selected tower shoots at the next kind of monster (see TARGET_MODES).
+# With Shift, all of your towers of that type switch to that mode too.
+func cycle_target_mode(all_of_type: bool) -> void:
+	if selected != null:
+		act("target", [selected.cell, (selected.mode + 1) % TARGET_MODES.size(), all_of_type])
 
 
 # ---------------------------------------------------------------- player actions
@@ -571,11 +699,17 @@ func perform(slot: int, action: String, args: Array) -> String:
 			if args.size() == 2 and args[0] is Vector2i and args[1] is String and TOWERS.has(args[1]):
 				return build_tower(slot, args[0], args[1])
 		"upgrade":
+			# [cell], or [cell, path] for the upgrade to level 5 (path 1 or 2)
 			if args.size() == 1 and args[0] is Vector2i:
-				return upgrade_tower(slot, args[0])
+				return upgrade_tower(slot, args[0], 0)
+			if args.size() == 2 and args[0] is Vector2i and args[1] is int:
+				return upgrade_tower(slot, args[0], args[1])
 		"sell":
 			if args.size() == 1 and args[0] is Vector2i:
 				return sell_tower(slot, args[0])
+		"target":
+			if args.size() == 3 and args[0] is Vector2i and args[1] is int and args[2] is bool:
+				return set_target_mode(slot, args[0], args[1], args[2])
 		"wave":
 			if state == "playing":
 				return call_wave(slot)
@@ -686,7 +820,9 @@ func build_tower(slot: int, c: Vector2i, type: String, allowed := false) -> Stri
 	return ""
 
 
-func upgrade_tower(slot: int, c: Vector2i) -> String:
+# path: 1 or 2 for the upgrade to level 5, which picks the tower's path for
+# good; 0 for every other upgrade.
+func upgrade_tower(slot: int, c: Vector2i, path: int) -> String:
 	var t: Tower = towers.get(c)
 	if t == null or state != "playing":
 		return ""
@@ -694,14 +830,42 @@ func upgrade_tower(slot: int, c: Vector2i) -> String:
 		return "That's %s's tower" % name_of(t.owner)
 	if t.level >= MAX_LEVEL - 1:
 		return "Already max level"
+	if needs_path(t) and path != 1 and path != 2:
+		return path_hint(t)
+	if not needs_path(t) and path != 0:
+		if t.path != 0:
+			return "This tower is already a %s" % tower_name(t)
+		return "Paths are picked at level 4"
 	var cost: int = TOWERS[t.type]["cost"][t.level + 1]
 	if players[slot].gold < cost:
 		return "Not enough gold"
 	players[slot].gold -= cost
 	t.spent += cost
 	t.level += 1
+	if path != 0:
+		t.path = path
+		# Sniper and Overload start on Strongest (the player can change it)
+		if PATHS[t.type][path - 1].has("mode"):
+			t.mode = PATHS[t.type][path - 1]["mode"]
 	build_tower_node(t)
 	send_tower(t)
+	return ""
+
+
+# Sets which monster a tower shoots; all_of_type: also every other tower of
+# that type the same player owns.
+func set_target_mode(slot: int, c: Vector2i, mode: int, all_of_type: bool) -> String:
+	var t: Tower = towers.get(c)
+	if t == null or state != "playing" or mode < 0 or mode >= TARGET_MODES.size():
+		return ""
+	if t.owner != slot:
+		return "That's %s's tower" % name_of(t.owner)
+	for other: Tower in towers.values():
+		if other == t or (all_of_type and other.owner == slot and other.type == t.type):
+			other.mode = mode
+			send_all("net_tower_mode", [other.cell, mode])
+	if all_of_type:
+		tell(slot, "All your %s towers: %s" % [TOWERS[t.type]["name"], TARGET_MODES[mode]])
 	return ""
 
 
