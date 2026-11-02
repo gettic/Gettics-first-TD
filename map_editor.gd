@@ -5,8 +5,8 @@ extends "res://game_ui.gd"
 
 const MapShare := preload("res://map_share.gd")  # map codes and QR codes
 
-# Esc menu: the editor button, left of Graphics, and the box asking before a game ends
-const EDITOR_RECT := Rect2(400, 50, 124, 28)
+# Esc menu: the editor button, under Profile (top left), and the box asking before a game ends
+const EDITOR_RECT := Rect2(400, 82, 124, 22)
 # Esc menu: the map being played and the difficulty level, under the title
 const MAP_PICK_RECT := Rect2(530, 125, 186, 27)
 const DAILY_RECT := Rect2(722, 125, 128, 27)  # the daily challenge, right of the map
@@ -795,7 +795,7 @@ func draw_menu() -> void:
 	if net_mode != "client":
 		button(DAILY_RECT, "Daily challenge", can_pick_map(), daily_date != "")
 	draw_level_row()
-	var free := not (pick_open or ed_ask_open or board_open or settings_open or save_open or load_open or net_mode == "map_offer")
+	var free := not (pick_open or ed_ask_open or board_open or settings_open or save_open or load_open or profile_open or net_mode == "map_offer")
 	if free and level_row().has_point(ui_mouse(true)):
 		draw_level_tip()
 	elif free and net_mode != "client" and DAILY_RECT.has_point(ui_mouse(true)):
@@ -819,6 +819,7 @@ func draw_menu() -> void:
 		draw_save_box()
 	if load_open:
 		draw_load_box()
+	draw_profile_boxes()
 	draw_share_boxes()
 
 
@@ -836,8 +837,8 @@ func menu_click(p: Vector2) -> void:
 	if share_open or not paste_map.is_empty():
 		share_boxes_click(p)
 		return
-	if board_open or settings_open or save_open or load_open:
-		super(p)  # the leaderboard, settings, Save or Load box gets the click
+	if board_open or settings_open or save_open or load_open or profile_open:
+		super(p)  # the leaderboard, settings, Save, Load or Profile box gets the click
 		return
 	if ed_ask_open:
 		if ED_ASK_YES_RECT.has_point(p):

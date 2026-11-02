@@ -16,10 +16,11 @@ Play alone or with up to 4 players: each player gets their own gate at a corner 
 
 **The art.** The 3D world has a hand-painted look (painted shaders, warm light, a forest and a lake around the board).
 
-- Free CC0 models from the KayKit packs by Kay Lousberg: trees, bushes, rocks and the skeleton mage boss with its walk. Painted CC0 grass and dirt textures by Cethiel.
+- Free CC0 models from the KayKit packs by Kay Lousberg: rocks and the skeleton mage boss with its walk. Painted CC0 grass and dirt textures by Cethiel.
 - Made for the game with a model kit: the Cannon and Poison towers (a new look at levels 1-5, 10, 15, 20, 30 and 40 for each path) and the skeleton warrior (with its walk and death).
 - By Gettic: the Arrow tower models, the logo and the game icon.
-- Some smaller things are still simple shapes built in code. The game has no sound files.
+- The trees and bushes are built in code with a painted leaf look (5 shapes in 2 greens).
+- The music and sound effects were made for the game too (see [Sound and music](#sound-and-music)). Some smaller things are still simple shapes built in code.
 
 All sources are in [assets/CREDITS.md](assets/CREDITS.md).
 
@@ -48,6 +49,7 @@ godot --path path/to/this/folder
 | Key / mouse | Action |
 |---|---|
 | **1–5** or click a tower button | Choose a tower to build (a grid shows on the grass while you place it) |
+| **Hover** a tower button | Shows the tower's info card (see [Towers](#towers)) |
 | **Left-click** on grass | Build the chosen tower |
 | **Left-click** on a tower | Select it |
 | **U** | Upgrade the selected tower |
@@ -65,7 +67,7 @@ godot --path path/to/this/folder
 | **Enter** | Chat: type, then **Enter** sends (**Esc** cancels). Game keys are off while you type |
 | **Alt + left-click** on the map or small map | **Ping** that spot for every player |
 | **Right-click** | Cancel |
-| **Esc** | Menu: pause, **Map**, **Daily challenge**, **Level**, **Leaderboard**, **Map editor**, multiplayer, **Save** / **Load** and [Settings](#settings) |
+| **Esc** | Menu: pause, **Profile**, **Map editor**, **Map**, **Daily challenge**, **Level**, **Leaderboard**, multiplayer, **Save** / **Load** and [Settings](#settings) |
 | **Daily challenge** button or **J** in the Esc menu | Start today's [Daily challenge](#daily-challenge) |
 | **F11** or **Alt+Enter** | Fullscreen or window (the game remembers your choice) |
 | **F5** / **F9** | Quick-save / quick-load (see [Saving and loading](#saving-and-loading)) |
@@ -75,7 +77,7 @@ godot --path path/to/this/folder
 
 ## Settings
 
-**Settings** in the **Esc** menu opens a box with one button per setting; click it for the next choice. The game remembers them.
+**Settings** in the **Esc** menu opens a box with one row per setting; click a button for the next choice, or click a slider bar to set the volume. The game remembers them.
 
 | Setting | Choices |
 |---|---|
@@ -83,6 +85,22 @@ godot --path path/to/this/folder
 | **Window** | Fullscreen or Windowed (also **F11** / **Alt+Enter**). The game starts in fullscreen the first time |
 | **3D resolution** | 100, 85, 75 or 50%: lower is faster |
 | **Anti-aliasing** | MSAA 2x, MSAA 4x, FXAA or Off |
+| **Music** | Slider, 0-100% in steps of 5 (starts at 70%) |
+| **Sound effects** | Slider, 0-100% in steps of 5 (starts at 80%) |
+| **Tutorial tips** | On or Off. Turning it On again starts the [tips](#tutorial-tips) over |
+
+## Sound and music
+
+The game has music and sound effects, made for the game. The music has a calm, a wave and a boss mood and fades from one to the next as the waves come and go. Sound effects cover shots, hits, deaths, abilities, waves, winning and losing, building, buttons, gifts and pings. Sounds off the screen are quieter. Set the volumes in [Settings](#settings).
+
+## Tutorial tips
+
+New players get short tips: a gold-framed card with an arrow to what it is about (a pulsing gold edge marks a console button). There are 11 tips, shown one at a time and each only once, when it is useful: the first build, where to build, **Space**, upgrading, targeting, the Esc menu, abilities, the monster limit, the level 5 paths, boss waves and the special waves from wave 31.
+
+- **Got it** closes a tip. **Skip all tips** turns them off.
+- Tips never pause the game. They are only on your own computer, also in multiplayer.
+- They hide while a menu, popup or tooltip is open.
+- New installs start with tips On. If you already had a settings file, they start Off. Turn them on in [Settings](#settings).
 
 ## Towers
 
@@ -97,6 +115,8 @@ Towers can be upgraded up to level 60. From level 5 on, every level adds 28-36% 
 | **Frost** | 70g | Less damage, but slows enemies down |
 | **Spark** | 120g | Lightning that jumps between several enemies |
 | **Poison** | 90g | Lobs a glob that leaves a green cloud on the path for 3 seconds (see below) |
+
+**Info cards.** Hover a build button (or its row in the build list) to see the tower's card: cost, damage per second, range and speed (with bars), its special, what it is good and weak against, the total cost and numbers at level 4, and both level 5 paths with their numbers.
 
 **Poison clouds.** Every monster inside takes damage over time (4 times a second), and poison goes through armor. Cloud size grows with the level. A monster is hurt by only one cloud of each tower at a time, but different Poison towers add up.
 
@@ -201,6 +221,22 @@ Every day (by UTC time) everyone gets the same challenge. To start it, click **D
 
 Picking another map ends the challenge; **R** after the end plays the same day again.
 
+Your daily wins in a row are your **streak**; the [Profile](#profile-and-achievements) shows it and your best one.
+
+## Profile and achievements
+
+Press **Esc** and click **Profile** (top left) to see your stats. They are your own, kept on your computer in `profile.cfg` (apart from the settings).
+
+- **Profile:** your name, games played, won / lost, time played, multiplayer games, monsters, bosses and gifts, Meteors and freezes, the best wave per Level (with wins, best endless wave and games), a **Daily** row (played, won, streak and best streak, twists) and, for each tower, how many you built and its share of the damage, with your favourite lit up. **Reset profile** asks first and deletes only the profile (not your name, settings or saves).
+- **Achievements:** 29 medals in 7 groups (**Levels, Endless, Daily, Abilities, Towers, Monsters, Together**). Tabs pick a group (**Left** / **Right** too). Earned medals show their date; the rest are dark "?" cards with a progress bar. Scroll with the wheel or **Page Up / Down**.
+- A new medal slides in under the top bar for 4 seconds (it waits while a menu is open).
+
+Rules:
+
+- Achievements, best waves and wins per Level only count on the **Default map** and the daily challenge's map. Games, kills, time and towers count on any map.
+- A win or an endless wave only counts if you were in the game by wave 60 (wave 8 in a daily).
+- A loaded game adds to your stats, but doesn't count as a new game.
+
 ## Saving and loading
 
 Playing alone, or as the host, you can save a game and go on with it later.
@@ -263,6 +299,7 @@ Up to 4 players can defend the map together: one player per gate on the map (the
 - **Everyone has their own abilities**: each player's Meteor and Freeze all have their own cooldowns (the host checks them). After a win, **only the host** can choose to keep going in endless mode.
 - **The host picks the Level** (before wave 1), for everyone: the other players see it, also when they join later, and a won or lost game goes on that level's leaderboard.
 - **The stats at the end** are counted by the host and sent to everyone once when the game ends, so all players see the same numbers (a player who left still shows up; a player who joins a slot later starts fresh).
+- **Profile:** the host counts achievements and stats for everyone and sends each player their update at every wave start and at the end of the game (see [Profile and achievements](#profile-and-achievements)).
 - In multiplayer, **Esc doesn't pause** the game.
 - **Saving:** only the host saves. To go on with a multiplayer save, the host loads it (alone, or hosting before anyone has joined) and invites everyone again. The game waits on hold, showing who it's waiting for. A player who joins gets their old place back: the one saved under their name, or else the first one nobody has taken, with its gold and towers. The host presses **Space** to go on; places nobody took keep their towers (still shooting) and gold, their gate stays closed, and their player can still join later.
 - **Names and chat:** type your name in the **Your name** box in the **Esc** menu (up to 16 letters; the game remembers it). Leave it empty and you get a random silly name, like *Sir Wobbles* or *Captain Noodle*. Two players with the same name get a number added. Press **Enter** to chat: messages show above the small map in the bottom-left, in each player's color, and fade after a few seconds.
@@ -298,13 +335,14 @@ The game code is split into a few files, each building on the one before:
 
 | File | What's in it |
 |---|---|
-| `game_base.gd` | All the settings (constants) and the game's shared state |
+| `game_base.gd` | All the settings (constants) and the game's shared state, the tutorial tips (`TIPS`) and the achievements (`ACHIEVEMENTS`) |
 | `game_updates.gd` | Checking for updates, unpacking the downloaded `.exe`, and the debug log window |
-| `game_world.gd` | The 3D world: map, gates, tower and monster models, shots and effects |
+| `game_audio.gd` | Music and sound effects |
+| `game_world.gd` | The 3D world: map, gates, trees, tower and monster models, shots and effects |
 | `game_net.gd` | Multiplayer: hosting, joining, invite codes, public games, the leaderboard |
-| `game_ui.gd` | The bottom console (small map, tower portrait, command buttons, wave preview), the Esc menu and its boxes (settings, leaderboard, save / load), the end stats and the replay timeline |
+| `game_ui.gd` | The bottom console (small map, tower portrait, command buttons, wave preview), the tower info cards, the tutorial tip card, the Esc menu and its boxes (settings, profile, achievements, leaderboard, save / load), the end stats and the replay timeline |
 | `map_editor.gd` | The map editor, saved maps, picking a map, and the share and pasted-map boxes |
-| `main.gd` | The game itself: waves, monsters walking, towers shooting, keys and clicks, saving and the replay |
+| `main.gd` | The game itself: waves, monsters walking, towers shooting, keys and clicks, tips, saving and the replay |
 
 `map_share.gd` isn't in that chain: it turns maps into map codes and QR codes (`map_to_code()`, `code_to_map()`, `qr_grid()`), and the game loads it with `preload()`.
 
@@ -329,6 +367,11 @@ Good places to start:
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.
 - `start_wave()` and `spawn_enemy()` in `main.gd` start each wave and give each monster kind its health, armor and gold.
 - `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting, haze and effects; `build_map()` the ground (painted grass and dirt, see `assets/shaders/ground.gdshader`) and the land around the board. Models get the painted look of `assets/shaders/painted.gdshader` (see `painted()`). `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Which model a tower level shows: `arrow_look()` and `ARROW_FROM` (Arrow), `kit_look()` and `KIT_FILES` (Cannon and Poison). Model files are in `assets/`, with their sources in `assets/CREDITS.md`.
+- Sound: `SOUNDS` (sound effects, files in `assets/sounds`), `MUSIC_LAYERS` and `MUSIC_MOODS` (music, files in `assets/music`) in `game_audio.gd`. `play_sound()` plays one. The volumes are saved in `settings.cfg` under `[audio]`.
+- Tutorial tips: the tips are `TIPS` in `game_base.gd`; when each one shows is in `tip_ready()` and `tip_done()` in `main.gd`; the card is `draw_tip_card()` in `game_ui.gd`. Saved in `settings.cfg` under `[tutorial]`.
+- Tower info cards: `tower_card()` and `draw_tower_card()` in `game_ui.gd` (every number comes from `TOWERS` and `PATHS`).
+- Achievements: `ACHIEVEMENTS` and `ACHIEVEMENT_GROUPS` in `game_base.gd`; stats are saved in `PROFILE_FILE` (`profile.cfg`). `JOIN_BY` and `JOIN_BY_DAILY` are the last waves you can join for a win to count.
+- Trees: `add_trees()` and `make_tree_kinds()` in `game_world.gd`, with the look in `assets/shaders/painted_leaves.gdshader`.
 - `RELAY_URL` in `game_base.gd` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used for games on your own network.
 - `GAME_FOLDER` and `GAME_NAME` in `game_base.gd` set the names of the folder and files the downloaded `.exe` unpacks into.
 - The game server is a small Cloudflare Worker, kept outside this repository.

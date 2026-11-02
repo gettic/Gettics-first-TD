@@ -18,10 +18,14 @@ The monsters' walks are posed once when the game starts (see `build_monsters()` 
 
 Made for this game: `shaders/pack_model.gdshader`, `shaders/ground.gdshader`, `shaders/water.gdshader`, `shaders/painted.gdshader`, `shaders/lake.gdshader`, `shaders/brew.gdshader`, `shaders/cloud.gdshader`, `shaders/shield.gdshader`, `shaders/heal_ring.gdshader`.
 
+Made for this game: `shaders/painted_leaves.gdshader` (for the trees and bushes, which are built in code; the KayKit `nature/Tree_*` and `nature/Bush_*` files are no longer used).
+
 Made for this game (by Claude, with a Python model kit of code-built shapes and painted textures): the Cannon tower, `towers/cannon/cannon_<path>_<look>.glb` (path 0: levels 1-4; path 1 Big Bomb and 2 Cluster: looks 5-10 for levels 5, 10, 15, 20, 30 and 40) and its shared textures `towers/cannon/cannon_atlas.jpg`, `cannon_team.jpg` and `cannon_glow.jpg` (the models are saved without their own copy); the Poison tower, `towers/poison/poison_<path>_<look>.glb` (path 0: levels 1-4; path 1 Venom and 2 Miasma: looks 5-10, the same levels as the cannon's) with `towers/poison/poison_team.jpg` and `poison_glow.jpg` (it shares the cannon's `cannon_atlas.jpg`); and the skeleton warrior `monsters/bone_warrior.glb` with its walk and death (its texture `monsters/bone_warrior_Skeleton.jpg` is taken out of it on import).
 
 Made by Gettic: `logo/logo.png` and the game icon `logo/icon.png`, `logo/icon.ico` (cut from his logo).
 
 Made by Gettic with an AI tool: the Arrow tower 0.02, `towers/arrow/archer_tower_L1.glb` to `archer_tower_L10.glb` (one per look), and their textures `towers/arrow/archer_tower_L1_*.jpg` (taken out of `archer_tower_L1.glb` at full size; the other models use the same textures, so they're imported without their own copy).
+
+Made for this game (synthesized with a script, no outside sources): all the music in `music/` and all the sound effects in `sounds/`.
 
 Crediting isn't required by CC0, but thank you, Kay Lousberg and Cethiel.

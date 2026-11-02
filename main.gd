@@ -8,7 +8,11 @@ func _ready() -> void:
 	font = ThemeDB.fallback_font
 	# The path, gates, routes and areas come from the map (see read_map())
 	use_map(read_map(DEFAULT_MAP))
+	# Before build_world(), which writes settings.cfg on the first start
+	var had_settings := FileAccess.file_exists(SETTINGS_FILE)
 	build_world()
+	load_tutorial(had_settings)
+	load_profile()
 	build_hud()
 	# Esc leaves the Esc menu's name and invite-code boxes, like the chat and map-name boxes
 	# (the next Esc closes the menu)
@@ -44,6 +48,7 @@ func new_game() -> void:
 			stat_start[p.slot] = p.gold
 			stat_names[p.slot] = name_of(p.slot)
 	wave = 0
+	prog = [{}, {}, {}, {}]
 	endless = false
 	from_save = false
 	held = false
@@ -77,6 +82,10 @@ func start_wave() -> void:
 	if state != "playing" or wave >= last_wave():
 		return
 	var skipped := int(maxf(next_wave_timer, 0.0)) if wave > 0 else 0
+	# Notes who is in the game before this wave (see prog_for())
+	for p in players:
+		if p != null:
+			prog_for(p.slot)
 	wave += 1
 	wave_votes.clear()
 	var income := wave_income(wave)
@@ -98,6 +107,7 @@ func start_wave() -> void:
 		if players[g] != null:
 			for i in count:
 				spawn_queues[g].append(kind)
+	profile_wave_start()
 	autosave()
 
 
@@ -242,12 +252,179 @@ func daily_allows(type: String) -> bool:
 func menu_daily() -> void:
 	if can_pick_map():
 		flash(start_daily())
+		play_sound("daily_start")
 	elif net_mode == "host" and player_count() > 1:
 		flash("The daily challenge can only start while nobody has joined")
 	elif net_mode == "client":
 		flash("Only the host can start the daily challenge")
 	else:
 		flash("The daily challenge can only start before wave 1")
+
+
+# ---------------------------------------------------------------- tutorial tips
+# See TIPS in game_base.gd. Every TIP_POLL seconds of play, update_tips() looks at
+# what this computer sees (the same for a player alone, the host and the other
+# players, so nothing is sent): a tip that's done (the player did it, or already
+# knows how) counts as seen without showing; a tip whose moment has come joins
+# the queue; a waiting tip whose moment has passed leaves it again. The tip on
+# screen stays until Got it, Skip all, or the player does what it says.
+
+const TIP_POLL := 0.5
+const TIP_START := 1.0  # seconds of play before the first tip
+var tip_timer := 0.0
+var tip_played := 0.0
+
+
+func update_tips(delta: float) -> void:
+	if not tips_on or replay_on or editing or held or state != "playing" or net_mode in ["searching", "connecting", "map_offer"]:
+		return
+	tip_played += delta
+	tip_timer -= delta
+	if tip_timer > 0.0 or tip_played < TIP_START or tips_seen.size() >= TIPS.size():
+		return
+	tip_timer = TIP_POLL
+	var mine := my_tower_summary()
+	var changed := false
+	for id: String in TIPS:
+		if id in tips_seen:
+			continue
+		if tip_done(id, mine):
+			tips_seen.append(id)
+			tip_queue.erase(id)
+			changed = true
+		elif tip_ready(id, mine):
+			if not id in tip_queue:
+				tip_queue.append(id)
+		elif id in tip_queue and tip_queue[0] != id:
+			tip_queue.erase(id)
+	if changed:
+		save_tutorial()
+
+
+# This player's towers, for the tips: how many, whether one is upgraded or has a
+# path, and one they can afford to upgrade and one waiting for its path (or null).
+func my_tower_summary() -> Dictionary:
+	var s := {"count": 0, "upgraded": false, "path_picked": false, "can_upgrade": null, "needs_path": null}
+	for t: Tower in towers.values():
+		if t.owner != local_slot:
+			continue
+		s.count += 1
+		if t.level > 0:
+			s.upgraded = true
+		elif s.can_upgrade == null and gold >= TOWERS[t.type]["cost"][1]:
+			s.can_upgrade = t
+		if t.path != 0:
+			s.path_picked = true
+		if needs_path(t):
+			s.needs_path = t
+	return s
+
+
+# Has the player already done what tip id teaches?
+func tip_done(id: String, mine: Dictionary) -> bool:
+	match id:
+		"build":
+			return mine.count > 0 or build_type != ""
+		"place":
+			return mine.count > 0
+		"wave":
+			return wave > 0
+		"upgrade":
+			return mine.upgraded
+		"abilities":
+			return ability_left(local_slot, "meteor") > 0.0 or ability_left(local_slot, "freeze") > 0.0
+		"path":
+			return mine.path_picked
+	return false  # the others: Got it (menu and target also when used, see tip_learned())
+
+
+# Is now the moment for tip id?
+func tip_ready(id: String, mine: Dictionary) -> bool:
+	match id:
+		"build":
+			return mine.count == 0
+		"place":
+			return build_type != ""
+		"wave":
+			return mine.count > 0 and wave == 0
+		"menu":
+			return wave >= 2
+		"upgrade":
+			if wave >= 1 and mine.can_upgrade != null:
+				tip_spots[id] = mine.can_upgrade.pos
+				return true
+		"target":
+			return selected != null and selected.owner == local_slot and "upgrade" in tips_seen
+		"abilities":
+			return wave >= 3
+		"limit":
+			return alive_count() * 5 >= max_alive() * 2
+		"path":
+			if mine.needs_path != null:
+				tip_spots[id] = mine.needs_path.pos
+				return true
+		"boss":
+			return wave >= 1 and (kind_for_wave(wave) == "boss" or (wave < last_wave() and kind_for_wave(wave + 1) == "boss"))
+		"special":
+			return wave >= 1 and (wave_special(wave) != "" or (wave < last_wave() and wave_special(wave + 1) != ""))
+	return false
+
+
+# The player just used what tip id teaches (Esc menu, T): it won't be needed.
+func tip_learned(id: String) -> void:
+	if tips_on and not id in tips_seen:
+		tips_seen.append(id)
+		tip_queue.erase(id)
+		save_tutorial()
+
+
+# No tips in the map editor or the replay (game_base.gd: only while playing).
+func current_tip() -> Dictionary:
+	if editing or replay_on:
+		return {}
+	return super()
+
+
+# At startup. had_settings: settings.cfg was there before this start. Without a
+# [tutorial] section, a new player (no settings.cfg) gets the tips On, a player
+# from before the tips Off. The section is written right away, so the next start
+# knows.
+func load_tutorial(had_settings: bool) -> void:
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS_FILE)
+	read_tutorial(cfg, had_settings)
+	if not cfg.has_section("tutorial"):
+		save_tutorial()
+
+
+func read_tutorial(cfg: ConfigFile, had_settings: bool) -> void:
+	tips_seen = []
+	tip_queue.clear()
+	if not cfg.has_section("tutorial"):
+		tips_on = not had_settings
+		return
+	var on: Variant = cfg.get_value("tutorial", "on", true)
+	tips_on = on if on is bool else true
+	var seen: Variant = cfg.get_value("tutorial", "seen", [])
+	if seen is Array or seen is PackedStringArray:
+		for id: Variant in seen:
+			if (id is String or id is StringName) and TIPS.has(str(id)) and not str(id) in tips_seen:
+				tips_seen.append(str(id))
+
+
+func write_tutorial(cfg: ConfigFile) -> void:
+	cfg.set_value("tutorial", "on", tips_on)
+	cfg.set_value("tutorial", "seen", tips_seen)
+
+
+# Headless runs (error checks, tests) never write the player's settings.
+func save_tutorial() -> void:
+	if DisplayServer.get_name() == "headless":
+		return
+	var cfg := ConfigFile.new()
+	cfg.load(SETTINGS_FILE)  # keeps the other settings
+	write_tutorial(cfg)
+	cfg.save(SETTINGS_FILE)
 
 
 # ---------------------------------------------------------------- update
@@ -282,6 +459,7 @@ func _process(delta: float) -> void:
 		hud.queue_redraw()
 		return
 	message_time = maxf(message_time - delta, 0.0)
+	update_tips(delta)
 	# Watching the replay: the game is over, the replay drives the monsters and shots
 	if replay_on:
 		replay_update(delta)
@@ -299,6 +477,9 @@ func _process(delta: float) -> void:
 		hud.queue_redraw()
 		return
 	update_effects(delta)
+	# The profile's play time (every computer: real seconds of a game going on)
+	if state == "playing" and wave > 0 and not held and not editing:
+		profile_seconds += delta
 	var dt := delta * game_speed
 	if net_mode == "client":
 		# The host runs the game. Here monsters just glide to where the host says
@@ -331,6 +512,7 @@ func _process(delta: float) -> void:
 			# The stats screen: made once, and sent once to the other players
 			end_stats = make_end_stats()
 			send_all("net_stats", [end_stats])
+			profile_game_end()
 	# A loaded game on hold (see load_game()): nothing moves, nothing is recorded or timed
 	if not held:
 		record_frame(dt)
@@ -677,6 +859,8 @@ func damage_enemy(e: Enemy, amount: float, owner_slot: int, t: Tower = null, pie
 			stat_damage[owner_slot] += took
 			if t != null:
 				t.dealt += took
+			if e.shield <= 0.0:
+				prog_add(owner_slot, "shields")
 			if amount <= 0.0:
 				return
 	# Armor removes a flat amount, but at least 25% of the hit always goes through.
@@ -695,6 +879,7 @@ func damage_enemy(e: Enemy, amount: float, owner_slot: int, t: Tower = null, pie
 		if t != null:
 			t.kills += 1
 		give_gold(owner_slot, e.bounty)
+		profile_kill(e, owner_slot, t)
 
 
 # Wave and kill gold for a player (kept below GOLD_MAX, for endless mode).
@@ -850,6 +1035,8 @@ func _unhandled_input(event: InputEvent) -> void:
 			aiming = ""
 			return
 		toggle_menu()
+		if menu_open:
+			tip_learned("menu")
 		return
 	if log_window and event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F12:
 		log_window.visible = not log_window.visible
@@ -952,6 +1139,8 @@ func use_ability(ability: String) -> void:
 
 
 func on_click(p: Vector2) -> void:
+	if tip_click(p):
+		return
 	if state == "won" and not endless and keep_going_rect().has_point(p):
 		act("endless", [])
 		return
@@ -1088,6 +1277,8 @@ func sell_selected() -> void:
 func cycle_target_mode(all_of_type: bool) -> void:
 	if selected != null:
 		act("target", [selected.cell, (selected.mode + 1) % TARGET_MODES.size(), all_of_type])
+		if selected.owner == local_slot:
+			tip_learned("target")
 
 
 # ---------------------------------------------------------------- player actions
@@ -1153,7 +1344,13 @@ func perform(slot: int, action: String, args: Array) -> String:
 		"gift":
 			# [to slot, amount] (see gift_gold() in game_net.gd)
 			if args.size() == 2 and args[0] is int and args[1] is int:
-				return gift_gold(slot, args[0], args[1])
+				var given_before: int = stat_gifted[slot]
+				var error := gift_gold(slot, args[0], args[1])
+				if error == "" and stat_gifted[slot] < given_before:
+					prog_add(slot, "gifts_given")
+					prog_add(args[0], "gifts_received")
+					earn(slot, "first_gift")
+				return error
 	return ""
 
 
@@ -1175,11 +1372,23 @@ func do_ability(slot: int, ability: String, at: Vector2) -> String:
 			var r: float = ABILITIES["meteor"]["radius"]
 			# Armor doesn't stop it (shields do)
 			var dmg := meteor_damage()
+			var kills_before: int = stat_kills[slot]
 			for e in enemies:
 				if not e.dead and e.pos.distance_to(at) <= r:
 					damage_enemy(e, dmg, slot, null, true)
+			prog_add(slot, "meteors")
+			if stat_kills[slot] - kills_before >= 20:
+				earn(slot, "meteor_20")
 		"freeze":
+			var on_map := 0
+			for e in enemies:
+				if not e.dead:
+					on_map += 1
 			freeze_all()
+			prog_add(slot, "freezes")
+			if on_map >= 40:
+				earn(slot, "freeze_40")
+	prog_for(slot).used = true
 	start_cooldown(slot, ability)
 	show_ability(slot, ability, at)
 	send_ability(slot, ability, at)
@@ -1205,6 +1414,7 @@ func keep_going(slot: int) -> String:
 	flash(text)
 	send_all("net_message", [text])
 	send_endless()
+	play_sound("endless_start")
 	return ""
 
 
@@ -1331,6 +1541,9 @@ func build_tower(slot: int, c: Vector2i, type: String, allowed := false) -> Stri
 	towers[c] = t
 	build_tower_node(t)
 	send_tower(t)
+	prog_add(slot, "built_" + type)
+	if type == "frost":
+		prog_for(slot).frost = true
 	return ""
 
 
@@ -1364,6 +1577,7 @@ func upgrade_tower(slot: int, c: Vector2i, path: int) -> String:
 			t.mode = PATHS[t.type][path - 1]["mode"]
 	build_tower_node(t)
 	send_tower(t)
+	profile_upgrade(t)
 	return ""
 
 
@@ -1497,12 +1711,14 @@ func named_save_count() -> int:
 # The Esc menu's Save (and F5): saves, and says how it went.
 func menu_save(save_name: String) -> void:
 	var problem := save_game(save_name)
+	play_sound("save" if problem == "" else "denied")
 	flash(problem if problem != "" else "Saved \"%s\"" % clean_text(save_name, SAVE_NAME_MAX))
 
 
 # The Esc menu's Load (and F9).
 func menu_load(save_name: String) -> void:
 	var problem := load_game(save_name)
+	play_sound("load" if problem == "" else "denied")
 	if problem != "":
 		flash(problem)
 
@@ -1564,6 +1780,7 @@ func autosave() -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_WM_CLOSE_REQUEST:
 		autosave()
+		save_profile()
 
 
 func pack_fields(o: Object, fields: Array) -> Dictionary:
@@ -1606,7 +1823,7 @@ func make_save() -> Dictionary:
 			"spawn_queues": spawn_queues.duplicate(true), "spawn_timers": spawn_timers.duplicate(),
 			"next_enemy_id": next_enemy_id, "host_slot": local_slot, "players": list, "towers": tower_list,
 			"enemies": monsters, "clouds": clouds.duplicate(true), "cloud_tick": cloud_tick, "cloud_turn": cloud_turn,
-			"from_save": from_save,
+			"from_save": from_save, "progress": save_progress(),
 			"stats": {"kills": stat_kills, "damage": stat_damage, "start": stat_start, "earned": stat_earned,
 					"spent": stat_spent, "gifted": stat_gifted, "names": stat_names, "sold": sold}}
 
@@ -1781,6 +1998,7 @@ func apply_save(d: Dictionary, m: Dictionary) -> void:
 				show_cloud(cloud.pos, cloud.r, cloud.time, 2 if cloud.weak > 0.0 else 0)
 	cloud_tick = float(d.get("cloud_tick")) if d.get("cloud_tick") is float else 0.0
 	cloud_turn = posmod(d.get("cloud_turn"), 4) if d.get("cloud_turn") is int else 0
+	load_progress(d.get("progress"))
 	from_save = true
 	held = wave > 0
 	held_note = ""
@@ -1838,7 +2056,231 @@ func restore_saved_player(p: Player) -> bool:
 	p.gold = s.gold
 	p.cooldowns = s.cooldowns.duplicate()
 	stat_names[p.slot] = p.name
+	# Their join wave and flags as saved (see load_progress())
+	if prog[p.slot].has("join") and prog[p.slot].get("who") == null:
+		prog[p.slot].who = p
 	return true
+
+
+# ---------------------------------------------------------------- achievements and profile (host)
+# See ACHIEVEMENTS and apply_profile_update() in game_base.gd. The host (or a
+# player alone) keeps a record per player slot in prog (see prog_for()): when they
+# joined, whether they used an ability or built a Frost tower, and the counters
+# since their last profile update. The hooks are cheap and never run per hit:
+# kills and broken shields (damage_enemy()), Meteor and Freeze all (do_ability()),
+# builds, upgrades and gifts. At every wave start and at the end of a game each
+# player gets their update (profile_update()). A loaded game keeps the records
+# (save_progress() / load_progress()), so it counts on, but not as a new game.
+
+const KILL_KEYS := {"arrow": "kills_arrow", "cannon": "kills_cannon", "frost": "kills_frost", "spark": "kills_spark", "poison": "kills_poison"}
+const WIN_ACHIEVEMENTS := ["easy_win", "normal_win", "hard_win", "insane_win"]  # per level
+
+# Host: per slot {who (the Player it's about), join (the wave they joined in),
+# counted (their games played has this game), used (Meteor or Freeze all), frost
+# (built a Frost tower), add (counters not sent yet), earned (ids not sent yet),
+# sent (ids already judged this game), dmg (tower damage per type already counted)}.
+var prog: Array = [{}, {}, {}, {}]
+
+
+# A slot's record. Someone new in the slot (a player who joined, or came back)
+# starts a new one, joined in this wave.
+func prog_for(slot: int) -> Dictionary:
+	var p: Player = players[slot]
+	var rec: Dictionary = prog[slot]
+	if rec.is_empty() or rec.get("who") != p:
+		rec = {"who": p, "join": wave, "counted": false, "used": false, "frost": false, "add": {}, "earned": [], "sent": {}, "dmg": {}}
+		prog[slot] = rec
+	return rec
+
+
+func prog_add(slot: int, key: String, n := 1) -> void:
+	if slot < 0 or slot >= MAX_PLAYERS:
+		return
+	var add: Dictionary = prog_for(slot).add
+	add[key] = add.get(key, 0) + n
+
+
+# Achievements, best waves and level wins count on the Default map and the daily
+# challenge's map (daily_date is only set on that day's map), not on custom maps.
+func map_counts() -> bool:
+	return daily_date != "" or map_rows_text == DEFAULT_MAP
+
+
+# In the game early enough for a win or an endless wave to count.
+func were_there(rec: Dictionary) -> bool:
+	return rec.join <= (JOIN_BY_DAILY if daily_date != "" else JOIN_BY)
+
+
+# Host: a player earned an achievement (on a map that counts). The host's own
+# shows right away; the others' go with their next update.
+func earn(slot: int, id: String) -> void:
+	if not map_counts() or players[slot] == null:
+		return
+	var rec := prog_for(slot)
+	if rec.sent.has(id):
+		return
+	rec.sent[id] = true
+	if slot == local_slot:
+		apply_profile_update({"earned": [id]})
+	else:
+		rec.earned.append(id)
+
+
+# A monster died (damage_enemy()): slot's counters.
+func profile_kill(e: Enemy, slot: int, t: Tower) -> void:
+	var add: Dictionary = prog_for(slot).add
+	add["kills"] = add.get("kills", 0) + 1
+	if e.kind == "boss":
+		add["bosses"] = add.get("bosses", 0) + 1
+	if e.special == "splitling":
+		add["splitlings"] = add.get("splitlings", 0) + 1
+	elif e.special == "heal":
+		add["healers"] = add.get("healers", 0) + 1
+	if t != null:
+		var key: String = KILL_KEYS[t.type]
+		add[key] = add.get(key, 0) + 1
+		if t.type == "poison":
+			add["poison_kills"] = add.get("poison_kills", 0) + 1
+
+
+# A tower was upgraded (upgrade_tower()): Maxed Out and One of Each.
+func profile_upgrade(t: Tower) -> void:
+	if not map_counts():
+		return
+	if t.level + 1 >= 30:
+		earn(t.owner, "maxed_out")
+	if t.level >= PATH_LEVEL and not prog_for(t.owner).sent.has("one_of_each"):
+		var types := {}
+		for o: Tower in towers.values():
+			if o.owner == t.owner and o.level >= PATH_LEVEL:
+				types[o.type] = true
+		if types.size() >= TOWER_TYPES.size():
+			earn(t.owner, "one_of_each")
+
+
+# Host, at every wave start: the wave achievements, then everyone's update.
+func profile_wave_start() -> void:
+	if net_mode == "client":
+		return
+	for p in players:
+		if p == null:
+			continue
+		var rec := prog_for(p.slot)
+		if daily_date == "" and wave >= 30:
+			earn(p.slot, "warming_up")
+		if daily_date == "" and difficulty == DIFFICULTIES.size() - 1 and wave >= 150:
+			earn(p.slot, "insane_150")
+		if endless and were_there(rec):
+			for goal: int in [400, 500, 600]:
+				if wave >= goal:
+					earn(p.slot, "endless_%d" % goal)
+		if wave >= 100 and player_count() >= 2:
+			earn(p.slot, "together_100")
+		if wave >= 50 and player_count() >= MAX_PLAYERS:
+			earn(p.slot, "full_house")
+		profile_update(p.slot, "")
+
+
+# Host, when a game ends (won, lost, or an endless run ended; after end_stats):
+# the end-of-game achievements, then everyone's update.
+func profile_game_end() -> void:
+	var result := "won" if state == "won" else ("endless_end" if endless else "lost")
+	# Tower damage per slot and type, from the towers' own counts (nothing per hit)
+	var dmg := {}
+	for t: Tower in sold_towers + towers.values():
+		if t.dealt > 0.0:
+			if not dmg.has(t.owner):
+				dmg[t.owner] = {}
+			dmg[t.owner][t.type] = dmg[t.owner].get(t.type, 0.0) + t.dealt
+	var rows: Array = end_stats.get("players", [])
+	for p in players:
+		if p == null:
+			continue
+		var slot: int = p.slot
+		var rec := prog_for(slot)
+		var mine: Dictionary = dmg.get(slot, {})
+		var top := ""
+		for type: String in mine:
+			var more: float = mine[type] - rec.dmg.get(type, 0.0)
+			if more > 0.0:
+				rec.add["damage_" + type] = more
+				rec.dmg[type] = mine[type]
+			if top == "" or mine[type] > mine[top]:
+				top = type
+		if result == "won" and were_there(rec):
+			if daily_date != "":
+				earn(slot, "daily_win")
+			else:
+				earn(slot, WIN_ACHIEVEMENTS[difficulty])
+				if not rec.used:
+					earn(slot, "hands_off")
+				if difficulty >= 1 and not rec.frost:
+					earn(slot, "cold_feet")
+				if difficulty >= 2 and top == "poison":
+					earn(slot, "green_thumb")
+		if end_stats.get("mvp", -1) == slot and rows.size() >= 2 and wave >= 50:
+			earn(slot, "mvp")
+		profile_update(slot, result)
+
+
+# Host: hands a player what the game has for their profile (see
+# apply_profile_update() in game_base.gd). result: "" at a wave start.
+func profile_update(slot: int, result: String) -> void:
+	if players[slot] == null:
+		return
+	var rec := prog_for(slot)
+	var data := {"add": rec.add, "earned": rec.earned, "counts": map_counts(), "level": difficulty, "daily": daily_date,
+			"twist": daily_rules().get("twist", ""), "wave": wave, "endless": endless, "there": were_there(rec), "result": result}
+	if not rec.counted and wave > 0:
+		rec.counted = true
+		data.start = true
+	if result != "":
+		data.mp = end_stats.get("players", []).size() >= 2
+	rec.add = {}
+	rec.earned = []
+	if slot == local_slot:
+		apply_profile_update(data)
+	else:
+		send_profile_update(slot, data)
+
+
+# For the save: each player's record (also players not back yet).
+func save_progress() -> Array:
+	var out := []
+	for slot in MAX_PLAYERS:
+		if players[slot] == null and not saved_slots.has(slot):
+			continue
+		var rec: Dictionary = prog_for(slot) if players[slot] != null else prog[slot]
+		if rec.is_empty():
+			continue
+		out.append({"slot": slot, "join": rec.join, "counted": rec.counted, "used": rec.used, "frost": rec.frost, "dmg": rec.dmg.duplicate()})
+	return out
+
+
+# After loading (apply_save()): the records as saved. A player the save has no
+# record for (a save from before achievements) counts as joining now, already
+# counted, having used an ability and built Frost (nobody knows they didn't).
+func load_progress(v: Variant) -> void:
+	prog = [{}, {}, {}, {}]
+	var found := {}
+	if v is Array:
+		for item: Variant in v:
+			if not has_types(item, {"slot": TYPE_INT, "join": TYPE_INT, "counted": TYPE_BOOL, "used": TYPE_BOOL, "frost": TYPE_BOOL}) \
+					or item.slot < 0 or item.slot >= MAX_PLAYERS:
+				continue
+			var dmg := {}
+			if item.get("dmg") is Dictionary:
+				for k: Variant in item.dmg:
+					var n: Variant = item.dmg[k]
+					if k is String and k in TOWER_TYPES and (n is float or n is int) and is_finite(float(n)):
+						dmg[k] = float(n)
+			found[item.slot] = {"join": maxi(item.join, 0), "counted": item.counted, "used": item.used, "frost": item.frost, "dmg": dmg}
+	for slot in MAX_PLAYERS:
+		if players[slot] == null and not saved_slots.has(slot):
+			continue
+		var rec: Dictionary = found.get(slot, {"join": wave, "counted": true, "used": true, "frost": true, "dmg": {}})
+		rec.merge({"who": players[slot], "add": {}, "earned": [], "sent": {}}, true)
+		prog[slot] = rec
 
 
 # ---------------------------------------------------------------- stats at the end
@@ -1994,6 +2436,7 @@ func add_boom(pos: Vector2, r: float) -> void:
 func add_frost_ring(pos: Vector2, r: float) -> void:
 	rec_event(["frost", pos, r])
 	super(pos, r)
+	play_sound("frost_ring", pos)
 
 
 func show_ability(slot: int, ability: String, at: Vector2) -> void:
@@ -2039,6 +2482,7 @@ func start_replay() -> void:
 		replay_layer.draw.connect(draw_on.bind(replay_layer, draw_replay_bar))
 	replay_layer.visible = true
 	show_replay_time(replay_t, true)
+	play_sound("replay_start")
 
 
 # Where the replay starts: 5 seconds before the monster count last climbed from

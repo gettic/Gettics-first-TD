@@ -279,10 +279,10 @@ const PUBLIC_RECT := Rect2(430, 366, 420, 36)
 const REFRESH_RECT := Rect2(750, 472, 100, 28)
 const GRAPHICS_RECT := Rect2(756, 50, 124, 28)  # opens the Settings box
 # The Settings box over the Esc menu: a row per setting, its button cycles the choices
-const SETTINGS_BOX := Rect2(430, 150, 420, 350)
-const SETTINGS_ROW_Y := 226  # the first row's button; the rest follow every 48
+const SETTINGS_BOX := Rect2(430, 110, 420, 494)
+const SETTINGS_ROW_Y := 186  # the first row's button; the rest follow every 48
 const SETTINGS_BUTTON_X := 640
-const SETTINGS_BACK_RECT := Rect2(560, 438, 160, 40)
+const SETTINGS_BACK_RECT := Rect2(560, 542, 160, 40)
 const GAME_ROWS := 3  # public games shown in the menu
 
 # Update popup layout (screen pixels)
@@ -1324,3 +1324,513 @@ var held_note := ""  # other players: the host's "waiting for" text while held (
 # of saved players not back yet. Their towers stay; a player joining gets one of
 # these slots back (see saved_slot_for() and restore_saved_player() in main.gd).
 var saved_slots := {}
+
+
+# ---------------------------------------------------------------- tutorial tips
+# Short tips for new players, shown one at a time when they're useful, each once
+# ever. Only on this computer: never sent to the other players, and they never
+# pause the game. When each one comes up and when it counts as done: update_tips()
+# in main.gd. Saved in settings.cfg under [tutorial] (on, seen): load_tutorial()
+# and save_tutorial() in main.gd. New players get them On; a settings.cfg from
+# before tips existed means an old player, so they start Off.
+#
+# For the ui (game_ui.gd): current_tip() (draw it when not empty), tip_got_it()
+# and tip_skip_all() (its 2 buttons), tutorial_on() / set_tutorial() (the Settings
+# row), and tip_click() (override it: the clicks on the card).
+#
+# id -> its text and anchor, what its arrow points at: "tower_buttons" (the build
+# row), "cursor" (the mouse, over the grid), "wave_button" (WAVE_RECT),
+# "target_button" (MODE_RECT), "ability_buttons", "alive_counter" (the top bar's
+# monster count), "wave_preview", "none" (no arrow: the card on its own), or
+# "tower": the tower it's about, which current_tip() turns into its spot on the
+# map (a Vector2 in map pixels, like Tower.pos).
+const TIPS := {
+	"build": {"text": "Pick a tower at the bottom (or press 1-5), then click on the grass to build it.", "anchor": "tower_buttons"},
+	"place": {"text": "Towers go on the grass squares of the grid, not on the path. Right-click to stop building.", "anchor": "cursor"},
+	"wave": {"text": "Ready? Press SPACE to start the first wave. Later, SPACE sends the next wave early for bonus gold.", "anchor": "wave_button"},
+	"menu": {"text": "Esc opens the menu: Settings, saving, multiplayer and the leaderboard.", "anchor": "none"},
+	"upgrade": {"text": "You have gold to spare: click this tower, then press U to upgrade it.", "anchor": "tower"},
+	"target": {"text": "T changes which monster this tower shoots first. Shift+T does it for all your towers of this type.", "anchor": "target_button"},
+	"abilities": {"text": "Z drops a Meteor where you click, C freezes all monsters. Both recharge after a while.", "anchor": "ability_buttons"},
+	"limit": {"text": "If %d monsters are alive at once, you lose. Keep an eye on this counter.", "anchor": "alive_counter"},
+	"path": {"text": "This tower is level 4. Its next upgrade picks one of 2 paths for good: select it and press Q or E.", "anchor": "tower"},
+	"boss": {"text": "A boss wave is coming! Bosses have huge health and count as 5 monsters.", "anchor": "wave_preview"},
+	"special": {"text": "From wave 31, waves get a trait: splitters, healers or shields. The wave preview shows which.", "anchor": "wave_preview"},
+}
+var tips_on := true  # the Settings row "Tutorial: On / Off"
+var tips_seen: Array = []  # ids of the tips already shown (or already learned)
+var tip_queue: Array = []  # ids waiting to be shown; the first one is on screen
+var tip_spots := {}  # id -> the map spot of the tower an anchor "tower" points at
+
+
+# The tip on screen: {id, text, anchor}, or {} for none.
+func current_tip() -> Dictionary:
+	if not tips_on or tip_queue.is_empty() or state != "playing":
+		return {}
+	var id: String = tip_queue[0]
+	var text: String = TIPS[id]["text"]
+	if id == "limit":
+		text = text % max_alive()
+	var anchor: Variant = TIPS[id]["anchor"]
+	if anchor == "tower":
+		anchor = tip_spots.get(id, Vector2.ZERO)
+	return {"id": id, "text": text, "anchor": anchor}
+
+
+# "Got it": the tip on screen won't come back.
+func tip_got_it() -> void:
+	if tip_queue.is_empty():
+		return
+	var id: String = tip_queue.pop_front()
+	if not id in tips_seen:
+		tips_seen.append(id)
+	save_tutorial()
+
+
+# "Skip all tips": turns them off (Settings can turn them on again).
+func tip_skip_all() -> void:
+	set_tutorial(false)
+
+
+func tutorial_on() -> bool:
+	return tips_on
+
+
+# Turning the tips on again starts over: every tip can come back.
+func set_tutorial(on: bool) -> void:
+	if on and not tips_on:
+		tips_seen.clear()
+	tips_on = on
+	tip_queue.clear()
+	tip_spots.clear()
+	save_tutorial()
+
+
+# main.gd writes [tutorial] to settings.cfg (not in headless runs).
+func save_tutorial() -> void:
+	pass
+
+
+# The ui (game_ui.gd) overrides this: true if the click p (screen pixels) was on
+# the tip's card, after calling tip_got_it() or tip_skip_all() for its buttons.
+# on_click() (main.gd) asks it first, so a click on the card never builds.
+func tip_click(_p: Vector2) -> bool:
+	return false
+
+
+# ---------------------------------------------------------------- achievements and profile
+# Each player's own stats and achievements, kept on their own computer in
+# PROFILE_FILE (apart from settings.cfg). The host (or a player alone) watches the
+# game for every player (main.gd: prog_for() and the hooks), judges what they
+# earn, and hands each player their part with profile_update(): the host's own
+# part straight to apply_profile_update(), the others' through
+# send_profile_update() (game_net.gd sends it; the player's computer calls
+# apply_profile_update() with it). That happens at every wave start, at the end
+# of a game, and right away for the host's own achievements.
+# Achievements, best waves and wins per level only count on the Default map and
+# the daily challenge's map (map_counts() in main.gd); games, kills, play time and
+# towers count on any map. Headless runs never write the profile.
+#
+# For the ui (game_ui.gd): profile_stats(), achievement_list(), pop_achievement()
+# (the popup queue) and reset_profile().
+
+const PROFILE_FILE := "user://profile.cfg"
+const JOIN_BY := 60  # a win or an endless wave counts only for players in the game by this wave (20% of MAX_WAVE)...
+const JOIN_BY_DAILY := 8  # ...and by this wave in the daily challenge
+const ACHIEVEMENT_GROUPS := ["Levels", "Endless", "Daily", "Abilities", "Towers", "Monsters", "Together"]
+# goal: the number the progress bar fills to (0: no bar). counter: what it counts
+# (a key in the profile's progress, or one of the keys achievement_progress() works out).
+const ACHIEVEMENTS := [
+	{"id": "warming_up", "name": "Warming Up", "desc": "Reach wave 30 (any level, not a daily).", "group": "Levels", "goal": 30, "counter": "best_wave"},
+	{"id": "easy_win", "name": "Easy Does It", "desc": "Win on Easy.", "group": "Levels", "goal": 0, "counter": ""},
+	{"id": "normal_win", "name": "Holding the Line", "desc": "Win on Normal.", "group": "Levels", "goal": 0, "counter": ""},
+	{"id": "hard_win", "name": "Hard Earned", "desc": "Win on Hard.", "group": "Levels", "goal": 0, "counter": ""},
+	{"id": "insane_win", "name": "Insane in the Brain", "desc": "Win on Insane.", "group": "Levels", "goal": 0, "counter": ""},
+	{"id": "insane_150", "name": "Halfway to Madness", "desc": "Reach wave 150 on Insane.", "group": "Levels", "goal": 150, "counter": "best_insane"},
+	{"id": "endless_400", "name": "Endless Night", "desc": "Reach wave 400 in endless mode.", "group": "Endless", "goal": 400, "counter": "endless_best"},
+	{"id": "endless_500", "name": "Touch Grass Later", "desc": "Reach wave 500 in endless mode.", "group": "Endless", "goal": 500, "counter": "endless_best"},
+	{"id": "endless_600", "name": "No Life", "desc": "Reach wave 600 in endless mode.", "group": "Endless", "goal": 600, "counter": "endless_best"},
+	{"id": "daily_win", "name": "Daily Bread", "desc": "Win a daily challenge (beat wave 40).", "group": "Daily", "goal": 0, "counter": ""},
+	{"id": "daily_7", "name": "Habit", "desc": "Win daily challenges on 7 different days.", "group": "Daily", "goal": 7, "counter": "daily_days"},
+	{"id": "daily_twists", "name": "Twist Master", "desc": "Win a daily with each of the 6 twists.", "group": "Daily", "goal": 6, "counter": "daily_twists"},
+	{"id": "meteor_20", "name": "Meteor Shower", "desc": "Kill 20 or more monsters with one Meteor.", "group": "Abilities", "goal": 0, "counter": ""},
+	{"id": "freeze_40", "name": "Ice Age", "desc": "Use Freeze all while 40 or more monsters are on the map.", "group": "Abilities", "goal": 0, "counter": ""},
+	{"id": "hands_off", "name": "Hands Off", "desc": "Win without using Meteor or Freeze all yourself.", "group": "Abilities", "goal": 0, "counter": ""},
+	{"id": "cold_feet", "name": "Cold Feet", "desc": "Win on Normal or harder without building a Frost tower yourself.", "group": "Towers", "goal": 0, "counter": ""},
+	{"id": "one_of_each", "name": "One of Each", "desc": "Own all 5 tower types at level 5 or higher at the same time.", "group": "Towers", "goal": 0, "counter": ""},
+	{"id": "maxed_out", "name": "Maxed Out", "desc": "Upgrade a tower to level 30.", "group": "Towers", "goal": 0, "counter": ""},
+	{"id": "poison_kills", "name": "Plague Doctor", "desc": "Your Poison towers kill 10,000 monsters (all games together).", "group": "Towers", "goal": 10000, "counter": "poison_kills"},
+	{"id": "green_thumb", "name": "Green Thumb", "desc": "Win on Hard or Insane with Poison doing the most of your damage.", "group": "Towers", "goal": 0, "counter": ""},
+	{"id": "bosses", "name": "Boss Hunter", "desc": "Kill 1,000 bosses (all games together).", "group": "Monsters", "goal": 1000, "counter": "bosses"},
+	{"id": "splitlings", "name": "Split Decision", "desc": "Kill 5,000 splitlings (all games together).", "group": "Monsters", "goal": 5000, "counter": "splitlings"},
+	{"id": "shields", "name": "Shield Breaker", "desc": "Break 1,000 shields (all games together).", "group": "Monsters", "goal": 1000, "counter": "shields"},
+	{"id": "healers", "name": "Medic!", "desc": "Kill 500 healers (all games together).", "group": "Monsters", "goal": 500, "counter": "healers"},
+	{"id": "together_100", "name": "Better Together", "desc": "Reach wave 100 with 2 or more players in the game.", "group": "Together", "goal": 0, "counter": ""},
+	{"id": "full_house", "name": "Full House", "desc": "Reach wave 50 with 4 players in the game.", "group": "Together", "goal": 0, "counter": ""},
+	{"id": "mvp", "name": "MVP", "desc": "Be the MVP of a game with 2 or more players that reached wave 50.", "group": "Together", "goal": 0, "counter": ""},
+	{"id": "first_gift", "name": "Sharing is Caring", "desc": "Give gold to another player.", "group": "Together", "goal": 0, "counter": ""},
+	{"id": "gifts_50", "name": "Patron", "desc": "Give 50 gifts (all games together).", "group": "Together", "goal": 50, "counter": "gifts_given"},
+]
+# [stats]: on any map
+const PROFILE_STATS := ["games", "wins", "losses", "seconds", "mp_games", "kills", "bosses", "splitlings", "healers",
+		"shields", "poison_kills", "gifts_given", "gifts_received", "meteors", "freezes"]
+# Counted by the host during a game and sent in profile updates' "add" (also
+# built_<type>, kills_<type> and damage_<type>)
+const PROFILE_ADDS := ["kills", "bosses", "splitlings", "healers", "shields", "poison_kills", "gifts_given",
+		"gifts_received", "meteors", "freezes"]
+# [progress]: the counters behind achievements (only on maps that count)
+const PROGRESS_KEYS := ["bosses", "splitlings", "healers", "shields", "poison_kills", "gifts_given"]
+const PROFILE_INT_MAX := 1000000000000000  # counters stop here (1e15)
+
+var profile := {}  # see new_profile()
+var achievement_queue: Array = []  # ids earned and not shown yet (pop_achievement())
+var profile_seconds := 0.0  # play time not written into the profile yet (main.gd counts it)
+
+
+# An empty profile: {stats: {key: n}, levels: [per level {games, best, wins,
+# endless}], daily: {played, won, dates, twists}, towers: {type: {built, damage,
+# kills}}, progress: {key: n}, achievements: {id: date earned}}.
+func new_profile() -> Dictionary:
+	var stats := {}
+	for k: String in PROFILE_STATS:
+		stats[k] = 0
+	var levels := []
+	for i in DIFFICULTIES.size():
+		levels.append({"games": 0, "best": 0, "wins": 0, "endless": 0})
+	var tower_stats := {}
+	for type: String in TOWER_TYPES:
+		tower_stats[type] = {"built": 0, "damage": 0.0, "kills": 0}
+	var progress := {}
+	for k: String in PROGRESS_KEYS:
+		progress[k] = 0
+	return {"stats": stats, "levels": levels, "daily": {"played": 0, "won": 0, "dates": [], "twists": [], "best_streak": 0},
+			"towers": tower_stats, "progress": progress, "achievements": {}}
+
+
+# A whole number from a file or the network (0 for anything else).
+func count_of(v: Variant) -> int:
+	if v is int:
+		return clampi(v, 0, PROFILE_INT_MAX)
+	if v is float and is_finite(v):
+		return clampi(int(v), 0, PROFILE_INT_MAX)
+	return 0
+
+
+func achievement_ids() -> Array:
+	return ACHIEVEMENTS.map(func(a: Dictionary) -> String: return a.id)
+
+
+# Reads a profile file (missing or broken parts stay empty).
+func read_profile(path: String) -> Dictionary:
+	var out := new_profile()
+	var cfg := ConfigFile.new()
+	if cfg.load(path) != OK:
+		return out
+	for k: String in PROFILE_STATS:
+		out.stats[k] = count_of(cfg.get_value("stats", k, 0))
+	for i in DIFFICULTIES.size():
+		var d: Variant = cfg.get_value("levels", DIFFICULTIES[i].to_lower(), {})
+		if d is Dictionary:
+			for k: String in out.levels[i]:
+				out.levels[i][k] = count_of(d.get(k, 0))
+	out.daily.played = count_of(cfg.get_value("daily", "played", 0))
+	out.daily.won = count_of(cfg.get_value("daily", "won", 0))
+	for k: String in ["dates", "twists"]:
+		var list: Variant = cfg.get_value("daily", k, [])
+		if list is Array or list is PackedStringArray:
+			for s: Variant in list:
+				if s is String and s.length() <= 16 and not s in out.daily[k] and (k == "dates" or DAILY_TWISTS.has(s)):
+					out.daily[k].append(s)
+	# A profile from before best_streak gets it from its won dates (at least its current streak)
+	out.daily.best_streak = maxi(count_of(cfg.get_value("daily", "best_streak", 0)), longest_streak(out.daily.dates))
+	for type: String in TOWER_TYPES:
+		var d: Variant = cfg.get_value("towers", type, {})
+		if d is Dictionary:
+			out.towers[type].built = count_of(d.get("built", 0))
+			out.towers[type].kills = count_of(d.get("kills", 0))
+			var dmg: Variant = d.get("damage", 0.0)
+			out.towers[type].damage = maxf(float(dmg), 0.0) if (dmg is float or dmg is int) and is_finite(float(dmg)) else 0.0
+	for k: String in PROGRESS_KEYS:
+		out.progress[k] = count_of(cfg.get_value("progress", k, 0))
+	var ids := achievement_ids()
+	if cfg.has_section("achievements"):
+		for id: String in cfg.get_section_keys("achievements"):
+			var date: Variant = cfg.get_value("achievements", id, "")
+			if id in ids and date is String:
+				out.achievements[id] = date.left(10)
+	return out
+
+
+func write_profile(path: String) -> Error:
+	var cfg := ConfigFile.new()
+	cfg.set_value("profile", "version", 1)
+	for k: String in PROFILE_STATS:
+		cfg.set_value("stats", k, profile.stats[k])
+	for i in DIFFICULTIES.size():
+		cfg.set_value("levels", DIFFICULTIES[i].to_lower(), profile.levels[i])
+	for k: String in profile.daily:
+		cfg.set_value("daily", k, profile.daily[k])
+	for type: String in TOWER_TYPES:
+		cfg.set_value("towers", type, profile.towers[type])
+	for k: String in PROGRESS_KEYS:
+		cfg.set_value("progress", k, profile.progress[k])
+	for id: String in profile.achievements:
+		cfg.set_value("achievements", id, profile.achievements[id])
+	return cfg.save(path)
+
+
+# At startup (main.gd).
+func load_profile() -> void:
+	profile = read_profile(PROFILE_FILE)
+	achievement_queue.clear()
+	profile_seconds = 0.0
+
+
+# Writes the profile: at the end of a game, when something is earned, every 10th
+# wave and on quit. Never in headless runs (tests can't touch the player's profile).
+func save_profile() -> void:
+	if profile.is_empty():
+		profile = new_profile()
+	var whole := int(profile_seconds)
+	profile.stats.seconds = mini(profile.stats.seconds + whole, PROFILE_INT_MAX)
+	profile_seconds -= whole
+	if DisplayServer.get_name() == "headless":
+		return
+	write_profile(PROFILE_FILE)
+
+
+# The Profile box's "Reset profile" (after its confirm box): forgets every stat
+# and achievement and deletes the file. The name, settings and saves stay.
+func reset_profile() -> void:
+	profile = new_profile()
+	achievement_queue.clear()
+	profile_seconds = 0.0
+	if DisplayServer.get_name() != "headless" and FileAccess.file_exists(PROFILE_FILE):
+		DirAccess.remove_absolute(PROFILE_FILE)
+
+
+# This computer earns an achievement (once): dated today, queued for the popup.
+func earn_achievement(id: String) -> bool:
+	if profile.is_empty():
+		profile = new_profile()
+	if profile.achievements.has(id) or not id in achievement_ids():
+		return false
+	profile.achievements[id] = Time.get_date_string_from_system()
+	achievement_queue.append(id)
+	return true
+
+
+# Host: hands a player (not the host) their profile update. Empty here;
+# game_net.gd sends it, and that player's computer calls apply_profile_update().
+func send_profile_update(_slot: int, _data: Dictionary) -> void:
+	pass
+
+
+# This player's profile update from the host (or from main.gd for the host's
+# own part). Checked like anything from the network. All keys are optional:
+#   add: {key: n} counters to add (PROFILE_ADDS, built_/kills_/damage_<type>)
+#   earned: [ids] achievements the host judged earned
+#   counts: this map counts for achievements, best waves and level wins
+#   start: a new game for this player (counted once: not again for a loaded game)
+#   level (index in DIFFICULTIES), daily (date or ""), twist, wave, endless
+#   there: the player was in the game by JOIN_BY (JOIN_BY_DAILY) wave
+#   result: "" while playing, "won", "lost", or "endless_end" (an endless run ended)
+#   mp: the game had 2 or more players (with a result)
+func apply_profile_update(data: Variant) -> void:
+	if not data is Dictionary:
+		return
+	if profile.is_empty():
+		profile = new_profile()
+	var counts: bool = data.get("counts") == true
+	var level: int = data.get("level") if data.get("level") is int and data.level >= 0 and data.level < DIFFICULTIES.size() else -1
+	var daily: String = data.get("daily") if data.get("daily") is String and data.daily.length() <= 16 else ""
+	var w: int = count_of(data.get("wave", 0))
+	var there: bool = data.get("there") == true
+	var result: String = data.get("result") if data.get("result") in ["won", "lost", "endless_end"] else ""
+	var stats: Dictionary = profile.stats
+	# Counters
+	var add: Variant = data.get("add", {})
+	if add is Dictionary:
+		for k: Variant in add:
+			if not k is String:
+				continue
+			var n: Variant = add[k]
+			if k in PROFILE_ADDS:
+				stats[k] = mini(stats[k] + count_of(n), PROFILE_INT_MAX)
+				if counts and k in PROGRESS_KEYS:
+					profile.progress[k] = mini(profile.progress[k] + count_of(n), PROFILE_INT_MAX)
+				continue
+			var parts: PackedStringArray = k.split("_", true, 1)
+			if parts.size() == 2 and parts[1] in TOWER_TYPES and parts[0] in ["built", "kills", "damage"]:
+				var ts: Dictionary = profile.towers[parts[1]]
+				if parts[0] == "damage":
+					if (n is float or n is int) and is_finite(float(n)) and n > 0:
+						ts.damage += float(n)
+				else:
+					ts[parts[0]] = mini(ts[parts[0]] + count_of(n), PROFILE_INT_MAX)
+	# A new game
+	if data.get("start") == true:
+		stats.games += 1
+		if counts and daily != "":
+			profile.daily.played += 1
+		elif counts and level >= 0:
+			profile.levels[level].games += 1
+	# How far the game got
+	if counts and daily == "" and level >= 0:
+		var lv: Dictionary = profile.levels[level]
+		lv.best = maxi(lv.best, mini(w, MAX_WAVE))
+		if data.get("endless") == true and there:
+			lv.endless = maxi(lv.endless, w)
+	# The end of a game
+	# A win only counts for players in the game early enough (see JOIN_BY)
+	if result == "won" and there:
+		stats.wins += 1
+	elif result == "lost":
+		stats.losses += 1
+	if result in ["won", "lost"] and data.get("mp") == true:
+		stats.mp_games += 1
+	if result == "won" and counts and there:
+		if daily != "":
+			profile.daily.won += 1
+			if not daily in profile.daily.dates:
+				profile.daily.dates.append(daily)
+			profile.daily.best_streak = maxi(profile.daily.best_streak, longest_streak(profile.daily.dates))
+			var twist: Variant = data.get("twist")
+			if twist is String and DAILY_TWISTS.has(twist) and not twist in profile.daily.twists:
+				profile.daily.twists.append(twist)
+		elif level >= 0:
+			profile.levels[level].wins += 1
+	# Achievements: the host's verdicts, then the counters this computer keeps
+	var any := false
+	var earned: Variant = data.get("earned", [])
+	if earned is Array:
+		for id: Variant in earned.slice(0, ACHIEVEMENTS.size()):
+			if id is String and earn_achievement(id):
+				any = true
+	for a: Dictionary in ACHIEVEMENTS:
+		if a.goal > 0 and not profile.achievements.has(a.id) and achievement_progress(a) >= a.goal:
+			any = earn_achievement(a.id) or any
+	if any or result != "" or (w > 0 and w % 10 == 0):
+		save_profile()
+
+
+# How far along an achievement's counter is (0 without one).
+func achievement_progress(a: Dictionary) -> int:
+	if profile.is_empty():
+		profile = new_profile()
+	match a.counter:
+		"":
+			return 0
+		"best_wave":
+			var best := 0
+			for lv: Dictionary in profile.levels:
+				best = maxi(best, lv.best)
+			return best
+		"best_insane":
+			return profile.levels[DIFFICULTIES.size() - 1].best
+		"endless_best":
+			var best := 0
+			for lv: Dictionary in profile.levels:
+				best = maxi(best, lv.endless)
+			return best
+		"daily_days":
+			return profile.daily.dates.size()
+		"daily_twists":
+			return profile.daily.twists.size()
+	return profile.progress.get(a.counter, 0)
+
+
+# For the Achievements box: every achievement in order, as {id, name, desc,
+# group, earned (date "2026-11-02", or "" when locked), progress, goal (0: no bar)}.
+func achievement_list() -> Array:
+	if profile.is_empty():
+		profile = new_profile()
+	var out := []
+	for a: Dictionary in ACHIEVEMENTS:
+		out.append({"id": a.id, "name": a.name, "desc": a.desc, "group": a.group,
+				"earned": profile.achievements.get(a.id, ""), "goal": a.goal,
+				"progress": mini(achievement_progress(a), a.goal) if a.goal > 0 else 0})
+	return out
+
+
+# The popup queue: the next achievement to show ({id, name, desc, group, date}),
+# taken off the queue, or {} if none is waiting.
+func pop_achievement() -> Dictionary:
+	while not achievement_queue.is_empty():
+		var id: String = achievement_queue.pop_front()
+		for a: Dictionary in ACHIEVEMENTS:
+			if a.id == id:
+				return {"id": id, "name": a.name, "desc": a.desc, "group": a.group, "date": profile.achievements.get(id, "")}
+	return {}
+
+
+# For the Profile box:
+#   stats: {games, wins, losses, seconds, mp_games, kills, bosses, splitlings,
+#     healers, shields, poison_kills, gifts_given, gifts_received, meteors, freezes}
+#   levels: per level [{name, games, best, wins, endless}] (Default map only)
+#   daily: {played, won, days (different days won), twists (won with), streak
+#     (days in a row won, up to today or yesterday), best_streak (the longest
+#     streak so far, kept in profile.cfg)}
+#   towers: [{type, name, built, damage, share (of all tower damage, 0-1), kills}]
+#   favourite: the most built type (ties: more damage), "" before any tower
+#   earned, total: achievements earned and how many there are
+func profile_stats() -> Dictionary:
+	if profile.is_empty():
+		profile = new_profile()
+	var stats: Dictionary = profile.stats.duplicate()
+	stats.seconds += int(profile_seconds)
+	var levels := []
+	for i in DIFFICULTIES.size():
+		levels.append(profile.levels[i].merged({"name": DIFFICULTIES[i]}))
+	var total_damage := 0.0
+	for type: String in TOWER_TYPES:
+		total_damage += profile.towers[type].damage
+	var tower_list := []
+	var favourite := ""
+	for type: String in TOWER_TYPES:
+		var ts: Dictionary = profile.towers[type]
+		tower_list.append({"type": type, "name": TOWERS[type]["name"], "built": ts.built, "damage": ts.damage,
+				"share": ts.damage / total_damage if total_damage > 0.0 else 0.0, "kills": ts.kills})
+		if ts.built > 0 and (favourite == "" or ts.built > profile.towers[favourite].built
+				or (ts.built == profile.towers[favourite].built and ts.damage > profile.towers[favourite].damage)):
+			favourite = type
+	var d: Dictionary = profile.daily
+	return {"stats": stats, "levels": levels, "towers": tower_list, "favourite": favourite,
+			"daily": {"played": d.played, "won": d.won, "days": d.dates.size(), "twists": d.twists.size(), "streak": daily_streak(),
+				"best_streak": maxi(d.best_streak, daily_streak())},
+			"earned": profile.achievements.size(), "total": ACHIEVEMENTS.size()}
+
+
+# Daily challenges won on days in a row, ending today or yesterday (UTC).
+# The longest run of days in a row in the won dates.
+func longest_streak(dates: Array) -> int:
+	var days := {}
+	for date: String in dates:
+		var t := Time.get_unix_time_from_datetime_string(date + "T00:00:00")
+		if t > 0:
+			days[floori(t / 86400.0)] = true
+	var best := 0
+	for day: int in days:
+		if days.has(day - 1):
+			continue  # not the first day of its run
+		var n := 1
+		while days.has(day + n):
+			n += 1
+		best = maxi(best, n)
+	return best
+
+
+# dates: the won dates (left out: the profile's).
+func daily_streak(dates: Variant = null) -> int:
+	var days := {}
+	for date: String in (profile.daily.dates if dates == null else dates):
+		var t := Time.get_unix_time_from_datetime_string(date + "T00:00:00")
+		if t > 0:
+			days[floori(t / 86400.0)] = true
+	var today := floori(Time.get_unix_time_from_datetime_string(daily_today() + "T00:00:00") / 86400.0)
+	var day := today if days.has(today) else today - 1
+	var n := 0
+	while days.has(day):
+		n += 1
+		day -= 1
+	return n

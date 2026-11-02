@@ -906,6 +906,8 @@ func net_set_daily(date: Variant) -> void:
 		daily_date = ""
 	elif date.length() == 10 and date.substr(4, 1) == "-" and date.substr(7, 1) == "-" \
 			and date.replace("-", "").is_valid_int() and map_rows_text == daily_map(date).text:
+		if daily_date != date and wave == 0:
+			play_sound("daily_start")
 		daily_date = date
 
 
@@ -1632,6 +1634,8 @@ func net_used_ability(slot: Variant, ability: Variant, at: Variant) -> void:
 func net_set_endless(on: Variant) -> void:
 	if net_mode != "client" or not on is bool:
 		return
+	if on and not endless and state == "won":
+		play_sound("endless_start")
 	endless = on
 	if on:
 		state = "playing"
@@ -1675,6 +1679,33 @@ func net_set_cooldowns(slot: Variant, cools: Variant) -> void:
 		if a is String and ABILITIES.has(a) and (cools[a] is float or cools[a] is int):
 			clean[a] = clampf(float(cools[a]), 0.0, ABILITIES[a]["cooldown"])
 	players[slot].cooldowns = clean
+
+
+# ----- the profile (see apply_profile_update() in game_base.gd)
+
+# Host: a player's profile update (main.gd's profile_update(), at every wave
+# start and at the end of a game), only to that player. A few hundred bytes.
+func send_profile_update(slot: int, data: Dictionary) -> void:
+	if net_mode != "host" or slot < 0 or slot >= MAX_PLAYERS or slot == local_slot:
+		return
+	var p: Player = players[slot]
+	if p == null or p.peer == 1:
+		return
+	var enet := multiplayer.multiplayer_peer as ENetMultiplayerPeer
+	if enet != null and enet.get_peer(p.peer).get_state() != ENetPacketPeer.STATE_CONNECTED:
+		return
+	net_set_profile.rpc_id(p.peer, data)
+
+
+# Our profile update from the host. "authority" already drops it from anyone
+# else; the sender and mode checks are a second lock (the replay plays only
+# recorded frames, never messages, so it can't count anything twice).
+# apply_profile_update() checks every field. Its name sorts after net_refused (see net_say).
+@rpc("authority", "call_remote", "reliable")
+func net_set_profile(data: Variant) -> void:
+	if net_mode != "client" or multiplayer.get_remote_sender_id() != 1 or not data is Dictionary:
+		return
+	apply_profile_update(data)
 
 
 # A chat line for everyone (slot -1: from the game itself). Its name sorts after

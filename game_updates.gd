@@ -508,6 +508,10 @@ func restart_game(new_exe: String, old_exe: String) -> void:
 	var args := PackedStringArray()
 	if new_exe.to_lower() != old_exe.to_lower():
 		args = ["--", "--remove-old=" + old_exe]
+	# The profile's last stats and play time (this quit skips the close request),
+	# written before the new version starts and reads it
+	if has_method("save_profile"):
+		call("save_profile")
 	OS.create_process(new_exe, args)
 	get_tree().quit()
 
