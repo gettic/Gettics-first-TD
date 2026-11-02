@@ -149,11 +149,39 @@ func saved_maps() -> Array:
 	return names
 
 
+# The map lists: the built-in maps (BUILTIN_MAPS, Default first), then the saved ones.
+func map_list() -> Array:
+	return BUILTIN_MAPS.keys() + saved_maps()
+
+
+# Is n a built-in map's name (any case)? Those can't be saved over.
+func is_builtin_name(n: String) -> bool:
+	for b: String in BUILTIN_MAPS:
+		if b.to_lower() == n.to_lower():
+			return true
+	return false
+
+
+# An ed_list entry's name as shown and played: a saved map that has a built-in
+# map's name (saved before that map came with the game) gets " (yours)".
+func list_name(i: int) -> String:
+	var n: String = ed_list[i]
+	if i >= BUILTIN_MAPS.size() and is_builtin_name(n):
+		return n + " (yours)"
+	return n
+
+
+# An ed_list entry's rows (the saved file for the saved ones, even with a built-in name).
+func list_rows(i: int) -> Array:
+	return load_map_rows(ed_list[i], i >= BUILTIN_MAPS.size())
+
+
 # A map's rows of letters, or [] if the file can't be read. Not checked yet:
-# the caller runs read_map() on it.
-func load_map_rows(n: String) -> Array:
-	if n == "Default":
-		return DEFAULT_MAP.duplicate()
+# the caller runs read_map() on it. saved: read the file even if a built-in
+# map has that name.
+func load_map_rows(n: String, saved := false) -> Array:
+	if not saved and BUILTIN_MAPS.has(n):
+		return builtin_map_rows(n)
 	var f := FileAccess.open(map_file(n), FileAccess.READ)
 	if f == null or f.get_length() > MAP_FILE_MAX:
 		return []
@@ -177,8 +205,8 @@ func save_map_rows(n: String, rows: Array) -> bool:
 func bad_map_name(n: String) -> String:
 	if n == "":
 		return "Type a name for the map first"
-	if n.to_lower() == "default":
-		return "The Default map can't be changed: give your map another name"
+	if is_builtin_name(n):
+		return "%s is a built-in map's name: give your map another name" % n
 	if n.to_upper() in ED_RESERVED or n.validate_filename() != n:
 		return "Windows doesn't allow that name: try another"
 	return ""
@@ -196,13 +224,14 @@ func keep_map(title: String, rows: Array) -> void:
 		add_chat(-1, "", "The map is in your map list now, as %s" % n)
 
 
-# The name this map is saved under (Default too), or "".
+# The name this map is saved under (built-in maps too), or "".
 func find_map(rows: Array) -> String:
-	if rows == DEFAULT_MAP:
-		return "Default"
-	for n in saved_maps():
-		if load_map_rows(n) == rows:
-			return n
+	var have := builtin_map_name(rows)
+	if have != "":
+		return have
+	for n: String in saved_maps():
+		if load_map_rows(n, true) == rows:
+			return n + (" (yours)" if is_builtin_name(n) else "")
 	return ""
 
 
@@ -240,7 +269,7 @@ func open_picker() -> void:
 		if why != "":
 			flash(why)
 		return
-	ed_list = ["Default"] + saved_maps()
+	ed_list = map_list()
 	ed_list_top = 0
 	pick_open = true
 
@@ -263,8 +292,8 @@ func pick_click(p: Vector2) -> void:
 	for i in mini(ED_LIST_ROWS, ed_list.size() - ed_list_top):
 		if not ed_list_row(i).has_point(p):
 			continue
-		var n: String = ed_list[ed_list_top + i]
-		var check := read_map(load_map_rows(n))
+		var n := list_name(ed_list_top + i)
+		var check := read_map(list_rows(ed_list_top + i))
 		if check.has("error"):
 			flash("Can't use %s: %s" % [n, check.error])
 			return
@@ -395,7 +424,8 @@ func open_editor() -> void:
 	new_game()
 	message = ""
 	ed_rows = map_rows_text.duplicate()
-	ed_name = map_name if map_name != "Default" else ""
+	# A built-in map opens as a copy: it needs a name of its own to be saved
+	ed_name = map_name if builtin_map_name(map_rows_text) == "" and not BUILTIN_MAPS.has(map_name) else ""
 	map_name_input.text = ed_name
 	map_name_input.visible = true
 	console_layer.visible = false
@@ -680,7 +710,7 @@ func ed_console_click(p: Vector2) -> void:
 			ed_changed = false
 			ed_update()
 	elif ED_LOAD_RECT.has_point(p):
-		ed_list = ["Default"] + saved_maps()
+		ed_list = map_list()
 		ed_list_top = 0
 		ed_list_open = true
 	elif ED_SAVE_RECT.has_point(p):
@@ -745,7 +775,7 @@ func list_extra_click(p: Vector2) -> bool:
 		return true
 	for i in mini(ED_LIST_ROWS, ed_list.size() - ed_list_top):
 		if ed_list_share(i).has_point(p):
-			share_saved_map(ed_list[ed_list_top + i])
+			share_saved_map(ed_list_top + i)
 			return true
 	return false
 
@@ -759,16 +789,17 @@ func ed_list_click(p: Vector2) -> void:
 	for i in mini(ED_LIST_ROWS, ed_list.size() - ed_list_top):
 		if not ed_list_row(i).has_point(p):
 			continue
-		var n: String = ed_list[ed_list_top + i]
+		var n := list_name(ed_list_top + i)
 		if ed_changed and not ed_sure("Load " + n, "Not saved yet: click %s again to load it anyway" % n):
 			return
-		var rows := load_map_rows(n)
+		var rows := list_rows(ed_list_top + i)
 		var check := read_map(rows)
 		if check.has("error"):
 			flash("Can't load %s: %s" % [n, check.error])
 			return
 		ed_rows = rows
-		ed_name = n if n != "Default" else ""
+		# A built-in map opens as a copy (no name: Save asks for one)
+		ed_name = n if ed_list_top + i >= BUILTIN_MAPS.size() else ""
 		map_name_input.text = ed_name
 		ed_changed = false
 		ed_list_open = false
@@ -1185,8 +1216,9 @@ func ed_draw_list(title := "LOAD A MAP", current := ed_name) -> void:
 	ui_title(Rect2(ED_LIST_RECT.position.x, ED_LIST_RECT.position.y, ED_LIST_RECT.size.x, 54), Vector2((SCREEN_W - tw) / 2.0, ED_LIST_RECT.position.y + 40), title, 28)
 	var mouse := ui_mouse(true)
 	for i in mini(ED_LIST_ROWS, ed_list.size() - ed_list_top):
-		var n: String = ed_list[ed_list_top + i]
-		button(ed_list_row(i), fit_text(n + ("  (built in)" if n == "Default" else ""), 260, 16), true, n == current)
+		var n := list_name(ed_list_top + i)
+		var label := n + ("  (built in)" if ed_list_top + i < BUILTIN_MAPS.size() else "")
+		button(ed_list_row(i), fit_text(label, 260, 16), true, n == current)
 		var sr := ed_list_share(i)
 		ui_button_bg(sr, true, sr.has_point(mouse))
 		icon_share(sr.get_center(), UI_GOLD_LIGHT if sr.has_point(mouse) else UI_TEXT)
@@ -1231,9 +1263,10 @@ func _input(event: InputEvent) -> void:
 	super(event)
 
 
-# A saved map's share button.
-func share_saved_map(n: String) -> void:
-	var rows := load_map_rows(n)
+# A map list entry's share button (ed_list index).
+func share_saved_map(i: int) -> void:
+	var n := list_name(i)
+	var rows := list_rows(i)
 	var check := read_map(rows)
 	if check.has("error"):
 		flash("Can't share %s: %s" % [n, check.error])
@@ -1381,9 +1414,9 @@ func share_boxes_click(p: Vector2) -> void:
 			flash("Saved as %s" % n)
 			paste_map.info[-1] = ["Your maps", "Already there, as " + n, UI_TEXT]
 			if pick_open:
-				ed_list = ["Default"] + saved_maps()
+				ed_list = map_list()
 			elif ed_list_open:
-				ed_list = ["Default"] + saved_maps()
+				ed_list = map_list()
 	elif PASTE_PLAY.has_point(p):
 		play_pasted()
 

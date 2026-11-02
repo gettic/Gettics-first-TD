@@ -18,6 +18,7 @@ Play alone or with up to 4 players: each player gets their own gate at a corner 
 
 - Free CC0 models from the KayKit packs by Kay Lousberg: rocks and the skeleton mage boss with its walk. Painted CC0 grass and dirt textures by Cethiel.
 - Made for the game with a model kit: the Cannon and Poison towers (a new look at levels 1-5, 10, 15, 20, 30 and 40 for each path) and the skeleton warrior (with its walk and death).
+- Made for the game: the Barracks (a guard hall, a stone keep and a wooden camp) and its soldiers (footmen, knights and militia).
 - By Gettic: the Arrow tower models, the logo and the game icon.
 - The trees and bushes are built in code with a painted leaf look (5 shapes in 2 greens).
 - The music and sound effects were made for the game too (see [Sound and music](#sound-and-music)). Some smaller things are still simple shapes built in code.
@@ -48,14 +49,14 @@ godot --path path/to/this/folder
 
 | Key / mouse | Action |
 |---|---|
-| **1–5** or click a tower button | Choose a tower to build (a grid shows on the grass while you place it) |
+| **1–6** or click a tower button | Choose a tower to build (a grid shows on the grass while you place it) |
 | **Hover** a tower button | Shows the tower's info card (see [Towers](#towers)) |
 | **Left-click** on grass | Build the chosen tower |
 | **Left-click** on a tower | Select it |
 | **U** | Upgrade the selected tower |
 | **Q** / **E** or the 2 path buttons | Upgrade a level 4 tower to level 5 and pick its path (see [Towers](#towers)) |
 | **X** / **Delete** | Sell the selected tower (70% refund) |
-| **T** or the **Target** button | Change which monster the selected tower shoots (see [Towers](#towers)) |
+| **T** or the **Target** button | Change which monster the selected tower shoots (see [Towers](#towers)); not for the Barracks |
 | **Shift+T** or **Shift+click** Target | The same, for all your towers of that type |
 | **W A S D** | Move the camera |
 | **Scroll wheel** | Zoom in and out |
@@ -106,7 +107,7 @@ New players get short tips: a gold-framed card with an arrow to what it is about
 
 Towers can be upgraded up to level 60. From level 5 on, every level adds 28-36% damage (a bit different for each level and tower), and every 5th level (5, 10, 15...) is a big one with 62-70%. Range, fire rate, splash, slow and chain also grow a little, up to a limit. Each upgrade costs 38% more than the last (80% more for the big levels), so very high levels get too expensive to reach.
 
-**Looks.** The Arrow, Cannon and Poison towers get a new model at levels 1-5, 10, 15, 20, 30 and 40 (Cannon and Poison a different one for each path; a Volley Arrow tower has three archers). Frost and Spark keep their level-4 look. Every tower above level 4 shows a small "Lv" badge, and big numbers are shortened (240k, 1.2M).
+**Looks.** The Arrow, Cannon and Poison towers get a new model at levels 1-5, 10, 15, 20, 30 and 40 (Cannon and Poison a different one for each path; a Volley Arrow tower has three archers). Frost and Spark keep their level-4 look. The Barracks has its own look at levels 1-4 (more crates, a tower, a chimney and walls), and a new one at levels 5, 10, 15, 20, 30 and 40 for each path: a stone keep for Knights, a wooden camp for Militia. Every tower above level 4 shows a small "Lv" badge, and big numbers are shortened (240k, 1.2M).
 
 | Tower | Cost | What it does |
 |---|---|---|
@@ -115,10 +116,13 @@ Towers can be upgraded up to level 60. From level 5 on, every level adds 28-36% 
 | **Frost** | 70g | Less damage, but slows enemies down |
 | **Spark** | 120g | Lightning that jumps between several enemies |
 | **Poison** | 90g | Lobs a glob that leaves a green cloud on the path for 3 seconds (see below) |
+| **Barracks** | 90g | Soldiers on the path hold monsters still and hit them (see below) |
 
 **Info cards.** Hover a build button (or its row in the build list) to see the tower's card: cost, damage per second, range and speed (with bars), its special, what it is good and weak against, the total cost and numbers at level 4, and both level 5 paths with their numbers.
 
 **Poison clouds.** Every monster inside takes damage over time (4 times a second), and poison goes through armor. Cloud size grows with the level. A monster is hurt by only one cloud of each tower at a time, but different Poison towers add up.
+
+**Barracks.** It must stand within its range of the path (the build ghost turns red where no path is in reach). Its soldiers stand on the path tile nearest to it, marked by a small flag, and each holds one monster still and hits it. At level 1 there are 2 soldiers and a hold lasts 1.5 seconds. Monsters wear soldiers down, and a fallen soldier comes back after a while (8 seconds at level 1). A monster that was let go can't be held again for 1.5 seconds. Held monsters still count toward the limit, and only Knights hold bosses. Soldiers fight the nearest monster, so the Barracks has no Target button. Hurt soldiers show a small health bar in their owner's color. Its info card shows damage per soldier and a Soldiers row. In multiplayer everyone sees the host's soldiers, and saves keep their health.
 
 **Specializations.** The upgrade from level 4 to 5 picks one of the tower's 2 paths: with a level 4 tower of yours selected, the tower buttons turn into its 2 paths (**Q** and **E**, price and a short text; hover for the numbers). **U** only reminds you to pick. The path is for good: selling is the only way back. Both paths cost the same, and the tower panel shows its path's name. Each path multiplies the tower's normal numbers from level 5 on, and some extras grow at levels 20 and 40:
 
@@ -134,6 +138,8 @@ Towers can be upgraded up to level 60. From level 5 on, every level adds 28-36% 
 | Spark | **Overload** | Bosses | Damage ×2 (×2 more against bosses), fires 1.2× slower, chains to only 2 monsters. Starts on Strongest |
 | Poison | **Venom** | Bosses, armored | Damage ×1.9 (×1.75 more against bosses), clouds ×0.7 the size. Starts on Strongest |
 | Poison | **Miasma** | Crowds, support | Clouds ×1.5 the size that last ×1.5 as long. Monsters inside take 15% more damage from every tower (20% at level 20, 25% at 40) |
+| Barracks | **Knights** | Bosses, tough monsters | Damage ×1.6 (×3 more against bosses), soldier health ×2.5, holds ×1.5 as long and also holds bosses |
+| Barracks | **Militia** | Crowds | 2 more soldiers (3 at level 20, 4 at 40), twice the reach, back twice as fast, damage ×0.6, soldier health ×0.7 |
 
 **Targeting.** Each tower has a targeting mode that says which monster in range it shoots. Change it with **T** or the **Target** button in the tower panel (only on your own towers). **Shift** changes all your towers of that type at once. New towers start on **First**.
 
@@ -145,7 +151,7 @@ Towers can be upgraded up to level 60. From level 5 on, every level adds 28-36% 
 | **Fastest** | The fastest monster right now (slowed ones count as slow, so Frost on Fastest goes for the ones that aren't slowed yet) |
 | **Closest** | The monster nearest to the tower |
 
-When two monsters are equal, the one that has walked furthest is picked.
+When two monsters are equal, the one that has walked furthest is picked. The Barracks has no targeting mode.
 
 ## Waves
 
@@ -214,7 +220,7 @@ Every day (by UTC time) everyone gets the same challenge. To start it, click **D
 |---|---|
 | **Rich start** | Twice the start gold |
 | **Swarm** | 50% more monsters a wave (not more bosses), with 35% less health |
-| **Two towers** | Only two of the five tower types can be built |
+| **Two towers** | Only two of the six tower types can be built (never only Frost and Barracks) |
 | **No selling** | Towers can't be sold |
 | **Armored day** | Normal waves are armored |
 | **Tight budget** | 30% less kill gold, 30% more wave gold |
@@ -233,7 +239,7 @@ Press **Esc** and click **Profile** (top left) to see your stats. They are your 
 
 Rules:
 
-- Achievements, best waves and wins per Level only count on the **Default map** and the daily challenge's map. Games, kills, time and towers count on any map.
+- Achievements, best waves and wins per Level only count on the **Default map** and the daily challenge's map (the other built-in maps count as custom maps). Games, kills, time and towers count on any map.
 - A win or an endless wave only counts if you were in the game by wave 60 (wave 8 in a daily).
 - A loaded game adds to your stats, but doesn't count as a new game.
 
@@ -260,7 +266,7 @@ The **Leaderboard** button in the Esc menu shows the online top 10. Tabs at the 
 
 The box opens on the list and Level of the game you're playing; the Level tabs (or **←** / **→**) show the others. Each team (the same player names) has one entry, its best game, and your own best shows under the list.
 
-When a game ends, the host sends the team's names and how the game went (wave, result, game time) to the game server. Only the released game sends scores: test runs and debug builds never do. Custom maps and loaded games don't count.
+When a game ends, the host sends the team's names and how the game went (wave, result, game time) to the game server. Only the released game sends scores: test runs and debug builds never do. Other maps (the other built-in ones too) and loaded games don't count.
 
 ## Map editor
 
@@ -271,12 +277,16 @@ Playing alone, press **Esc** and click **Map editor** to make your own maps (if 
 - **Rock**, **Tree** and **Water** block building (rocks and trees are 3D models, water is a lake with moving waves). **Areas** shows each player's area, **Clear** (click twice) makes the whole map grass.
 - **Width** and **Height**: from 12 x 9 up to 48 x 36 tiles.
 - **Check** shows whether the map works: the path must be one closed loop, one tile wide, that doesn't touch itself, with at least 8 tiles; gate 1 is needed and gates are numbered without gaps (up to 4, one per player). Monsters always walk the loop clockwise. Very uneven player areas only give a yellow warning.
-- **Save** keeps the map under its name (in the game's user folder, maps\<name>.txt). **Load...** opens a saved map or a copy of **Default** (which can't be changed). **New** starts over.
+- **Save** keeps the map under its name (in the game's user folder, maps\<name>.txt). **Load...** opens a saved map or a copy of a built-in map (they can't be changed; a built-in name can't be saved over, and an older saved map with such a name shows as `<name> (yours)`). **New** starts over.
 - **Play this map** starts a game on it, **Exit the editor** goes back to the map you played before. Only working maps can be saved, shared or played.
 
-**Picking a map:** in the **Esc** menu, click the **Map:** button under the title to choose **Default** or one of your saved maps. You can do this playing alone or as the host, before wave 1. While hosting, the map can only change while nobody has joined yet. Saved maps are checked again every time they're loaded.
+**Picking a map:** in the **Esc** menu, click the **Map:** button under the title to choose a built-in map or one of your saved maps. You can do this playing alone or as the host, before wave 1. While hosting, the map can only change while nobody has joined yet. Saved maps are checked again every time they're loaded.
 
 The map also decides how many can play: **one player per gate** (a map with 2 gates is full with 2 players). Multiplayer games use the host's map; see [Multiplayer](#multiplayer) for how joining players get it.
+
+### Built-in maps
+
+The game comes with 5 maps, shown first in the map lists and marked "(built in)": **Default**, **Serpent** (a long winding road), **Twin Lanes** (two long lanes with a lake strip between), **Hourglass** (two rooms joined by a narrow waist) and **Four Roads** (long roads from the corners into a small loop around a lake). All have 4 gates. They can't be changed, and only Default counts for the leaderboard and achievements.
 
 ### Sharing maps
 
@@ -287,7 +297,7 @@ The map also decides how many can play: **one player per gate** (a map with 2 ga
 
 ## Multiplayer
 
-Up to 4 players can defend the map together: one player per gate on the map (the Default map has 4).
+Up to 4 players can defend the map together: one player per gate on the map (the built-in maps have 4).
 
 - Each player has **their own gate**: on the Default map one at each corner of the square, Blue bottom-left, Red top-left, Yellow top-right, Green bottom-right. Every player's gate sends a full wave, so **more players means more monsters**, and the loss limit grows with it: **50 alive monsters per player** (100 with 2 players, 200 with 4).
 - **Each player has their own area**: the part of the map nearest to where their gate's road joins the loop (on the Default map, the quarter around their gate). When you pick a tower to build, your own area goes dark and the other players' areas light up in their color. To build in someone else's area, they have to say yes: a box pops up for them (**Y** for yes, **N** for no). Areas of gates nobody plays are free for everyone.
@@ -315,7 +325,7 @@ The host picks the map in the **Esc** menu before inviting anyone (see [Map edit
 
 A player who doesn't have the host's map yet gets a **Join game** box first: a preview of the map, its name, size, gates and trees, rocks and water. Nothing is saved until they click **Download and join**; **Cancel** (or **Esc**) leaves everything as it was. Only the map's tiles come over (under 2 KB), never files, and the game checks them like the map editor does, so a broken map is refused with a message. Tick **Keep this map in my map list** to save it among your own maps (a name you already use gets " (2)").
 
-Players who already have the same map, and games on the Default map, skip the box. After leaving the game, you're back on your own map.
+Players who already have the same map, and games on any built-in map, skip the box. After leaving the game, you're back on your own map.
 
 The invite code is 5 letters and digits (like `JR61X`). It works for anyone, anywhere: the game connects through a small game server, so nobody has to change anything in their router.
 
@@ -349,6 +359,7 @@ The game code is split into a few files, each building on the one before:
 Good places to start:
 
 - `TOWER_BASE` in `game_base.gd` sets each tower's cost, damage, range and fire rate for levels 1-4. `LEVEL_GAIN`, `LEVEL_COST` and the other `LEVEL_` values set how the levels after that grow (`make_towers()` works them out). `PATHS` sets the 2 specializations of each tower (their numbers times the normal ones from level 5 on); their rules are in `update_towers()`, `fire_lightning()` and `shot_hit()` in `main.gd`. Poison clouds: `CLOUD_TIME` and `CLOUD_TICK` in `game_base.gd`, their rules in `update_clouds()` in `main.gd`.
+- Barracks: `TOWER_BASE["barracks"]` and `PATHS["barracks"]` (Knights, Militia) in `game_base.gd`, with `ENGAGE_R`, `HOLD_IMMUNE`, `SOLDIERS_MAX` and `SOLDIER_HURT` next to them. The rules are in `update_barracks()` in `main.gd`. The helpers `rally_point()`, `barracks_fits()`, `soldier_bytes()`, `barracks_info()` and `apply_barracks_info()` are in `game_base.gd` (the multiplayer snapshots and the replay carry `barracks_info()`). `show_soldiers()` in `game_world.gd` draws the soldiers.
 - `wave_special()` in `game_base.gd` says which waves have splitters, shields or healers; their numbers are the `SPLIT_`, `HEAL_`, `HEALER_` and `SHIELD_` values next to it, their rules in `spawn_enemy()`, `split_enemy()`, `update_enemies()` and `damage_enemy()` in `main.gd`.
 - `BOARD_SEASON` in `game_net.gd` is part of the leaderboard's name: raise it after a balance change, so new scores aren't mixed with old ones.
 - `GAME_SPEEDS` in `game_base.gd` are the speeds the **F** button goes through.
@@ -362,6 +373,7 @@ Good places to start:
 - Only the exported game with a window looks for updates on GitHub; runs from the project folder, headless runs and tests don't. For testing the update feature, start with `-- --update-check` (or `--update-check-every=SECONDS`, which also checks again every that many seconds).
 - `EARLY_VOTE` sets the share of players (0.75 = 75%) who must agree to send a wave early in multiplayer.
 - `DEFAULT_MAP` in `game_base.gd` is the map, one letter per tile: `.` grass, `#` path, `1`-`4` a player's gate, `r` rock, `t` tree, `w` water (nothing can be built on these). `read_map()` checks it: the path must be one closed loop, one tile wide, and each gate must stand at the end of its own road to the loop. Monsters walk from their gate to the loop and then around it clockwise. Each player's area is the part of the map nearest to where their gate's road joins the loop.
+- `BUILTIN_MAPS` in `game_base.gd` lists the built-in maps by name (same letters as `DEFAULT_MAP`); `builtin_map_rows()` and `builtin_map_name()` look them up, and `map_list()`, `list_name()`, `list_rows()`, `is_builtin_name()` and `load_map_rows()` in `map_editor.gd` put them in the map lists.
 - Map sharing: `open_share()` and `import_code()` in `map_editor.gd` open the share box and read a pasted code; the code itself is in `map_share.gd`.
 - `PLAYER_COLORS` and `PLAYER_NAMES` set each player's color and its name (used when a player has no name), and `SILLY_NAMES` is the list of random names for players who leave the name box empty.
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.

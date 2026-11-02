@@ -201,6 +201,11 @@ func update_visuals(delta: float) -> void:
 	portrait_view.render_target_update_mode = SubViewport.UPDATE_ALWAYS
 	# From the front and a little above, like the main camera but close
 	var p := selected.node.position
+	if selected.type == "barracks":
+		# A low, wide hall: closer and lower
+		portrait_cam.position = p + Vector3(0, 1.9, 3.0)
+		portrait_cam.look_at(p + Vector3(0, 0.5, 0))
+		return
 	portrait_cam.position = p + Vector3(0, 2.2, 3.4)
 	portrait_cam.look_at(p + Vector3(0, 0.75, 0))
 
@@ -709,6 +714,9 @@ func fit_path(path: String, width: float, size: int) -> String:
 	return parts[0] + "\\…\\" + tail
 
 
+const SOLDIER_BAR_W := 14.0  # a soldier's health bar (monsters' are wider)
+
+
 func draw_health_bars() -> void:
 	for e in enemies:
 		# Only hurt monsters show a bar, like in Warcraft III, so big waves stay readable
@@ -723,6 +731,16 @@ func draw_health_bars() -> void:
 		hud.draw_rect(Rect2(bar - Vector2(1, 1), Vector2(w + 2, 6)), Color(0, 0, 0, 0.85))
 		hud.draw_rect(Rect2(bar, Vector2(w, 4)), Color(0.3, 0.04, 0.02))
 		hud.draw_rect(Rect2(bar, Vector2(w * e.hp / e.max_hp, 4)), Color(0.2, 0.85, 0.2))
+	# Hurt Barracks soldiers (game_world.gd fills soldier_bars each frame): a
+	# smaller bar in the owner's color
+	for s: Array in soldier_bars:
+		if camera.is_position_behind(s[0]):
+			continue
+		var p := camera.unproject_position(s[0])
+		var bar := Vector2(p.x - SOLDIER_BAR_W / 2.0, p.y)
+		hud.draw_rect(Rect2(bar - Vector2(1, 1), Vector2(SOLDIER_BAR_W + 2, 5)), Color(0, 0, 0, 0.85))
+		hud.draw_rect(Rect2(bar, Vector2(SOLDIER_BAR_W, 3)), Color(0.18, 0.15, 0.12))
+		hud.draw_rect(Rect2(bar, Vector2(SOLDIER_BAR_W * clampf(s[1], 0.0, 1.0), 3)), PLAYER_COLORS[s[2]])
 
 
 func text(pos: Vector2, s: String, size := 16, col := Color.WHITE) -> void:
@@ -1244,6 +1262,27 @@ func draw_selected() -> void:
 			text(Vector2(right, BAR_TOP + 114), "x%s damage to bosses" % str(boss).trim_suffix(".0"), 14, Color(0.6, 0.95, 0.4))
 		else:
 			text(Vector2(right, BAR_TOP + 114), "Goes through armor", 14, UI_GREY)
+	elif data.has("soldiers"):
+		# Barracks: damage of each soldier's hit, soldiers standing now (from
+		# soldier_look, which every computer has), their health and hold time
+		var total: int = data["soldiers"][lv]
+		var up := 0
+		for b in selected.soldier_look:
+			if b & 127 > 0:
+				up += 1
+		up = mini(up, total)
+		stat_row(Vector2(x, BAR_TOP + 92), "Damage", short(data["damage"][lv]), short(after["damage"][lv + 1]) if next else "")
+		stat_row(Vector2(x, BAR_TOP + 110), "Soldiers", "%d / %d" % [up, total], "%d" % after["soldiers"][lv + 1] if next and after["soldiers"][lv + 1] != total else "")
+		stat_row(Vector2(x, BAR_TOP + 128), "Health", num(data["soldier_hp"][lv], true), num(after["soldier_hp"][lv + 1], true) if next else "")
+		stat_row(Vector2(x, BAR_TOP + 146), "Hold", num(data["hold"][lv]) + "s", num(after["hold"][lv + 1]) + "s" if next else "")
+		text(Vector2(right, BAR_TOP + 96), "Respawn %ss" % num(data["respawn"][lv], true), 14, UI_GREY)
+		var boss := boss_bonus(selected.type, selected.path, lv)
+		if selected.path == 1 and lv >= PATH_LEVEL:
+			text(Vector2(right, BAR_TOP + 114), "Holds bosses (x%s)" % num(boss), 14, Color(0.6, 0.95, 0.4))
+		elif selected.path == 2 and lv >= PATH_LEVEL:
+			text(Vector2(right, BAR_TOP + 114), "Wide reach, no bosses", 14, UI_GREY)
+		else:
+			text(Vector2(right, BAR_TOP + 114), "Can't hold bosses", 14, UI_GREY)
 	else:
 		stat_row(Vector2(x, BAR_TOP + 96), "Damage", short(data["damage"][lv]), short(after["damage"][lv + 1]) if next else "")
 		stat_row(Vector2(x, BAR_TOP + 118), "Range", "%d" % data["range"][lv], "%d" % after["range"][lv + 1] if next else "")
@@ -1255,10 +1294,24 @@ func draw_selected() -> void:
 		text(Vector2(right, BAR_TOP + 140), "Max level", 14, UI_GOLD_LIGHT)
 	elif needs_path(selected):
 		text(Vector2(right, BAR_TOP + 140), "Next: pick a path (Q / E)", 14, UI_GOLD_LIGHT)
-	# Targeting mode: a plain text button (placeholder until it gets an icon)
+	# Targeting mode: a plain text button (placeholder until it gets an icon).
+	# Not for a Barracks: its soldiers fight the nearest monster.
+	if not has_target_button(selected):
+		return
 	ui_button_bg(MODE_RECT, mine, false)
 	text(MODE_RECT.position + Vector2(5, 16), "T", 11, UI_GOLD_LIGHT if mine else UI_DIM)
 	text(MODE_RECT.position + Vector2(20, 17), "Target: " + TARGET_MODES[selected.mode], 14, UI_TEXT if mine else UI_DIM)
+
+
+# Does this tower's panel have the Target button? (A Barracks doesn't.)
+func has_target_button(t: Tower) -> bool:
+	return t != null and t.type != "barracks"
+
+
+# A small number with up to 2 decimals (1 with one_place) and no trailing zeros: 1.5, 2.25, 8.
+func num(v: float, one_place := false) -> String:
+	var s := ("%.1f" if one_place else "%.2f") % v
+	return s.rstrip("0").trim_suffix(".")
 
 
 # "Damage  120  > 250": the value now and, in green, after the next upgrade.
@@ -1270,7 +1323,9 @@ func stat_row(pos: Vector2, label: String, now: String, after: String) -> void:
 
 
 # The build list's line for towers whose own text is too long for it.
-const BUILD_BLURBS := {"poison": "Clouds hurt all inside"}
+const BUILD_BLURBS := {"poison": "Clouds hurt all inside", "barracks": "Soldiers hold monsters"}
+# The build list's rows: 17 apart, so 6 towers and the hint fit under the heading
+const BUILD_ROW_H := 17
 
 
 # Nothing selected: the towers with their price and what they do.
@@ -1285,34 +1340,41 @@ func draw_build_list() -> void:
 	for i in TOWER_TYPES.size():
 		var type: String = TOWER_TYPES[i]
 		var data: Dictionary = TOWERS[type]
-		var y := BAR_TOP + 58 + i * 20
+		var y := BAR_TOP + 57 + i * BUILD_ROW_H
 		var affordable: bool = gold >= data["cost"][0]
 		if build_type == type:
 			hud.draw_rect(build_row_rect(i), Color(1, 0.85, 0.3, 0.15))
 		gem(Vector2(x + 6, y - 5), 4.5, data["color"])
 		text(Vector2(x + 18, y), data["name"], 15, UI_TEXT if affordable else UI_DIM)
-		text(Vector2(x + 82, y), gold_text(data["cost"][0]), 14, Color(1, 0.85, 0.3) if affordable else Color(0.6, 0.4, 0.3))
-		text(Vector2(x + 126, y), BUILD_BLURBS.get(type, data["desc"]), 14, UI_GREY)
+		text(Vector2(x + 88, y), gold_text(data["cost"][0]), 14, Color(1, 0.85, 0.3) if affordable else Color(0.6, 0.4, 0.3))
+		text(Vector2(x + 132, y), BUILD_BLURBS.get(type, data["desc"]), 14, UI_GREY)
 	var hint := "Click the map to build. Right-click: cancel" if build_type != "" else "Click a tower to upgrade or sell it."
 	text(Vector2(x, BAR_TOP + 160), hint, 13, UI_DIM)
 
 
 # A tower's row in the build list (console pixels).
 func build_row_rect(i: int) -> Rect2:
-	return Rect2(STATS_X - 6, BAR_TOP + 43 + i * 20, 330, 20)
+	return Rect2(STATS_X - 6, BAR_TOP + 57 - 14 + i * BUILD_ROW_H, 330, BUILD_ROW_H)
 
 
 # ---- Command card: square buttons with hotkeys
 
-# The build buttons share the top row of the card, however many towers there are.
+# The build buttons share the top row of the card: up to 5 side by side, more
+# in 2 short rows (6 towers: 2 rows of 3, see draw_build_chip()).
 const TOWER_BUTTON_GAP := 5.0
+const TOWER_ROW_GAP := 4.0
 
 
 func tower_button_rect(i: int) -> Rect2:
 	var n := TOWER_TYPES.size()
 	var row := CARD_SIZE * 4 + CARD_GAP * 3
-	var w := floorf((row - TOWER_BUTTON_GAP * (n - 1)) / n)
-	return Rect2(CARD_X + i * (w + TOWER_BUTTON_GAP), CARD_Y, w, CARD_SIZE)
+	if n <= 5:
+		var w := floorf((row - TOWER_BUTTON_GAP * (n - 1)) / n)
+		return Rect2(CARD_X + i * (w + TOWER_BUTTON_GAP), CARD_Y, w, CARD_SIZE)
+	var per := ceili(n / 2.0)
+	var cw := floorf((row - TOWER_BUTTON_GAP * (per - 1)) / per)
+	var h := floorf((CARD_SIZE - TOWER_ROW_GAP) / 2.0)
+	return Rect2(CARD_X + (i % per) * (cw + TOWER_BUTTON_GAP), CARD_Y + (i / per) * (h + TOWER_ROW_GAP), cw, h)
 
 
 # What hovered_card() returns besides a tower's index (0 and up)
@@ -1348,7 +1410,7 @@ func hovered_card() -> int:
 	for i in others.size():
 		if others[i].has_point(p):
 			return CARD_UPGRADE + i
-	if selected != null and asks.is_empty() and MODE_RECT.has_point(p):
+	if has_target_button(selected) and asks.is_empty() and MODE_RECT.has_point(p):
 		return CARD_MODE
 	for i in ABILITY_ORDER.size():
 		if ability_button_rect(i).has_point(p):
@@ -1364,6 +1426,9 @@ func draw_command_card() -> void:
 			var data: Dictionary = TOWERS[TOWER_TYPES[i]]
 			var r := tower_button_rect(i)
 			var affordable: bool = gold >= data["cost"][0]
+			if r.size.y < CARD_SIZE:
+				draw_build_chip(r, i, data, affordable)
+				continue
 			card_button(r, str(i + 1), data["name"], gold_text(data["cost"][0]), true, build_type == TOWER_TYPES[i], affordable)
 			gem(r.get_center() + Vector2(0, -2), 11.0, data["color"] if affordable else data["color"].darkened(0.4))
 	# Upgrade and Sell only work on your own selected tower
@@ -1425,6 +1490,9 @@ func path_extra(type: String, path: int) -> String:
 		"Miasma": return "Cloud size %d (Poison: %d), lasts %ss.\nInside: +%d%% damage taken (%d%% at level 20, %d%% at 40)." % [d["cloud"][PATH_LEVEL],
 				TOWERS[type]["cloud"][PATH_LEVEL], str(cloud_time(path, PATH_LEVEL)).trim_suffix(".0"),
 				roundi(p["weaken"][0] * 100), roundi(p["weaken"][1] * 100), roundi(p["weaken"][2] * 100)]
+		"Knights": return "Soldier health x%s, hold x%s. Holds bosses too." % [num(p["soldier_hp"]), num(p["hold"])] + boss
+		"Militia": return "+%d soldiers (+%d at level 20, +%d at 40), back %sx as fast.\nReach x%s. Never holds bosses." % [p["soldiers_add"][0],
+				p["soldiers_add"][1], p["soldiers_add"][2], num(1.0 / p["respawn"]), num(p["reach"])]
 	return ""
 
 
@@ -1487,6 +1555,21 @@ func card_button(r: Rect2, key: String, label: String, corner: String, enabled: 
 	text(pos, label, 13, col)
 
 
+# A short build button (6 or more towers): the gem on the left, the name and
+# under it the price, the hotkey in the bottom right corner.
+func draw_build_chip(r: Rect2, i: int, data: Dictionary, affordable: bool) -> void:
+	var active: bool = build_type == TOWER_TYPES[i]
+	ui_button_bg(r, true, active)
+	var col: Color = data["color"]
+	gem(Vector2(r.position.x + 14, r.get_center().y), 8.0, col if affordable else col.darkened(0.4))
+	var name_col := UI_GOLD_LIGHT if active else (UI_TEXT if affordable else UI_DIM)
+	var at := r.position + Vector2(27, 14)
+	hud.draw_string(font, at + Vector2(0, 1), data["name"], HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color(0, 0, 0, 0.8))
+	text(at, data["name"], 13, name_col)
+	text(r.position + Vector2(27, 26), gold_text(data["cost"][0]), 11, Color(1, 0.85, 0.3) if affordable else Color(0.7, 0.42, 0.3))
+	right_text(Vector2(r.end.x - 5, r.position.y + 26), str(i + 1), 11, UI_GOLD_LIGHT)
+
+
 # A box above the command card that explains the button under the mouse.
 func draw_card_tip(i: int) -> void:
 	var title := ""
@@ -1507,6 +1590,8 @@ func draw_card_tip(i: int) -> void:
 			lines = ["Damage %s%s   Range %d" % [short(data["damage"][lv]), "/s" if data.has("cloud") else "", data["range"][lv]]]
 			if data.has("cloud"):
 				lines[0] += "   Cloud %d" % data["cloud"][lv]
+			if data.has("soldiers"):
+				lines = ["Damage %s   Soldiers %d   Health %s   Hold %ss" % [short(data["damage"][lv]), data["soldiers"][lv], num(data["soldier_hp"][lv], true), num(data["hold"][lv])]]
 		else:
 			lines = ["This tower is at its highest level."]
 	elif i == CARD_SELL:
@@ -1521,6 +1606,8 @@ func draw_card_tip(i: int) -> void:
 		var d := tower_data(selected.type, k + 1, PATH_LEVEL)
 		title = "%s (%s)  -  %s gold" % [p["name"], "Q" if k == 0 else "E", short(d["cost"][PATH_LEVEL])]
 		lines = [p["desc"] + ".", "Level 5: Damage %s%s   Range %d   Speed %.2fs" % [short(d["damage"][PATH_LEVEL]), "/s" if d.has("cloud") else "", d["range"][PATH_LEVEL], d["cooldown"][PATH_LEVEL]]]
+		if d.has("soldiers"):
+			lines[1] = "Level 5: %d soldiers, damage %s, hold %ss" % [d["soldiers"][PATH_LEVEL], short(d["damage"][PATH_LEVEL]), num(d["hold"][PATH_LEVEL])]
 		lines.append_array(path_extra(selected.type, k + 1).split("\n"))
 		lines.append("For good: selling is the only way back.")
 	elif i == CARD_MODE:
@@ -3648,6 +3735,7 @@ const INFO_GOOD_WEAK := {
 	"frost": ["Fast monsters, helping other towers", "Low damage on its own"],
 	"spark": ["Crowds, long range", "Pricey, chain fades"],
 	"poison": ["Armor, crowds on the path", "Fast monsters (walk out of clouds)"],
+	"barracks": ["Fast monsters, crowds at a bend", "Bosses (unless Knights)"],
 }
 var tower_cards := {}  # type -> its card's texts and bar sizes
 
@@ -3673,7 +3761,12 @@ func tower_card(type: String) -> Dictionary:
 			["Range", d["range"][0] / most[1], "%d" % d["range"][0]],
 			["Speed", (1.0 / d["cooldown"][0]) / most[2], "%s shots/s" % str(snappedf(1.0 / d["cooldown"][0], 0.1))]]
 	var special := "Single target, quick shots"
-	if d.has("splash"):
+	if d.has("soldiers"):
+		# Barracks: each soldier's damage, and soldiers instead of shots
+		stats[0][2] += " per soldier"
+		stats[2] = ["Soldiers", float(d["soldiers"][0]) / SOLDIERS_MAX, "%d, health %s, back in %ss" % [d["soldiers"][0], num(d["soldier_hp"][0], true), num(d["respawn"][0], true)]]
+		special = "Holds monsters still %ss each (not bosses)" % num(d["hold"][0])
+	elif d.has("splash"):
 		special = "Splash: hits all within %d" % d["splash"][0]
 	elif d.has("slow"):
 		special = "Slows monsters to %d%% speed" % roundi(d["slow"][0] * 100.0)
@@ -3693,13 +3786,16 @@ func tower_card(type: String) -> Dictionary:
 	for k in 2:
 		var pd: Dictionary = d["paths"][k]
 		var pdps := tower_dps(pd, PATH_LEVEL)
-		paths.append(["Q" if k == 0 else "E", pd["name"], "%s dmg/s" % short(roundf(pdps)), "range %d" % pd["range"][PATH_LEVEL],
-				pdps / best, path_line(type, k)])
+		var reach := "range %d" % pd["range"][PATH_LEVEL] if not d.has("soldiers") else "%d soldiers" % pd["soldiers"][PATH_LEVEL]
+		paths.append(["Q" if k == 0 else "E", pd["name"], "%s dmg/s" % short(roundf(pdps)), reach, pdps / best, path_line(type, k)])
 	var title := "%s TOWER" % d["name"].to_upper()
+	var lv4 := "%s gold in all:  %s damage/s, range %d" % [short(all), short(roundf(tower_dps(d, top))), d["range"][top]]
+	if d.has("soldiers"):
+		lv4 = "%s gold in all:  %d soldiers, %s damage/s each" % [short(all), d["soldiers"][top], short(roundf(tower_dps(d, top)))]
 	var card := {"name": title, "name_w": title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 18).x,
 			"cost": "%s gold" % short(d["cost"][0]), "desc": d["desc"] + ".", "stats": stats,
 			"info": [["Special", special, UI_TEXT], ["Good vs", words[0], Color(0.55, 0.92, 0.45)], ["Weak vs", words[1], Color(1.0, 0.5, 0.42)]],
-			"lv4": "%s gold in all:  %s damage/s, range %d" % [short(all), short(roundf(tower_dps(d, top))), d["range"][top]],
+			"lv4": lv4,
 			"lv5": "LEVEL 5: PICK A PATH  (%s gold)" % short(d["cost"][PATH_LEVEL]), "paths": paths}
 	tower_cards[type] = card
 	return card
@@ -3730,7 +3826,20 @@ func path_line(type: String, k: int) -> String:
 		parts.append("+%d%% damage taken inside" % roundi(p["weaken"][0] * 100))
 	if p.has("chain_add") or p.has("chain_set"):
 		parts.append("Chains to %d" % pd["chain"][lv])
-	if p.has("boss"):
+	# Barracks
+	if p.has("soldiers_add"):
+		parts.append("+%d soldiers (+%d at lv 20, +%d at lv 40)" % p["soldiers_add"])
+	if p.has("boss_hold"):
+		parts.append("Holds bosses (x%s damage)" % num(p.get("boss", 1.0)))
+	if p.has("reach"):
+		parts.append("reach x%s" % num(p["reach"]))
+	if p.has("soldier_hp"):
+		parts.append("health %s" % num(pd["soldier_hp"][lv], true))
+	if p.has("hold"):
+		parts.append("hold %ss" % num(pd["hold"][lv]))
+	if p.has("respawn"):
+		parts.append("back in %ss" % num(pd["respawn"][lv], true))
+	if p.has("boss") and not p.has("boss_hold"):
 		parts.append("x%s vs bosses" % str(p["boss"]).trim_suffix(".0"))
 	var room := INFO_W - 44.0
 	var out := ""
@@ -3974,11 +4083,14 @@ func draw_profile() -> void:
 	ui_heading(Vector2(x, 496), "TOWERS", w)
 	var fav: String = p.favourite
 	right_text(Vector2(right, 501), "Favourite: %s (most built)" % TOWERS[fav]["name"] if fav != "" else "Favourite: none yet", 15, UI_GOLD_LIGHT)
-	for i in p.towers.size():
+	# Spread over the width, centered, at most 112 apart
+	var n: int = p.towers.size()
+	var step := minf(112.0, w / maxf(n, 1.0))
+	for i in n:
 		var t: Dictionary = p.towers[i]
-		var cx: float = x + 50 + i * 112
+		var cx: float = x + w / 2.0 + (i - (n - 1) / 2.0) * step
 		if t.type == fav:
-			hud.draw_rect(Rect2(cx - 48, 508, 96, 92), Color(0.55, 0.42, 0.15, 0.35))
+			hud.draw_rect(Rect2(cx - step / 2.0 + 4.0, 508, step - 8.0, 92), Color(0.55, 0.42, 0.15, 0.35))
 		gem(Vector2(cx, 532), 14.0, TOWERS[t.type]["color"])
 		center_text(cx, 566, "%s built" % short(t.built), 14, UI_TEXT)
 		center_text(cx, 584, "%d%% damage" % roundi(t.share * 100.0), 13, UI_GREY)

@@ -125,6 +125,7 @@ func build_world() -> void:
 	build_monsters()  # at the start, so the first wave doesn't stutter
 	load_arrow_models()  # and upgrades don't either
 	load_kit_models()
+	load_barracks_models()
 
 
 # A 3D color table for env.adjustment_color_correction: shadows a little cool,
@@ -1325,6 +1326,12 @@ func build_tower_node(t: Tower) -> void:
 	add_child(root)
 	# Levels after 4 keep the level 4 look (the level shows on a badge, see draw_level_badges())
 	var look := mini(t.level, 3)
+	if t.type == "barracks":
+		t.head = build_barracks_tower(root, t)
+		add_pips(root, look, Vector3(0, 0.06, 0.44))
+		paint_tree(root)
+		t.node = root
+		return
 	if t.type == "arrow" or KIT_FILES.has(t.type):
 		var model_head: Node3D
 		if t.type == "arrow":
@@ -1822,6 +1829,292 @@ func merge_parts(parts: Node3D) -> ArrayMesh:
 	return mesh
 
 
+# ---------------------------------------------------------------- Barracks
+
+# Barracks: a guard hall made with the model kit (see assets/CREDITS.md), one
+# model per look like the cannon's: levels 1-4, then Knights (a stone keep) and
+# Militia (a wooden camp) at levels 5, 10, 15, 20, 30 and 40. Nothing turns: the
+# whole model faces its rally point, where a small flag stands.
+const BARRACKS_FILE := "res://assets/towers/barracks/barracks_%d_%d.glb"
+const BARRACKS_WIDTH := 0.9  # L1's width on a 1-unit tile
+var barracks_parts := {}  # Vector2i(path, look) -> [[mesh, transform], ...]
+var barracks_scale := 0.0
+var barracks_mats := {}
+
+
+func build_barracks_tower(root: Node3D, t: Tower) -> Node3D:
+	var model := Node3D.new()
+	var parts: Array = barracks_model(kit_look(t.level, t.path))
+	model.scale = Vector3.ONE * barracks_scale
+	root.add_child(model)
+	for p: Array in parts:
+		var mesh: Mesh = p[0]
+		var mi := MeshInstance3D.new()
+		mi.mesh = mesh
+		mi.transform = p[1]
+		model.add_child(mi)
+		for s in mesh.get_surface_count():
+			mi.set_surface_override_material(s, barracks_mat(mesh.surface_get_material(s).resource_name, t.owner))
+	# The door faces the rally point; a small flag stands at its edge
+	var r := t.rally
+	if r.x < 0.0:
+		r = rally_point(t.cell, TOWERS["barracks"]["range"][0])
+	if r.x >= 0.0:
+		var d := r - t.pos
+		root.rotation.y = atan2(d.x, d.y)
+		var flag := add_mesh(root, rally_flag(t.owner), null)
+		flag.position = root.basis.inverse() * (to3d(r - d.normalized() * CELL * 0.4) - root.position)
+	return model
+
+
+# Loads all the models at the start, so building and upgrading never stutter
+func load_barracks_models() -> void:
+	for look in range(1, 5):
+		barracks_model(Vector2i(0, look))
+	for path in [1, 2]:
+		for look in range(5, 11):
+			barracks_model(Vector2i(path, look))
+	load_soldiers()
+
+
+func barracks_model(k: Vector2i) -> Array:
+	if not barracks_parts.has(k):
+		var scene: Node3D = load(BARRACKS_FILE % [k.x, k.y]).instantiate()
+		var parts := []
+		collect_meshes(scene, Transform3D.IDENTITY, parts)
+		scene.free()
+		barracks_parts[k] = parts
+		# All looks use L1's size, so higher levels can grow
+		if barracks_scale == 0.0:
+			var box := AABB()
+			for p: Array in parts:
+				box = box.merge(p[1] * (p[0] as Mesh).get_aabb())
+			barracks_scale = BARRACKS_WIDTH / maxf(box.size.x, box.size.z)
+	return barracks_parts[k]
+
+
+# The cannon's atlas and fire glow, its own team cloth, and team roof shingles
+# (a little greyer, like the arrow tower's roof)
+func barracks_mat(name: String, slot: int) -> Material:
+	if name == "Atlas" or name == "Glow":
+		return kit_mat("cannon", name, slot)
+	var key := "%s %d" % [name, slot]
+	if not barracks_mats.has(key):
+		var m := StandardMaterial3D.new()
+		m.vertex_color_use_as_albedo = true
+		var col: Color = PLAYER_COLORS[slot]
+		if name == "TeamRoof":
+			m.albedo_texture = load("res://assets/towers/barracks/barracks_roof.jpg")
+			m.albedo_color = col.lerp(Color(0.5, 0.5, 0.5), 0.25)
+		else:
+			m.albedo_texture = load("res://assets/towers/barracks/barracks_team.jpg")
+			m.albedo_color = col
+			m.cull_mode = BaseMaterial3D.CULL_DISABLED
+		barracks_mats[key] = painted(m)
+	return barracks_mats[key]
+
+
+# A small pole with a pennant in the owner's color, one shared mesh per owner
+func rally_flag(slot: int) -> Mesh:
+	var key := "rally %d" % slot
+	if not model_meshes.has(key):
+		var parts := Node3D.new()
+		part_cyl(parts, 0.07, 0.09, 0.05, Color(0.55, 0.52, 0.47), Vector3(0, 0.025, 0), 7)
+		part_cyl(parts, 0.012, 0.016, 0.55, Color(0.4, 0.27, 0.15), Vector3(0, 0.3, 0), 6)
+		part_ball(parts, 0.028, Color(1.0, 0.78, 0.3), Vector3(0, 0.58, 0))
+		var tri := PrismMesh.new()
+		tri.size = Vector3(0.16, 0.24, 0.012)
+		part_put(parts, tri, PLAYER_COLORS[slot], Vector3(0.12, 0.47, 0), Vector3(0, 0, -90))
+		model_meshes[key] = merge_parts(parts)
+	return model_meshes[key]
+
+
+# Soldiers: puppets made with the model kit (assets/units/soldier_*.glb), posed
+# a few times per animation at the start like the monsters. Every pose is one
+# MultiMesh for all players (the owner's color is in each soldier's custom
+# data, see soldier.gdshader), so 40 soldiers are a handful of draw calls.
+const SOLDIER_FILE := "res://assets/units/soldier_%s.glb"
+const SOLDIER_KINDS := {"footman": 0.46, "knight": 0.5, "militia": 0.44}  # kind -> height
+const SOLDIER_ANIMS := ["Idle", "Fight", "Walk", "Fall"]
+const SOLDIER_FRAMES := 8  # poses per animation
+const SOLDIER_SPEED := 1.6  # tiles a second, walking out of the door and to their monster
+var soldier_poses := {}  # "kind anim" -> [MultiMeshInstance3D per pose]
+var soldier_len := {}  # anim -> seconds
+var soldier_vis := {}  # Tower -> per soldier {"p": Vector3, "turn": float, "fall": float}
+var soldier_need := {}  # MultiMeshInstance3D -> instances it lacked last frame (it grows)
+var soldier_bars: Array = []  # hurt soldiers this frame: [3D point over the head, health share 0-1, owner] (for the ui's health bars)
+
+
+func load_soldiers() -> void:
+	if not soldier_poses.is_empty():
+		return
+	var mat := ShaderMaterial.new()
+	mat.shader = load("res://assets/shaders/soldier.gdshader")
+	mat.set_shader_parameter("albedo_tex", load("res://assets/units/soldier.jpg"))
+	for kind: String in SOLDIER_KINDS:
+		var root: Node3D = load(SOLDIER_FILE % kind).instantiate()
+		add_child(root)
+		var player: AnimationPlayer = root.find_children("*", "AnimationPlayer", true, false)[0]
+		player.play("Idle")
+		# Pose 0 unscaled first, to fit the height and put the feet on the ground
+		var probe := soldier_pose(root, player, 0.0, Transform3D.IDENTITY)
+		var box := AABB(probe.v[0], Vector3.ZERO)
+		for v: Vector3 in probe.v:
+			box = box.expand(v)
+		var s: float = SOLDIER_KINDS[kind] / box.size.y
+		var top := Transform3D(Basis.from_scale(Vector3.ONE * s), Vector3(0, -box.position.y * s, 0))
+		for anim: String in SOLDIER_ANIMS:
+			var a := player.get_animation(anim)
+			soldier_len[anim] = a.length
+			player.play(anim)
+			var list := []
+			for f in SOLDIER_FRAMES:
+				var at := a.length * f / (SOLDIER_FRAMES - 1.0 if anim == "Fall" else float(SOLDIER_FRAMES))
+				list.append(fx_multimesh(pose_mesh(soldier_pose(root, player, at, top)), mat, 48))
+			soldier_poses["%s %s" % [kind, anim]] = list
+		root.free()
+
+
+# Like glb_pose(), keeping the vertex colors (their alpha marks the team parts)
+func soldier_pose(root: Node3D, player: AnimationPlayer, t: float, top: Transform3D) -> Dictionary:
+	player.seek(t, true)
+	var parts := new_parts()
+	var back := root.global_transform.affine_inverse()
+	for mi: MeshInstance3D in root.find_children("*", "MeshInstance3D", true, false):
+		if mi.mesh == null:
+			continue
+		var xf := top * back * mi.global_transform
+		var nb := xf.basis.inverse().transposed()
+		for s in mi.mesh.get_surface_count():
+			var a := mi.mesh.surface_get_arrays(s)
+			var base: int = parts.v.size()
+			var vs: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
+			var ns: PackedVector3Array = a[Mesh.ARRAY_NORMAL]
+			var uvs = a[Mesh.ARRAY_TEX_UV]
+			var cs = a[Mesh.ARRAY_COLOR]
+			for k in vs.size():
+				parts.v.append(xf * vs[k])
+				parts.n.append((nb * ns[k]).normalized())
+				parts.uv.append(uvs[k] if uvs != null else Vector2.ZERO)
+				parts.c.append(cs[k] if cs != null else Color(1, 1, 1, 0))
+			for k: int in a[Mesh.ARRAY_INDEX]:
+				parts.i.append(base + k)
+	return parts
+
+
+# Each frame, before main.gd's update_visuals() calls show_soldiers(): every pose
+# MultiMesh starts empty, and grows if it ran out of room last frame.
+func start_soldiers() -> void:
+	soldier_bars.clear()
+	for node: MultiMeshInstance3D in soldier_need:
+		node.multimesh.instance_count = soldier_need[node] + 16
+	soldier_need.clear()
+	# Shadows only on Graphics High, like the monsters'
+	var shade := GeometryInstance3D.SHADOW_CASTING_SETTING_ON if graphics_high else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	for list: Array in soldier_poses.values():
+		for node: MultiMeshInstance3D in list:
+			node.multimesh.visible_instance_count = 0
+			node.cast_shadow = shade
+			fx_box(node.multimesh)
+	for t: Tower in soldier_vis.keys():
+		if towers.get(t.cell) != t:
+			soldier_vis.erase(t)
+
+
+# One Barracks' soldiers, from soldier_look (every computer has it): a byte per
+# soldier, its health share 1-127 (0: fallen), + 128 while it holds a monster.
+# A holding soldier fights the monster nearest the rally point (every computer
+# knows where the monsters are). Fallen soldiers fall, lie a moment and sink
+# away; back, they walk out of the door.
+func show_soldiers(t: Tower) -> void:
+	if soldier_poses.is_empty() or t.node == null or t.rally.x < 0.0:
+		return
+	var kind := "footman"
+	if t.level >= PATH_LEVEL and t.path > 0:
+		kind = "knight" if t.path == 1 else "militia"
+	var home := to3d(t.rally)
+	var face := t.node.rotation.y
+	var door := t.node.position + Vector3(sin(face), 0, cos(face)) * 0.4
+	var n := t.soldier_look.size()
+	var looks: Array = soldier_vis.get(t, [])
+	while looks.size() < n:
+		looks.append({"p": door, "turn": face, "fall": -1.0})
+	looks.resize(n)
+	soldier_vis[t] = looks
+	var reach := ENGAGE_R * (2.0 if kind == "militia" else 1.0) * 1.6
+	var taken := []
+	var delta := get_process_delta_time()
+	for i in n:
+		var s: Dictionary = looks[i]
+		var b: int = t.soldier_look[i]
+		var hp := (b & 127) / 127.0
+		var anim := "Idle"
+		var ph: float = time / soldier_len["Idle"] + i * 0.37
+		var y := 0.0
+		if hp <= 0.0:
+			if s.fall < 0.0:
+				s.fall = 0.0
+			s.fall += delta
+			if s.fall > 2.2:
+				s.p = door
+				continue
+			anim = "Fall"
+			ph = minf(s.fall / soldier_len["Fall"], 1.0) * (SOLDIER_FRAMES - 1.0) / SOLDIER_FRAMES
+			y = -clampf((s.fall - 1.4) / 0.8, 0.0, 1.0) * 0.3
+		else:
+			if s.fall >= 0.0:
+				s.fall = -1.0
+				s.p = door
+			# Its spot round the rally point, or next to the monster it holds
+			var spot := home
+			if n > 1:
+				var a := face + TAU * i / n + 0.4
+				spot += Vector3(sin(a), 0, cos(a)) * (0.13 + 0.035 * n)
+			var want := face
+			var goal := spot
+			var foe: Enemy = null
+			if b & 128:
+				var best := reach * reach
+				for e in enemies:
+					if e.dead or e.node == null or e in taken:
+						continue
+					var d := e.pos.distance_squared_to(t.rally)
+					if d < best:
+						best = d
+						foe = e
+			if foe != null:
+				taken.append(foe)
+				var ep := foe.node.position
+				var away := spot - ep
+				away.y = 0.0
+				if away.length() < 0.01:
+					away = Vector3(sin(face), 0, cos(face))
+				goal = ep + away.normalized() * (0.2 + foe.radius / CELL)
+				want = atan2(ep.x - goal.x, ep.z - goal.z)
+			var to: Vector3 = goal - s.p
+			to.y = 0.0
+			if to.length() > 0.05:
+				s.p += to.limit_length(SOLDIER_SPEED * delta)
+				anim = "Walk"
+				ph = time / soldier_len["Walk"] + i * 0.37
+				want = atan2(to.x, to.z)
+			elif foe != null:
+				anim = "Fight"
+				ph = time / soldier_len["Fight"] + i * 0.29
+			s.turn = lerp_angle(s.turn, want, minf(1.0, delta * 10.0))
+			if hp < 0.99:
+				soldier_bars.append([s.p + Vector3(0, SOLDIER_KINDS[kind] + 0.1, 0), hp, t.owner])
+		var node: MultiMeshInstance3D = soldier_poses["%s %s" % [kind, anim]][int(ph * SOLDIER_FRAMES) % SOLDIER_FRAMES]
+		var mm := node.multimesh
+		var k := mm.visible_instance_count
+		if k >= mm.instance_count:
+			soldier_need[node] = maxi(soldier_need.get(node, 0), k + 1)
+			continue
+		mm.set_instance_transform(k, Transform3D(Basis(Vector3.UP, s.turn), s.p + Vector3(0, y, 0)))
+		mm.set_instance_custom_data(k, PLAYER_COLORS[t.owner])
+		mm.visible_instance_count = k + 1
+
+
 const AREA_TINT_COMPAT := 0.42  # other players' area tint on Compatibility (0.2 on Forward+)
 
 
@@ -1899,8 +2192,11 @@ func update_visuals(delta: float) -> void:
 	ice.visible_instance_count = frozen
 	end_specials(delta)
 	update_corpses(delta)
+	start_soldiers()
 	for t: Tower in towers.values():
-		if t.type == "arrow" or KIT_FILES.has(t.type):
+		if t.type == "barracks":
+			pass  # nothing turns
+		elif t.type == "arrow" or KIT_FILES.has(t.type):
 			t.head.rotation.y = atan2(-t.aim.x, -t.aim.y)
 		else:
 			t.head.rotation.y += delta * 2.0
@@ -1949,6 +2245,8 @@ func update_visuals(delta: float) -> void:
 			var owner := area_owner(c)
 			if not can_build(c):
 				ghost_mat.albedo_color = Color(1, 0.2, 0.2, 0.4)
+			elif build_type == "barracks" and not barracks_fits(c):
+				ghost_mat.albedo_color = Color(1, 0.2, 0.2, 0.4)  # no path in reach
 			elif owner >= 0 and owner != local_slot:
 				ghost_mat.albedo_color = Color(1, 0.6, 0.1, 0.5)  # needs the other player's yes
 			else:
@@ -2297,6 +2595,11 @@ func clear_world() -> void:
 		cloud_puffs.multimesh.visible_instance_count = 0
 	cloud_cells_dirty = true
 	bubble_breaks.clear()
+	soldier_vis.clear()
+	soldier_bars.clear()
+	for list: Array in soldier_poses.values():
+		for node: MultiMeshInstance3D in list:
+			node.multimesh.visible_instance_count = 0
 	super()
 
 

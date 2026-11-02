@@ -501,7 +501,7 @@ func _on_games_listed(result: int, code: int, _headers: PackedStringArray, body:
 # Each board is named after the last wave, this number and the difficulty level
 # ("300w-3-hard"): raise the number after a balance change, so new scores aren't
 # mixed with ones from the old rules. Each level has its own board (and stats).
-const BOARD_SEASON := 4  # 2: tower specializations, 3: difficulty levels, 4: abilities and endless mode
+const BOARD_SEASON := 5  # 2: tower specializations, 3: difficulty levels, 4: abilities and endless mode, 5: Barracks
 const BOARD_ROWS := 10
 
 var board_open := false  # the leaderboard box in the Esc menu
@@ -1300,13 +1300,22 @@ func send_snapshot() -> void:
 	for p in players:
 		golds.append(p.gold if p != null else 0)
 	var info := [wave, next_wave_timer, state, game_speed, monsters_left_to_spawn(), golds, wave_votes]
+	# The Barracks' soldiers (see barracks_info()), only while there is a Barracks.
+	# Older games read info[0] to info[6] and never look further.
+	var soldiers := barracks_info()
+	if not soldiers.is_empty():
+		info.append(soldiers)
 	var most := SNAPSHOT_MONSTERS if relay == null else 1 << 20
 	var start := 0
 	while true:
 		# enemies is in id order (new monsters get the next id and go last)
 		var base: int = enemies[start].id if start < enemies.size() else 0
 		var end := start
-		while end < enemies.size() and end - start < most and enemies[end].id - base < 65536:
+		# The first message also carries the soldiers: fewer monsters, so it still fits one packet
+		var room := most
+		if start == 0 and not soldiers.is_empty():
+			room = maxi(1, most - ceili((soldiers.size() + 8) / 9.0))
+		while end < enemies.size() and end - start < room and enemies[end].id - base < 65536:
 			end += 1
 		var data := PackedByteArray()
 		data.resize(8 + (end - start) * 9)
@@ -1413,8 +1422,8 @@ func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant) -
 		net_refused.rpc_id(peer, "That game is full (%d player%s)." % [n, "" if n == 1 else "s"])
 		return
 	var mine := map_hash(map_rows_text)
-	# Players on another map get this one first, unless it's the Default map (everyone has that)
-	if their_map != mine and map_rows_text != DEFAULT_MAP:
+	# Players on another map get this one first, unless it's a built-in map (everyone of this version has those)
+	if their_map != mine and builtin_map_name(map_rows_text) == "":
 		if confirmed:
 			joining.erase(peer)
 			net_refused.rpc_id(peer, "The host changed the map. Try joining again.")
@@ -1509,7 +1518,7 @@ func net_show_map(title: Variant, host_name: Variant, rows: Variant) -> void:
 
 
 # slot: our player slot. map: the sha256 of the host's map, which must be ours,
-# the Default map or the one we said yes to.
+# a built-in map (BUILTIN_MAPS) or the one we said yes to.
 @rpc("authority", "call_remote", "reliable")
 func net_welcome(slot: Variant, map: Variant) -> void:
 	if net_mode != "connecting" and net_mode != "map_offer":
@@ -1519,11 +1528,15 @@ func net_welcome(slot: Variant, map: Variant) -> void:
 		return
 	var rows: Array = []
 	var title := ""
-	if map == map_hash(map_rows_text):
-		pass  # we have the host's map already
-	elif map == map_hash(DEFAULT_MAP):
-		rows = DEFAULT_MAP
-		title = "Default"
+	if map != map_hash(map_rows_text):
+		# A built-in map (Default, Serpent...): every game of this version has it
+		for n: String in BUILTIN_MAPS:
+			if map == map_hash(BUILTIN_MAPS[n]):
+				rows = builtin_map_rows(n)
+				title = n
+				break
+	if map == map_hash(map_rows_text) or not rows.is_empty():
+		pass  # we have the host's map already, or it's built in
 	elif map_offer.get("accepted", false) and map == map_offer.hash:
 		rows = map_offer.rows
 		title = map_offer.name
@@ -1864,6 +1877,9 @@ func net_snapshot(info: Array, data: PackedByteArray) -> void:
 		for slot in MAX_PLAYERS:
 			if players[slot] != null:
 				players[slot].gold = golds[slot]
+		# The Barracks' soldiers, when the host has a Barracks (apply_barracks_info() checks it)
+		if info.size() > 7:
+			apply_barracks_info(info[7])
 	var base := data.decode_u32(0)
 	var end := data.decode_u32(4)
 	# The first message also covers every id before its first monster

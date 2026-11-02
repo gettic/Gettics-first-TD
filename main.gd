@@ -354,7 +354,7 @@ func tip_ready(id: String, mine: Dictionary) -> bool:
 				tip_spots[id] = mine.can_upgrade.pos
 				return true
 		"target":
-			return selected != null and selected.owner == local_slot and "upgrade" in tips_seen
+			return selected != null and selected.owner == local_slot and selected.type != "barracks" and "upgrade" in tips_seen
 		"abilities":
 			return wave >= 3
 		"limit":
@@ -592,11 +592,15 @@ func update_enemies(dt: float) -> void:
 			if e.slow_time <= 0.0:
 				e.slow_factor = 1.0
 		e.freeze_immune = maxf(e.freeze_immune - dt, 0.0)
+		e.hold_immune = maxf(e.hold_immune - dt, 0.0)
 		# Frozen by Deep Freeze: stands still, and can't be frozen again for a while after
 		if e.freeze_time > 0.0:
 			e.freeze_time -= dt
 			if e.freeze_time <= 0.0:
 				e.freeze_immune = FREEZE_IMMUNE
+			continue
+		# Held by a Barracks soldier: stands still
+		if e.held:
 			continue
 		var move := e.speed * e.slow_factor * dt
 		while move > 0.0:
@@ -617,7 +621,11 @@ func update_enemies(dt: float) -> void:
 
 
 func update_towers(dt: float) -> void:
+	hold_tiles_ready = false
 	for t: Tower in towers.values():
+		if t.type == "barracks":
+			update_barracks(t, dt)
+			continue
 		t.cooldown -= dt
 		if t.cooldown > 0.0:
 			continue
@@ -638,6 +646,148 @@ func update_towers(dt: float) -> void:
 		else:
 			launch_shot(t, target, false)
 			send_shot(t, target)
+
+
+# ----- Barracks (see TOWER_BASE["barracks"] and ENGAGE_R in game_base.gd)
+# Host: each soldier at the rally point holds one monster still for its hold
+# time, hitting it, and wears down while it does. Only free soldiers look for a
+# monster, and only on the tiles around the rally point (the monsters are sorted
+# into tiles at most once a frame, and only when a free soldier needs them).
+
+var hold_tiles := {}  # host: Vector2i -> [monsters on that tile], this frame
+var hold_tiles_ready := false
+
+
+# Sizes a Barracks' soldier lists to its level. New soldiers come at full
+# health; a loaded Barracks keeps its soldiers' health (clamped).
+func fit_soldiers(t: Tower) -> void:
+	var data := tower_data(t.type, t.path, t.level)
+	var n: int = data["soldiers"][t.level]
+	var most: float = data["soldier_hp"][t.level]
+	while t.soldier_hold.size() > n:
+		release(t, t.soldier_hold.size() - 1)
+		t.soldier_hold.pop_back()
+	var had := t.soldier_hp.size()
+	t.soldier_hp.resize(n)
+	t.soldier_wait.resize(n)
+	t.soldier_cd.resize(n)
+	t.soldier_left.resize(n)
+	for i in n:
+		if i >= had or not is_finite(t.soldier_hp[i]):
+			t.soldier_hp[i] = most
+			t.soldier_wait[i] = 0.0
+		t.soldier_hp[i] = clampf(t.soldier_hp[i], 0.0, most)
+		t.soldier_wait[i] = clampf(t.soldier_wait[i], 0.0, data["respawn"][t.level]) if is_finite(t.soldier_wait[i]) else 0.0
+	t.soldier_hold.resize(n)
+	if t.rally.x < 0.0:
+		t.rally = rally_point(t.cell, TOWERS["barracks"]["range"][0])
+
+
+# A soldier lets its monster go (no soldier holds it again for HOLD_IMMUNE).
+func release(t: Tower, i: int) -> void:
+	var e: Enemy = t.soldier_hold[i]
+	if e != null:
+		e.held = false
+		e.hold_immune = HOLD_IMMUNE
+	t.soldier_hold[i] = null
+
+
+func update_barracks(t: Tower, dt: float) -> void:
+	var data := tower_data(t.type, t.path, t.level)
+	if t.soldier_hold.size() != data["soldiers"][t.level] or t.soldier_hp.size() != t.soldier_hold.size():
+		fit_soldiers(t)
+	if t.rally.x < 0.0:
+		return
+	var max_hp: float = data["soldier_hp"][t.level]
+	var p: Dictionary = PATHS["barracks"][t.path - 1] if t.path > 0 and t.level >= PATH_LEVEL else {}
+	var boss_hold: float = p.get("boss_hold", 0.0)
+	var reach: float = ENGAGE_R * p.get("reach", 1.0)
+	for i in t.soldier_hold.size():
+		if t.soldier_hp[i] <= 0.0:
+			t.soldier_wait[i] -= dt
+			if t.soldier_wait[i] <= 0.0:
+				t.soldier_hp[i] = max_hp
+			continue
+		var e: Enemy = t.soldier_hold[i]
+		if e != null and e.dead:
+			t.soldier_hold[i] = null
+			e = null
+		if e == null:
+			e = free_monster(t.rally, reach, boss_hold > 0.0)
+			if e == null:
+				continue
+			e.held = true
+			t.soldier_hold[i] = e
+			t.soldier_left[i] = data["hold"][t.level] * (boss_hold if e.kind == "boss" else 1.0)
+		t.soldier_left[i] -= dt
+		t.soldier_hp[i] -= SOLDIER_HURT.get(e.kind, 1.0) * (0.5 if e.special == "splitling" else 1.0) * dt
+		t.soldier_cd[i] -= dt
+		if t.soldier_cd[i] <= 0.0:
+			t.soldier_cd[i] += data["cooldown"][t.level]
+			damage_enemy(e, data["damage"][t.level] * (boss_bonus(t.type, t.path, t.level) if e.kind == "boss" else 1.0), t.owner, t)
+		if t.soldier_hp[i] <= 0.0:
+			t.soldier_hp[i] = 0.0
+			t.soldier_wait[i] = data["respawn"][t.level]
+			release(t, i)
+		elif t.soldier_left[i] <= 0.0 or e.dead:
+			release(t, i)
+
+
+# The monster nearest to the rally point at, within reach, that nobody holds
+# (bosses only if bosses is true), or null.
+func free_monster(at: Vector2, reach: float, bosses: bool) -> Enemy:
+	if not hold_tiles_ready:
+		hold_tiles_ready = true
+		hold_tiles.clear()
+		for e in enemies:
+			if not e.dead:
+				var k := Vector2i(floori(e.pos.x / CELL), floori(e.pos.y / CELL))
+				if hold_tiles.has(k):
+					hold_tiles[k].append(e)
+				else:
+					hold_tiles[k] = [e]
+	var best: Enemy = null
+	var best_d := reach * reach
+	for x in range(floori((at.x - reach) / CELL), floori((at.x + reach) / CELL) + 1):
+		for y in range(floori((at.y - reach) / CELL), floori((at.y + reach) / CELL) + 1):
+			for o: Enemy in hold_tiles.get(Vector2i(x, y), []):
+				if o.dead or o.held or o.hold_immune > 0.0 or (o.kind == "boss" and not bosses):
+					continue
+				var d := o.pos.distance_squared_to(at)
+				if d <= best_d:
+					best_d = d
+					best = o
+	return best
+
+
+# A tower going away (sold, or removed by the host) lets its monsters go.
+func remove_tower(c: Vector2i) -> void:
+	var t: Tower = towers.get(c)
+	if t != null:
+		for i in t.soldier_hold.size():
+			release(t, i)
+	super(c)
+
+
+# Every computer, every frame: the soldiers' looks (see show_soldiers()). The
+# host and a player alone know the soldiers; the other players get them in the
+# snapshots (apply_barracks_info()) and show full soldiers until then. The
+# replay sets them from its frames.
+func update_visuals(delta: float) -> void:
+	super(delta)
+	for t: Tower in towers.values():
+		if t.type != "barracks":
+			continue
+		if t.rally.x < 0.0:
+			t.rally = rally_point(t.cell, TOWERS["barracks"]["range"][0])
+		if not replay_on and net_mode != "client":
+			t.soldier_look = soldier_bytes(t)
+		if t.soldier_look.is_empty():
+			var full := PackedByteArray()
+			full.resize(tower_data(t.type, t.path, t.level)["soldiers"][t.level])
+			full.fill(127)
+			t.soldier_look = full
+		show_soldiers(t)
 
 
 # Picks the enemy in range that fits the tower's targeting mode best (see
@@ -1081,7 +1231,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			zoom_camera(1.0)
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
-			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5:
+			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6:
 				choose_build(TOWER_TYPES[event.keycode - KEY_1])
 			KEY_SPACE:
 				act("wave", [])
@@ -1176,7 +1326,7 @@ func on_click(p: Vector2) -> void:
 			upgrade_selected()
 		if selected != null and SELL_RECT.has_point(p):
 			sell_selected()
-		if selected != null and asks.is_empty() and MODE_RECT.has_point(p):
+		if selected != null and selected.type != "barracks" and asks.is_empty() and MODE_RECT.has_point(p):
 			cycle_target_mode(Input.is_key_pressed(KEY_SHIFT))
 		if WAVE_RECT.has_point(p):
 			act("wave", [])
@@ -1275,6 +1425,10 @@ func sell_selected() -> void:
 # The selected tower shoots at the next kind of monster (see TARGET_MODES).
 # With Shift, all of your towers of that type switch to that mode too.
 func cycle_target_mode(all_of_type: bool) -> void:
+	# Barracks soldiers have no targeting mode: they grab the monster nearest their rally point
+	if selected != null and selected.type == "barracks":
+		flash("Barracks soldiers fight the nearest monster")
+		return
 	if selected != null:
 		act("target", [selected.cell, (selected.mode + 1) % TARGET_MODES.size(), all_of_type])
 		if selected.owner == local_slot:
@@ -1525,6 +1679,8 @@ func build_tower(slot: int, c: Vector2i, type: String, allowed := false) -> Stri
 	if not daily_allows(type):
 		return "Today's challenge doesn't allow %s towers" % TOWERS[type]["name"]
 	var cost: int = TOWERS[type]["cost"][0]
+	if type == "barracks" and not barracks_fits(c):
+		return "A Barracks must stand next to the path"
 	if players[slot].gold < cost:
 		return "Not enough gold"
 	var owner := area_owner(c)
@@ -1630,10 +1786,13 @@ func sell_tower(slot: int, c: Vector2i) -> String:
 # For game_net.gd: saved_slot_for(), restore_saved_player(), from_save, held, held_note.
 
 # A new tower or monster field only needs adding here: older saves keep its default.
-const SAVE_TOWER_FIELDS := ["type", "cell", "owner", "level", "path", "mode", "spent", "cooldown", "aim", "dealt", "kills"]
+# Barracks: the soldiers' health and respawn wait are saved; holds are let go
+# (every monster is free after loading) and the rally point is worked out again.
+const SAVE_TOWER_FIELDS := ["type", "cell", "owner", "level", "path", "mode", "spent", "cooldown", "aim", "dealt", "kills",
+		"soldier_hp", "soldier_wait"]
 const SAVE_ENEMY_FIELDS := ["id", "kind", "pos", "wp", "loop_wp", "hp", "max_hp", "speed", "armor", "bounty", "weight",
 		"radius", "slow_factor", "slow_time", "freeze_time", "freeze_immune", "traveled", "special", "shield",
-		"max_shield", "shield_wait", "heal_timer", "weak", "poisoned"]
+		"max_shield", "shield_wait", "heal_timer", "weak", "poisoned", "hold_immune"]
 const SAVE_CLOUD_FIELDS := {"pos": TYPE_VECTOR2, "r": TYPE_FLOAT, "time": TYPE_FLOAT, "dps": TYPE_FLOAT,
 		"owner": TYPE_INT, "cell": TYPE_VECTOR2I, "boss": TYPE_FLOAT, "weak": TYPE_FLOAT}
 
@@ -2072,7 +2231,8 @@ func restore_saved_player(p: Player) -> bool:
 # player gets their update (profile_update()). A loaded game keeps the records
 # (save_progress() / load_progress()), so it counts on, but not as a new game.
 
-const KILL_KEYS := {"arrow": "kills_arrow", "cannon": "kills_cannon", "frost": "kills_frost", "spark": "kills_spark", "poison": "kills_poison"}
+const KILL_KEYS := {"arrow": "kills_arrow", "cannon": "kills_cannon", "frost": "kills_frost", "spark": "kills_spark", "poison": "kills_poison",
+		"barracks": "kills_barracks"}
 const WIN_ACHIEVEMENTS := ["easy_win", "normal_win", "hard_win", "insane_win"]  # per level
 
 # Host: per slot {who (the Player it's about), join (the wave they joined in),
@@ -2327,7 +2487,8 @@ const REPLAY_SPEEDS := [0.5, 1.0, 2.0, 4.0]
 const REPLAY_BAR := Rect2(240, BAR_TOP - 64, 800, 22)  # the timeline's clickable track (REPLAY_TRACK in game_ui.gd draws it)
 const REPLAY_BYTES := 12  # per monster in a frame (see record_frame())
 
-# Frames: [game time, wave, alive (see alive_count()), max_alive(), monsters, events].
+# Frames: [game time, wave, alive (see alive_count()), max_alive(), monsters, events,
+# soldiers (barracks_info(): every Barracks' soldiers, empty without one)].
 # monsters: per monster id (u32), x and y in 1/32 pixels (u16 each), health share
 # of 65535 (u16), its kind + 128 slowed + 64 frozen + 32 got past (has walked a
 # whole lap; known by the host and alone), and its special_bits() + 32 poisoned.
@@ -2384,7 +2545,7 @@ func record_frame(dt: float) -> void:
 		# The trait and shield (see special_bits()), + 32 poisoned (host and alone)
 		data[at + 11] = special_bits(e) | (32 if e.poisoned > 0.0 else 0)
 		at += REPLAY_BYTES
-	rec_frames.append([rec_time, wave, alive_count(), max_alive(), data, rec_events])
+	rec_frames.append([rec_time, wave, alive_count(), max_alive(), data, rec_events, barracks_info()])
 	rec_events = []
 	while rec_frames.size() > 1 and rec_frames[0][0] < rec_time - REPLAY_SECONDS:
 		rec_frames.pop_front()
@@ -2572,6 +2733,7 @@ func show_replay_time(t: float, jump: bool) -> void:
 			s.node.queue_free()
 		shots.clear()
 	replay_frame = i
+	apply_barracks_info(f[6])
 	var next := {}
 	var gd: PackedByteArray = g[4]
 	for at in range(0, gd.size(), REPLAY_BYTES):

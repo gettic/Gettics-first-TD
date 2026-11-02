@@ -80,6 +80,96 @@ const DEFAULT_MAP := [
 	"..#.....................",
 	"..1.....................",
 ]
+# The maps that come with the game (Default first), read-only and the same on
+# every computer of the same version. Name -> rows of letters.
+const BUILTIN_MAPS := {
+	"Default": DEFAULT_MAP,
+	# The long winding one: 8 switchbacks, 3 tiles of grass between the lanes
+	"Serpent": [
+		"....1.......2......3.......4...",
+		".#############################.",
+		".#...........................#.",
+		".#...#####...#####...#####...#.",
+		".#...#...#...#...#...#...#...#t",
+		".#...#...#...#...#...#...#...#.",
+		".#...#...#.r.#...#...#...#...#.",
+		".#...#...#...#...#...#...#...#.",
+		".#...#...#...#...#...#.t.#...#.",
+		"t#...#...#...#...#...#...#...#.",
+		".#...#.t.#...#...#...#...#...#t",
+		".#...#...#...#...#...#...#...#.",
+		".#...#...#...#.r.#...#...#...#.",
+		".#...#...#...#...#...#...#...#.",
+		".#...#...#...#...#...#...#...#.",
+		"t#...#...#...#...#.r.#...#...#.",
+		".#...#...#...#...#...#...#...#.",
+		".#####...#####...#####...#####.",
+		"...............................",
+	],
+	# Two long parallel lanes (out and back) with a lake-dotted strip between
+	"Twin Lanes": [
+		"...............3................",
+		".t.............#................",
+		"..t.......r....#.........t......",
+		"...............#................",
+		"...............#................",
+		"...##########################...",
+		"...#........................#...",
+		"1###...wwwww........wwwww...#...",
+		"...#...wwwww........wwwww...###2",
+		"...#........................#...",
+		"...##########################...",
+		"................#...............",
+		"................#...............",
+		"......t.........#....r........t.",
+		"................#............t..",
+		"................4...............",
+	],
+	# Two rooms joined by a narrow waist where both lanes pass side by side
+	"Hourglass": [
+		".........r..............",
+		"2######################3",
+		"..#..................#..",
+		"..#..r...........t...#..",
+		"t.#..................#..",
+		"..#..................#..",
+		"..##########..########..",
+		"...........#..#.........",
+		"wwwwwwww...#..#.wwwwwwww",
+		"wwwwwwww...#..#.wwwwwwww",
+		"...........#..#.........",
+		"..##########..########..",
+		"..#..................#..",
+		"..#..................#.t",
+		"..#...t...........r..#..",
+		"..#..................#..",
+		"1######################4",
+		"..............r.........",
+	],
+	# Long winding roads from the corners into a tiny loop around a lake
+	"Four Roads": [
+		".2......................3.",
+		".#......t...............#.",
+		".#..........t...........#.",
+		".#......................#.",
+		".#####.......r......#####.",
+		".....#..............#.....",
+		".....#..............#.....",
+		".....#...########...#.r...",
+		".....#####wwwwww#####.....",
+		"...t.....#wwwwww#.........",
+		".....#####wwwwww#####.t...",
+		".....#...#wwwwww#...#.....",
+		"...r.#...########...#.....",
+		".....#..............#.....",
+		".....#..............#.....",
+		".#####......r.......#####.",
+		".#......................#.",
+		".#...........t..........#.",
+		".#...............t......#.",
+		".1......................4.",
+	],
+}
 const MAP_MIN := Vector2i(12, 9)  # smallest map in tiles
 const MAP_MAX := Vector2i(48, 36)  # biggest: monster positions are sent in 16 bits (up to 51 tiles)
 const MAP_LETTERS := ".#1234rtw"
@@ -127,7 +217,7 @@ const RELAY_URL := "https://gtd-relay.gtd-relay.workers.dev"
 # Tower stats for levels 1-4 (index 0 = level 1). "cost"[0] is the build price,
 # the rest are upgrade prices. Levels go on after 4 (see make_towers()): the
 # game uses TOWERS, which has every level up to MAX_LEVEL.
-const TOWER_TYPES := ["arrow", "cannon", "frost", "spark", "poison"]
+const TOWER_TYPES := ["arrow", "cannon", "frost", "spark", "poison", "barracks"]
 # Which monster in range a tower shoots (T or the button in the tower panel picks it).
 # The path loops forever, so "First" is the monster that has walked furthest: the
 # oldest one, which has counted toward the limit the longest. New towers use First.
@@ -182,7 +272,33 @@ const TOWER_BASE := {
 		"cooldown": [1.5, 1.4, 1.3, 1.2],
 		"cloud": [40.0, 44.0, 50.0, 56.0],  # the cloud's radius
 	},
+	# Barracks: soldiers stand on the path tile nearest the tower (its rally point,
+	# see rally_point()) and each holds one monster still for "hold" seconds,
+	# hitting it ("damage" every "cooldown"). "range" only finds the rally point.
+	# Monsters wear soldiers down (SOLDIER_HURT a second, so "soldier_hp" is in
+	# seconds of a normal monster); a fallen soldier is back after "respawn" seconds.
+	"barracks": {
+		"name": "Barracks", "color": Color(0.75, 0.6, 0.4),
+		"desc": "Soldiers hold monsters on the path",
+		"cost": [90, 90, 180, 360],
+		"damage": [8, 18, 38, 85],
+		"range": [90.0, 95.0, 100.0, 105.0],
+		"cooldown": [1.0, 0.95, 0.9, 0.85],
+		"soldiers": [2, 2, 3, 3],
+		"soldier_hp": [6.0, 7.0, 8.5, 10.0],
+		"hold": [1.5, 1.75, 2.0, 2.25],
+		"respawn": [8.0, 7.5, 7.0, 6.0],
+	},
 }
+# Barracks soldiers: a free soldier grabs the monster nearest its rally point
+# within ENGAGE_R (Militia: times its "reach") that nobody holds. A monster that
+# was let go can't be held again for HOLD_IMMUNE seconds (it walks out of reach).
+# Bosses are only held by Knights. Held monsters still count toward the limit.
+const ENGAGE_R := 26.0
+const HOLD_IMMUNE := 1.5
+const SOLDIERS_MAX := 6  # without Militia's extra ones
+# How fast each monster kind wears a soldier down (soldier health a second; splitlings half)
+const SOLDIER_HURT := {"normal": 1.0, "fast": 0.6, "armored": 1.5, "boss": 4.0}
 # Poison clouds last CLOUD_TIME seconds (Miasma longer) and hurt 4 times a second.
 # A monster is hurt by only one cloud of each tower at a time (a tower's own
 # clouds overlapping don't add up); different towers' clouds do add up.
@@ -228,6 +344,14 @@ const PATHS := {
 		{"name": "Venom", "desc": "Small deadly clouds, worse for bosses", "damage": 1.9, "cloud": 0.7, "mode": 2, "boss": 1.75},
 		{"name": "Miasma", "desc": "Big lasting clouds: monsters inside take more damage", "damage": 1.0, "cloud": 1.5,
 				"cloud_time": 1.5, "weaken": [0.15, 0.2, 0.25]},
+	],
+	# Barracks: "soldier_hp", "hold" and "respawn" multiply, "soldiers_add" adds
+	# soldiers, "reach" multiplies ENGAGE_R, "boss_hold" lets it hold bosses (times the hold).
+	"barracks": [
+		{"name": "Knights", "desc": "Tough soldiers that also hold bosses", "damage": 1.6, "soldier_hp": 2.5, "hold": 1.5,
+				"boss_hold": 1.0, "boss": 3.0},
+		{"name": "Militia", "desc": "More soldiers, back faster", "damage": 0.6, "soldier_hp": 0.7, "respawn": 0.5,
+				"soldiers_add": [2, 3, 4], "reach": 2.0},
 	],
 }
 const BOMBLET_REACH := 130.0  # Cluster: bomblets land on monsters this close to the blast...
@@ -345,6 +469,8 @@ class Enemy:
 	var heal_timer := 0.0  # host: healers, seconds to the next heal
 	var weak := 0.0  # host: Miasma, extra damage taken (0.2: +20%), set each poison tick
 	var poisoned := 0.0  # host: seconds it still looks poisoned (for the looks)
+	var held := false  # host: a Barracks soldier holds it (it stands still)
+	var hold_immune := 0.0  # host: no soldier holds it while above 0
 	var node: MeshInstance3D
 	var mat: Material
 	var bob := 0.0
@@ -363,6 +489,17 @@ class Tower:
 	var path := 0  # its specialization from level 5: 0 none yet, 1 or 2 (see PATHS)
 	var dealt := 0.0  # host: damage done, for the stats at the end
 	var kills := 0
+	# Barracks. Every computer: the rally point (map pixels, worked out by
+	# rally_point(); x < 0: not yet) and soldier_look, a byte per soldier (see
+	# soldier_bytes()). Host: per soldier its health (0: fallen), seconds until it's
+	# back, seconds to its next hit and of its hold left, and the monster it holds (or null).
+	var rally := Vector2(-1, -1)
+	var soldier_look := PackedByteArray()
+	var soldier_hp := PackedFloat32Array()
+	var soldier_wait := PackedFloat32Array()
+	var soldier_cd := PackedFloat32Array()
+	var soldier_left := PackedFloat32Array()
+	var soldier_hold: Array = []
 	var node: Node3D
 	var head: Node3D
 
@@ -823,6 +960,19 @@ func use_map(m: Dictionary, title := "Default") -> void:
 	daily_date = ""  # another map ends the daily challenge (start_daily() sets it after this)
 
 
+# The built-in map with exactly these rows ("Default", "Serpent"...), or "".
+func builtin_map_name(rows: Array) -> String:
+	for n: String in BUILTIN_MAPS:
+		if BUILTIN_MAPS[n] == rows:
+			return n
+	return ""
+
+
+# A built-in map's rows (a copy), or [] if there's no built-in map called n.
+func builtin_map_rows(n: String) -> Array:
+	return BUILTIN_MAPS[n].duplicate() if BUILTIN_MAPS.has(n) else []
+
+
 func flash(text: String) -> void:
 	message = text
 	message_time = 3.0
@@ -910,6 +1060,125 @@ func show_cloud(pos: Vector2, r: float, seconds: float, _path: int) -> void:
 	node.position = to3d(pos, 0.05)
 	add_child(node)
 	effects.append({"kind": "cloud", "node": node, "time": seconds, "max": seconds})
+
+
+# ----- Barracks (see TOWER_BASE["barracks"]; the soldiers' rules are in main.gd)
+
+# The path tile nearest to a Barracks on tile c, within rng pixels (gate tiles
+# left out), as its center in map pixels, or (-1, -1) if there's none. The same
+# on every computer (ties go to the first in reading order), so it's never sent.
+func rally_point(c: Vector2i, rng: float) -> Vector2:
+	var best := Vector2(-1, -1)
+	var best_d := INF
+	var from := cell_center(c)
+	var k := ceili(rng / CELL)
+	for y in range(c.y - k, c.y + k + 1):
+		for x in range(c.x - k, c.x + k + 1):
+			var p := Vector2i(x, y)
+			if not path_cells.has(p) or p in gate_cells:
+				continue
+			var d := cell_center(p).distance_to(from)
+			if d <= rng and d < best_d:
+				best_d = d
+				best = cell_center(p)
+	return best
+
+
+# Can a Barracks stand on tile c (besides can_build())? It needs a path tile in
+# its level 1 range. For the build ghost too.
+func barracks_fits(c: Vector2i) -> bool:
+	return rally_point(c, TOWERS["barracks"]["range"][0]).x >= 0.0
+
+
+# Host: a Barracks' soldiers as one byte each: its health share 1-127 (0: fallen),
+# + 128 while it holds a monster.
+func soldier_bytes(t: Tower) -> PackedByteArray:
+	var out := PackedByteArray()
+	var n := t.soldier_hp.size()
+	out.resize(n)
+	if n == 0:
+		return out
+	var most: float = tower_data(t.type, t.path, t.level)["soldier_hp"][t.level]
+	for i in n:
+		var hp: float = t.soldier_hp[i]
+		var b := 0 if hp <= 0.0 else clampi(roundi(hp / most * 127.0), 1, 127)
+		if b > 0 and i < t.soldier_hold.size() and t.soldier_hold[i] != null:
+			b |= 128
+		out[i] = b
+	return out
+
+
+# Every Barracks' soldier_look in one message, for the snapshots and the replay:
+# per Barracks its tile x, y and soldier count (1 byte each), then a byte per
+# soldier (see soldier_bytes()). Empty when there's no Barracks.
+func barracks_info() -> PackedByteArray:
+	var out := PackedByteArray()
+	for t: Tower in towers.values():
+		if t.type == "barracks":
+			out.append(t.cell.x)
+			out.append(t.cell.y)
+			out.append(t.soldier_look.size())
+			out.append_array(t.soldier_look)
+	return out
+
+
+# Other players (from the snapshot) and the replay: sets each Barracks'
+# soldier_look from barracks_info(). Checked like anything from the network.
+func apply_barracks_info(data: Variant) -> void:
+	if not data is PackedByteArray:
+		return
+	var at := 0
+	while at + 3 <= data.size():
+		var c := Vector2i(data[at], data[at + 1])
+		var n: int = data[at + 2]
+		at += 3
+		if at + n > data.size():
+			return
+		var t: Tower = towers.get(c)
+		if t != null and t.type == "barracks" and n <= 16:
+			t.soldier_look = data.slice(at, at + n)
+		at += n
+
+
+# Every computer, every frame, for each Barracks: shows its soldiers at its rally
+# point from t.soldier_look. A placeholder (small capsules in the owner's color,
+# leaning forward while holding a monster, hidden when fallen) under the tower's
+# node; game_world.gd can make the real soldiers.
+var soldier_mesh: CapsuleMesh
+var soldier_mats := {}  # owner slot -> material
+
+
+func show_soldiers(t: Tower) -> void:
+	if t.node == null or t.rally.x < 0.0:
+		return
+	var group: Node3D = t.node.get_node_or_null("Soldiers")
+	if group == null:
+		group = Node3D.new()
+		group.name = "Soldiers"
+		t.node.add_child(group)
+	group.position = to3d(t.rally) - t.node.position
+	if soldier_mesh == null:
+		soldier_mesh = CapsuleMesh.new()
+		soldier_mesh.radius = 0.06
+		soldier_mesh.height = 0.25
+	if not soldier_mats.has(t.owner):
+		var m := StandardMaterial3D.new()
+		m.albedo_color = PLAYER_COLORS[t.owner].lerp(Color(0.75, 0.6, 0.4), 0.3)
+		soldier_mats[t.owner] = m
+	var n := t.soldier_look.size()
+	while group.get_child_count() < n:
+		var s := MeshInstance3D.new()
+		s.mesh = soldier_mesh
+		s.material_override = soldier_mats[t.owner]
+		group.add_child(s)
+	for i in group.get_child_count():
+		var s: Node3D = group.get_child(i)
+		var b: int = t.soldier_look[i] if i < n else 0
+		s.visible = b & 127 > 0
+		if s.visible:
+			var a := TAU * i / n
+			s.position = Vector3(cos(a), 0.0, sin(a)) * (0.12 if n > 1 else 0.0) + Vector3(0, 0.125, 0)
+			s.rotation.x = 0.35 if b & 128 else 0.0
 
 
 # The last wave: MAX_WAVE, DAILY_WAVES in the daily challenge (no endless mode
@@ -1080,6 +1349,7 @@ const DAILY_TWISTS := {
 	"armored": {"name": "Armored day", "desc": "Normal waves are armored.", "armored": true},
 	"tight": {"name": "Tight budget", "desc": "30% less kill gold, 30% more wave gold.", "bounty": 0.7, "income": 1.3},
 }
+const DAILY_HELPERS := ["frost", "barracks"]  # "Two towers" never picks only these
 var daily_date := ""  # "2026-11-02" while playing that day's challenge, "" otherwise
 var daily_state := 1  # the daily random numbers (see daily_seed())
 var daily_cache := {}  # the last daily_rules() worked out
@@ -1129,8 +1399,13 @@ func daily_rules(date := "") -> Dictionary:
 	var tw: Dictionary = DAILY_TWISTS[key]
 	var types: Array = TOWER_TYPES.duplicate()
 	var keep: int = tw.get("towers", 0)
-	while keep > 0 and types.size() > keep:
-		types.remove_at(daily_roll(0, types.size() - 1))
+	while keep > 0:
+		types = TOWER_TYPES.duplicate()
+		while types.size() > keep:
+			types.remove_at(daily_roll(0, types.size() - 1))
+		# Two helpers and nothing that really kills: roll again
+		if types.any(func(t: String) -> bool: return not t in DAILY_HELPERS):
+			break
 	daily_cache = {"date": date, "twist": key, "name": tw.name, "desc": tw.desc, "level": level, "waves": DAILY_WAVES,
 			"start_gold": tw.get("start_gold", 1.0), "count": tw.get("count", 1.0), "hp": tw.get("hp", 1.0),
 			"bounty": tw.get("bounty", 1.0), "income": tw.get("income", 1.0), "towers": types,
@@ -1166,6 +1441,12 @@ func make_towers() -> Dictionary:
 				d["slow"].append(snappedf(0.15 + (d["slow"][top] - 0.15) * pow(0.95, n), 0.01))
 			if d.has("chain"):
 				d["chain"].append(mini(d["chain"][top] + n / 4, 12))
+			if d.has("soldiers"):
+				# +1 soldier at levels 19, 34 and 49; tougher, longer holds, back sooner
+				d["soldiers"].append(mini(d["soldiers"][top] + n / 15, SOLDIERS_MAX))
+				d["soldier_hp"].append(snappedf(d["soldier_hp"][top] + minf(n * 0.3, 12.0), 0.1))
+				d["hold"].append(snappedf(d["hold"][top] + minf(n * 0.03, 1.0), 0.01))
+				d["respawn"].append(snappedf(maxf(d["respawn"][top] * pow(0.98, n), 4.0), 0.1))
 		# Each path: the same levels, times the path's numbers from level 5 on
 		var paths := []
 		for p: Dictionary in PATHS[type]:
@@ -1182,6 +1463,10 @@ func make_towers() -> Dictionary:
 					pd["cloud"][lv] = roundf(d["cloud"][lv] * p.get("cloud", 1.0))
 				if pd.has("chain"):
 					pd["chain"][lv] = p["chain_set"] if p.has("chain_set") else mini(d["chain"][lv] + p.get("chain_add", 0), 15)
+				if pd.has("soldiers"):
+					pd["soldiers"][lv] = d["soldiers"][lv] + (path_step(lv, p["soldiers_add"]) if p.has("soldiers_add") else 0)
+					for k: String in ["soldier_hp", "hold", "respawn"]:
+						pd[k][lv] = snappedf(d[k][lv] * p.get(k, 1.0), 0.01)
 			paths.append(pd)
 		d["paths"] = paths
 		out[type] = d
@@ -1345,7 +1630,7 @@ var saved_slots := {}
 # "tower": the tower it's about, which current_tip() turns into its spot on the
 # map (a Vector2 in map pixels, like Tower.pos).
 const TIPS := {
-	"build": {"text": "Pick a tower at the bottom (or press 1-5), then click on the grass to build it.", "anchor": "tower_buttons"},
+	"build": {"text": "Pick a tower at the bottom (or press 1-6), then click on the grass to build it.", "anchor": "tower_buttons"},
 	"place": {"text": "Towers go on the grass squares of the grid, not on the path. Right-click to stop building.", "anchor": "cursor"},
 	"wave": {"text": "Ready? Press SPACE to start the first wave. Later, SPACE sends the next wave early for bonus gold.", "anchor": "wave_button"},
 	"menu": {"text": "Esc opens the menu: Settings, saving, multiplayer and the leaderboard.", "anchor": "none"},
@@ -1457,7 +1742,7 @@ const ACHIEVEMENTS := [
 	{"id": "freeze_40", "name": "Ice Age", "desc": "Use Freeze all while 40 or more monsters are on the map.", "group": "Abilities", "goal": 0, "counter": ""},
 	{"id": "hands_off", "name": "Hands Off", "desc": "Win without using Meteor or Freeze all yourself.", "group": "Abilities", "goal": 0, "counter": ""},
 	{"id": "cold_feet", "name": "Cold Feet", "desc": "Win on Normal or harder without building a Frost tower yourself.", "group": "Towers", "goal": 0, "counter": ""},
-	{"id": "one_of_each", "name": "One of Each", "desc": "Own all 5 tower types at level 5 or higher at the same time.", "group": "Towers", "goal": 0, "counter": ""},
+	{"id": "one_of_each", "name": "One of Each", "desc": "Own all 6 tower types at level 5 or higher at the same time.", "group": "Towers", "goal": 0, "counter": ""},
 	{"id": "maxed_out", "name": "Maxed Out", "desc": "Upgrade a tower to level 30.", "group": "Towers", "goal": 0, "counter": ""},
 	{"id": "poison_kills", "name": "Plague Doctor", "desc": "Your Poison towers kill 10,000 monsters (all games together).", "group": "Towers", "goal": 10000, "counter": "poison_kills"},
 	{"id": "green_thumb", "name": "Green Thumb", "desc": "Win on Hard or Insane with Poison doing the most of your damage.", "group": "Towers", "goal": 0, "counter": ""},
