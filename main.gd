@@ -25,8 +25,8 @@ func _ready() -> void:
 	for arg in OS.get_cmdline_user_args():
 		if arg.begins_with("--relay="):
 			relay_url = arg.trim_prefix("--relay=")
-		# For tests until the Esc menu has its Level button: --level=easy / normal / hard / insane
-		if arg.begins_with("--level="):
+		# A debug/test option, ignored in the released game: --level=easy / normal / hard / insane
+		if arg.begins_with("--level=") and OS.is_debug_build():
 			var d := DIFFICULTIES.find(arg.trim_prefix("--level=").capitalize())
 			if d >= 0:
 				difficulty = d
@@ -40,9 +40,16 @@ func new_game() -> void:
 	for p in players:
 		if p != null:
 			p.gold = start_gold()
+			p.cooldowns = {}
 			stat_start[p.slot] = p.gold
 			stat_names[p.slot] = name_of(p.slot)
 	wave = 0
+	endless = false
+	from_save = false
+	held = false
+	held_note = ""
+	saved_slots.clear()
+	aiming = ""
 	next_wave_timer = 0.0
 	game_speed = 1
 	state = "playing"
@@ -67,7 +74,7 @@ func play_alone() -> void:
 # which gives bonus gold for every second skipped: the wave's income spread over
 # WAVE_INTERVAL (at least 1 gold a second).
 func start_wave() -> void:
-	if state != "playing" or wave >= MAX_WAVE:
+	if state != "playing" or wave >= last_wave():
 		return
 	var skipped := int(maxf(next_wave_timer, 0.0)) if wave > 0 else 0
 	wave += 1
@@ -77,8 +84,7 @@ func start_wave() -> void:
 	# Every player gets the wave income, and every player's gate sends a full wave
 	for p in players:
 		if p != null:
-			p.gold += income + early_bonus
-			stat_earned[p.slot] += income + early_bonus
+			give_gold(p.slot, income + early_bonus)
 	var text := "Wave %d! +%s gold" % [wave, short(income)]
 	if early_bonus > 0:
 		text = "Wave %d! +%s gold (+%s for calling early)" % [wave, short(income), short(early_bonus)]
@@ -92,6 +98,7 @@ func start_wave() -> void:
 		if players[g] != null:
 			for i in count:
 				spawn_queues[g].append(kind)
+	autosave()
 
 
 # A player calling the next wave early (Space or the button). Not allowed until
@@ -133,7 +140,7 @@ func spawn_enemy(kind: String, g: int) -> void:
 	e.route = routes[g]
 	e.loop_wp = loop_starts[g]
 	e.pos = e.route[0]
-	e.max_hp = spawn_hp * DIFFICULTY_HP[difficulty]
+	e.max_hp = spawn_hp * DIFFICULTY_HP[difficulty] * daily_rules().get("hp", 1.0)
 	e.bounty = wave_bounty(wave)
 	match kind:
 		"fast":
@@ -148,9 +155,99 @@ func spawn_enemy(kind: String, g: int) -> void:
 			e.speed *= 0.7
 			e.bounty = 40 + e.bounty * 12
 			e.weight = 5
+	# The wave's trait (see wave_special()). The gold stays the same: a splitter
+	# gives half, each of its splitlings a quarter.
+	match wave_special(wave):
+		"split":
+			e.special = "split"
+			e.max_hp *= SPLIT_HP
+			e.bounty = maxi(e.bounty / 2, 1)
+		"heal":
+			# Every HEALER_EVERY-th monster out of this gate (counted by what's left to come)
+			if spawn_queues[g].size() % HEALER_EVERY == HEALER_EVERY - 1:
+				e.special = "heal"
+				e.max_hp *= HEALER_HP
+				e.heal_timer = HEAL_EVERY * randf()
+		"shield":
+			e.max_shield = e.max_hp * (SHIELD_BOSS if kind == "boss" else SHIELD_SHARE)
+			e.shield = e.max_shield
 	e.hp = e.max_hp
 	enemies.append(e)
 	enemy_by_id[e.id] = e
+
+
+# Host: a splitter died: 2 splitlings come out where it was, as far along,
+# faster, with its armor. They join the game in remove_dead() (not while the
+# towers are going through the monsters).
+func split_enemy(p: Enemy) -> void:
+	for i in 2:
+		var e := make_enemy(p.kind)
+		e.id = next_enemy_id
+		next_enemy_id += 1
+		e.special = "splitling"
+		e.route = p.route
+		e.loop_wp = p.loop_wp
+		e.wp = p.wp
+		e.pos = p.pos + Vector2(0, 6.0 if i == 0 else -6.0).rotated(randf() * TAU)
+		e.traveled = p.traveled
+		e.speed = p.speed * SPLITLING_SPEED
+		e.armor = p.armor
+		e.max_hp = p.max_hp / SPLIT_HP * SPLITLING_HP
+		e.hp = e.max_hp
+		e.bounty = maxi(p.bounty / 2, 1)
+		e.radius = p.radius * 0.75
+		e.slow_factor = p.slow_factor
+		e.slow_time = p.slow_time
+		new_enemies.append(e)
+
+
+# ---------------------------------------------------------------- daily challenge
+# The day's twist (see daily_rules() in game_base.gd) changes these rules from
+# game_base.gd; everything else (the top bar, wave preview, late joiners' gold)
+# uses them too. Monster health is changed in spawn_enemy(), so the gold, which
+# follows wave_hp(), stays as it is.
+
+func start_gold() -> int:
+	return int(super() * daily_rules().get("start_gold", 1.0))
+
+
+# Swarm: more monsters a wave (not more bosses).
+func wave_count(w: int) -> int:
+	var n := super(w)
+	return n if kind_for_wave(w) == "boss" else roundi(n * daily_rules().get("count", 1.0))
+
+
+func wave_income(w: int) -> int:
+	return int(super(w) * daily_rules().get("income", 1.0))
+
+
+func wave_bounty(w: int) -> int:
+	return maxi(1, int(super(w) * daily_rules().get("bounty", 1.0)))
+
+
+# Armored day: normal waves are armored.
+func kind_for_wave(w: int) -> String:
+	var kind := super(w)
+	return "armored" if kind == "normal" and daily_rules().get("armored", false) else kind
+
+
+# Two towers: only the day's tower types can be built.
+func daily_allows(type: String) -> bool:
+	var rules := daily_rules()
+	return rules.is_empty() or type in rules.towers
+
+
+# The Esc menu's daily challenge (J for now; the graphics agent adds a button):
+# alone, or as the host while nobody has joined, before wave 1.
+func menu_daily() -> void:
+	if can_pick_map():
+		flash(start_daily())
+	elif net_mode == "host" and player_count() > 1:
+		flash("The daily challenge can only start while nobody has joined")
+	elif net_mode == "client":
+		flash("Only the host can start the daily challenge")
+	else:
+		flash("The daily challenge can only start before wave 1")
 
 
 # ---------------------------------------------------------------- update
@@ -185,18 +282,38 @@ func _process(delta: float) -> void:
 		hud.queue_redraw()
 		return
 	message_time = maxf(message_time - delta, 0.0)
+	# Watching the replay: the game is over, the replay drives the monsters and shots
+	if replay_on:
+		replay_update(delta)
+		if net_mode == "host":
+			snapshot_timer -= delta
+			if snapshot_timer <= 0.0:
+				snapshot_timer = 1.0 / SNAPSHOT_RATE
+				# The other players still get the real monsters, not the replay's
+				var ghosts := enemies
+				enemies = live_enemies
+				send_snapshot()
+				enemies = ghosts
+		update_camera(delta)
+		update_visuals(delta)
+		hud.queue_redraw()
+		return
 	update_effects(delta)
 	var dt := delta * game_speed
 	if net_mode == "client":
 		# The host runs the game. Here monsters just glide to where the host says
 		# they are, and shots fly for show.
-		if state == "playing" and wave > 0:
+		if state == "playing" and wave > 0 and not held:
 			next_wave_timer = maxf(next_wave_timer - dt, 0.0)
+		if state == "playing" and not held:
+			tick_cooldowns(dt)
 		for e in enemies:
 			e.pos = e.pos.lerp(e.net_pos, minf(delta * 12.0, 1.0))
+			e.freeze_time = maxf(e.freeze_time - dt, 0.0)  # for the frozen look after Freeze all
 		update_shots(dt)
-	elif state == "playing":
-		if wave > 0 and wave < MAX_WAVE:
+	elif state == "playing" and not held:
+		tick_cooldowns(dt)
+		if wave > 0 and wave < last_wave():
 			next_wave_timer -= dt
 			if next_wave_timer <= 0.0:
 				start_wave()
@@ -204,17 +321,21 @@ func _process(delta: float) -> void:
 		update_enemies(dt)
 		update_towers(dt)
 		update_shots(dt)
+		update_clouds(dt)
 		remove_dead()
 		if alive_count() >= max_alive():
 			state = "lost"
-		elif wave >= MAX_WAVE and monsters_left_to_spawn() == 0 and enemies.is_empty():
+		elif wave >= last_wave() and monsters_left_to_spawn() == 0 and enemies.is_empty():
 			state = "won"
 		if state != "playing":
 			# The stats screen: made once, and sent once to the other players
 			end_stats = make_end_stats()
 			send_all("net_stats", [end_stats])
-	if net_mode != "client":
-		track_score(dt)
+	# A loaded game on hold (see load_game()): nothing moves, nothing is recorded or timed
+	if not held:
+		record_frame(dt)
+		if net_mode != "client":
+			track_score(dt)
 	if net_mode == "host":
 		snapshot_timer -= delta
 		if snapshot_timer <= 0.0:
@@ -270,6 +391,20 @@ func update_spawning(dt: float) -> void:
 
 func update_enemies(dt: float) -> void:
 	for e in enemies:
+		e.poisoned = maxf(e.poisoned - dt, 0.0)
+		# A shield regrows slowly once the monster hasn't been hit for a while
+		if e.max_shield > 0.0:
+			e.shield_wait += dt
+			if e.shield_wait >= SHIELD_REGROW and e.shield < e.max_shield:
+				e.shield = minf(e.shield + e.max_shield * SHIELD_REGROW_RATE * dt, e.max_shield)
+		# A healer heals the other monsters near it (not above full health)
+		if e.special == "heal" and not e.dead:
+			e.heal_timer -= dt
+			if e.heal_timer <= 0.0:
+				e.heal_timer += HEAL_EVERY
+				for o in enemies:
+					if o != e and not o.dead and o.pos.distance_squared_to(e.pos) <= HEAL_RANGE * HEAL_RANGE:
+						o.hp = minf(o.hp + o.max_hp * (HEAL_BOSS if o.kind == "boss" else HEAL_SHARE), o.max_hp)
 		if e.slow_time > 0.0:
 			e.slow_time -= dt
 			if e.slow_time <= 0.0:
@@ -317,10 +452,10 @@ func update_towers(dt: float) -> void:
 			# Volley: one arrow each at the best few monsters in range
 			for e in find_targets(t.pos, data["range"][t.level], t.mode, path_step(t.level, PATHS["arrow"][1]["arrows"])):
 				launch_shot(t, e, false)
-				send_all("net_shot", [t.cell, e.id])
+				send_shot(t, e)
 		else:
 			launch_shot(t, target, false)
-			send_all("net_shot", [t.cell, target.id])
+			send_shot(t, target)
 
 
 # Picks the enemy in range that fits the tower's targeting mode best (see
@@ -383,17 +518,37 @@ func fire_lightning(t: Tower, first: Enemy) -> void:
 	var points := PackedVector3Array([t.node.position + t.head.position + Vector3(0, 0.1, 0), first.node.position])
 	damage_enemy(first, dmg * (boss if first.kind == "boss" else 1.0), t.owner, t)
 	var current := first
+	# The monsters by square of jump size (their index in enemies), so each jump
+	# only looks at the monsters near it. Ties go to the first in enemies, as before.
+	var grid := {}
+	if data["chain"][t.level] > 1:
+		for k in enemies.size():
+			var e := enemies[k]
+			if not e.dead:
+				var g := Vector2i(floori(e.pos.x / jump), floori(e.pos.y / jump))
+				if grid.has(g):
+					grid[g].append(k)
+				else:
+					grid[g] = [k]
 	for i in range(data["chain"][t.level] - 1):
 		dmg *= falloff
 		var next: Enemy = null
 		var best_dist := jump
-		for e in enemies:
-			if e.dead or hit.has(e):
-				continue
-			var d := e.pos.distance_to(current.pos)
-			if d < best_dist:
-				best_dist = d
-				next = e
+		var best_k := 0
+		# A pixel more each way, so rounding never leaves a monster out
+		var c := current.pos
+		for gx in range(floori((c.x - jump - 1.0) / jump), floori((c.x + jump + 1.0) / jump) + 1):
+			for gy in range(floori((c.y - jump - 1.0) / jump), floori((c.y + jump + 1.0) / jump) + 1):
+				var list: Array = grid.get(Vector2i(gx, gy), [])
+				for k: int in list:
+					var e := enemies[k]
+					if e.dead or hit.has(e):
+						continue
+					var d := e.pos.distance_to(current.pos)
+					if d < best_dist or (d == best_dist and next != null and k < best_k):
+						best_dist = d
+						best_k = k
+						next = e
 		if next == null:
 			break
 		hit.append(next)
@@ -413,6 +568,11 @@ func update_shots(dt: float) -> void:
 		if to.length() <= step:
 			s.pos = s.target_pos
 			shot_spark(s)
+			# Every computer shows the poison cloud where the glob lands (no message
+			# needed: the other players' and the replay's shots land there too)
+			if s.type == "poison":
+				var cd := tower_data(s.type, s.path, s.level)
+				show_cloud(s.pos, cd["cloud"][s.level], cloud_seconds(s.path, s.level), s.path if s.level >= PATH_LEVEL else 0)
 			if not s.visual:
 				shot_hit(s)
 			s.done = true
@@ -482,6 +642,13 @@ func shot_hit(s: Shot) -> void:
 					if path == 1 and e.freeze_time <= 0.0 and e.freeze_immune <= 0.0 and randf() < path_step(s.level, PATHS["frost"][0]["freeze"]):
 						e.freeze_time = FREEZE_TIME * (0.5 if e.kind == "boss" else 1.0)
 					damage_enemy(e, dmg, s.owner, s.tower)
+		"poison":
+			# A cloud where the glob landed (see update_clouds())
+			var p := path
+			clouds.append({"pos": s.pos, "r": float(data["cloud"][s.level]), "time": cloud_seconds(s.path, s.level),
+					"dps": dmg, "owner": s.owner, "cell": s.tower.cell if s.tower != null else Vector2i(-1, -1),
+					"boss": boss_bonus(s.type, s.path, s.level),
+					"weak": path_step(s.level, PATHS["poison"][1]["weaken"]) if p == 2 else 0.0})
 		_:
 			if alive:
 				damage_enemy(s.target, dmg * (boss_bonus(s.type, s.path, s.level) if s.target.kind == "boss" else 1.0), s.owner, s.tower)
@@ -494,11 +661,26 @@ func blast(at: Vector2, r: float) -> void:
 
 # The gold for a kill goes to the player who owns the tower that made it.
 # t: that tower (counted for the stats at the end).
-func damage_enemy(e: Enemy, amount: float, owner_slot: int, t: Tower = null) -> void:
+# pierce: armor doesn't stop it (poison, Meteor).
+func damage_enemy(e: Enemy, amount: float, owner_slot: int, t: Tower = null, pierce := false) -> void:
 	if e.dead:
 		return
+	# Miasma: monsters in its clouds take more from everything
+	amount *= 1.0 + e.weak
+	# A shield takes the hit first, before armor
+	if e.max_shield > 0.0:
+		e.shield_wait = 0.0
+		if e.shield > 0.0:
+			var took := minf(amount, e.shield)
+			e.shield -= took
+			amount -= took
+			stat_damage[owner_slot] += took
+			if t != null:
+				t.dealt += took
+			if amount <= 0.0:
+				return
 	# Armor removes a flat amount, but at least 25% of the hit always goes through.
-	var hit := maxf(amount - e.armor, amount * 0.25)
+	var hit := amount if pierce else maxf(amount - e.armor, amount * 0.25)
 	# The stats count only the health it really took off (no overkill)
 	var done := minf(hit, e.hp)
 	stat_damage[owner_slot] += done
@@ -507,12 +689,21 @@ func damage_enemy(e: Enemy, amount: float, owner_slot: int, t: Tower = null) -> 
 	e.hp -= hit
 	if e.hp <= 0.0:
 		e.dead = true
+		if e.special == "split":
+			split_enemy(e)
 		stat_kills[owner_slot] += 1
 		if t != null:
 			t.kills += 1
-		if players[owner_slot] != null:
-			players[owner_slot].gold += e.bounty
-			stat_earned[owner_slot] += e.bounty
+		give_gold(owner_slot, e.bounty)
+
+
+# Wave and kill gold for a player (kept below GOLD_MAX, for endless mode).
+func give_gold(slot: int, amount: int) -> void:
+	var p: Player = players[slot]
+	if p == null:
+		return
+	p.gold = mini(p.gold + amount, GOLD_MAX)
+	stat_earned[slot] = mini(stat_earned[slot] + amount, GOLD_MAX)
 
 
 func remove_dead() -> void:
@@ -521,6 +712,102 @@ func remove_dead() -> void:
 			drop_corpse(enemies[i])
 			enemy_by_id.erase(enemies[i].id)
 			enemies.remove_at(i)
+	# Splitlings born this frame (see split_enemy())
+	for e in new_enemies:
+		enemies.append(e)
+		enemy_by_id[e.id] = e
+	new_enemies.clear()
+
+
+# Seconds a poison tower's clouds last (Miasma longer).
+func cloud_seconds(path: int, level: int) -> float:
+	if path <= 0 or level < PATH_LEVEL:
+		return CLOUD_TIME
+	return CLOUD_TIME * PATHS["poison"][path - 1].get("cloud_time", 1.0)
+
+
+# Host: poison clouds hurt every monster inside, each tower's every CLOUD_TICK
+# seconds (see CLOUD_TIME). To spread the work, the towers take turns: every
+# quarter tick a quarter of them (by their tile) hurt. The monsters are sorted
+# into tiles each time, so a cloud only looks at the tiles it covers.
+func update_clouds(dt: float) -> void:
+	for i in range(clouds.size() - 1, -1, -1):
+		clouds[i].time -= dt
+		if clouds[i].time <= 0.0:
+			clouds.remove_at(i)
+	cloud_tick -= dt
+	if cloud_tick > 0.0:
+		return
+	cloud_tick = maxf(cloud_tick + CLOUD_TICK / 4.0, 0.0)
+	cloud_turn = (cloud_turn + 1) % 4
+	if clouds.is_empty():
+		if cloud_turn == 0:
+			for e in enemies:
+				e.weak = 0.0
+		return
+	var tiles := {}  # Vector2i -> [monsters on that tile]
+	for e in enemies:
+		if not e.dead:
+			var k := Vector2i(floori(e.pos.x / CELL), floori(e.pos.y / CELL))
+			if tiles.has(k):
+				tiles[k].append(e)
+			else:
+				tiles[k] = [e]
+	# Miasma's extra damage, worked out once a whole tick (before the poison of
+	# that quarter, so it gets it too)
+	if cloud_turn == 0:
+		for e in enemies:
+			e.weak = 0.0
+		for c: Dictionary in clouds:
+			if c.weak > 0.0:
+				for e: Enemy in cloud_monsters(c, tiles):
+					e.weak = maxf(e.weak, c.weak)
+	var hurt := {}  # tower cell -> {monster: true} already hurt this tick
+	for c: Dictionary in clouds:
+		var cell: Vector2i = c.cell
+		if posmod(cell.x + cell.y * 3, 4) != cloud_turn:
+			continue
+		if not hurt.has(cell):
+			hurt[cell] = {}
+		var done: Dictionary = hurt[cell]
+		var t: Tower = towers.get(cell)
+		if t != null and t.owner != c.owner:
+			t = null  # sold, and someone else built there
+		for e: Enemy in cloud_monsters(c, tiles):
+			if e.dead or done.has(e):
+				continue
+			done[e] = true
+			e.poisoned = 0.5
+			damage_enemy(e, c.dps * CLOUD_TICK * (c.boss if e.kind == "boss" else 1.0), c.owner, t, true)
+
+
+var cloud_turn := 0  # host: which quarter of the poison towers hurts next (see update_clouds())
+
+
+# The monsters inside a cloud (tiles: the monsters by tile).
+func cloud_monsters(c: Dictionary, tiles: Dictionary) -> Array:
+	var list := []
+	var r: float = c.r
+	var at: Vector2 = c.pos
+	var r2 := r * r
+	var lo := Vector2i(floori((at.x - r) / CELL), floori((at.y - r) / CELL))
+	var hi := Vector2i(floori((at.x + r) / CELL), floori((at.y + r) / CELL))
+	if (hi.x - lo.x + 1) * (hi.y - lo.y + 1) > tiles.size():
+		# Fewer tiles with monsters than tiles under the cloud: go through those
+		for k: Vector2i in tiles:
+			if k.x >= lo.x and k.x <= hi.x and k.y >= lo.y and k.y <= hi.y:
+				for e: Enemy in tiles[k]:
+					if e.pos.distance_squared_to(at) <= r2:
+						list.append(e)
+		return list
+	for x in range(lo.x, hi.x + 1):
+		for y in range(lo.y, hi.y + 1):
+			var k := Vector2i(x, y)
+			if tiles.has(k):
+				for e: Enemy in tiles[k]:
+					if e.pos.distance_squared_to(at) <= r2:
+						list.append(e)
+	return list
 
 
 func update_effects(delta: float) -> void:
@@ -538,6 +825,9 @@ func update_effects(delta: float) -> void:
 			var m: StandardMaterial3D = fx["mat"]
 			node.scale = Vector3(size, size * 0.6, size)
 			m.albedo_color = Color(m.albedo_color, a * 0.5)
+		elif fx["kind"] == "cloud" and fx.has("node") and fx["node"] is GeometryInstance3D:
+			# The placeholder cloud (see show_cloud()) fades out over its last second
+			fx["node"].transparency = 1.0 - clampf(fx["time"], 0.0, 1.0)
 
 
 # ---------------------------------------------------------------- input
@@ -550,7 +840,15 @@ func _unhandled_input(event: InputEvent) -> void:
 	if update_dialog != "":
 		dialog_input(event)
 		return
+	# Watching the replay: its own keys (Esc goes back to the stats)
+	if replay_on and not menu_open:
+		replay_input(event)
+		return
 	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		# Aiming Meteor: Esc only stops aiming
+		if aiming != "" and not menu_open:
+			aiming = ""
+			return
 		toggle_menu()
 		return
 	if log_window and event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F12:
@@ -559,6 +857,9 @@ func _unhandled_input(event: InputEvent) -> void:
 	if menu_open:
 		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
 			menu_click(ui_mouse(true))
+		elif event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_J \
+				and not (get_viewport().gui_get_focus_owner() is LineEdit):
+			menu_daily()
 		elif pick_open and event is InputEventMouseButton and event.pressed and event.button_index in [MOUSE_BUTTON_WHEEL_UP, MOUSE_BUTTON_WHEEL_DOWN]:
 			# Scrolls the list of maps in the Esc menu
 			var step := -1 if event.button_index == MOUSE_BUTTON_WHEEL_UP else 1
@@ -566,6 +867,13 @@ func _unhandled_input(event: InputEvent) -> void:
 		return
 	if editing:
 		editor_input(event)
+		return
+	# F5 quick-save, F9 quick-load (the host or a player alone)
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode in [KEY_F5, KEY_F9]:
+		if event.keycode == KEY_F5:
+			menu_save(QUICKSAVE_NAME)
+		else:
+			menu_load(QUICKSAVE_NAME)
 		return
 	# Enter: chat (while typing, the chat box gets the keys, not the game)
 	if event is InputEventKey and event.pressed and not event.echo and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
@@ -575,6 +883,9 @@ func _unhandled_input(event: InputEvent) -> void:
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			build_type = ""
 			selected = null
+			aiming = ""
+		elif event.button_index == MOUSE_BUTTON_LEFT and event.alt_pressed:
+			ping_at(ui_mouse())
 		elif event.button_index == MOUSE_BUTTON_LEFT:
 			on_click(ui_mouse())
 		elif event.button_index == MOUSE_BUTTON_WHEEL_UP and not mouse_over_panel():
@@ -583,7 +894,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			zoom_camera(1.0)
 	elif event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
-			KEY_1, KEY_2, KEY_3, KEY_4:
+			KEY_1, KEY_2, KEY_3, KEY_4, KEY_5:
 				choose_build(TOWER_TYPES[event.keycode - KEY_1])
 			KEY_SPACE:
 				act("wave", [])
@@ -606,11 +917,55 @@ func _unhandled_input(event: InputEvent) -> void:
 			KEY_R:
 				if state != "playing":
 					act("restart", [])
+			KEY_Z:
+				use_ability("meteor")
+			KEY_C:
+				use_ability("freeze")
+			KEY_K:
+				if state == "won" and not endless:
+					act("endless", [])
+			KEY_V:
+				if state == "lost":
+					start_replay()
+
+
+# Z / C or an ability button: Meteor starts aiming (the next click on the map
+# drops it; Z again, right-click or Esc stops aiming), Freeze all happens now.
+func use_ability(ability: String) -> void:
+	if state != "playing":
+		return
+	if aiming == ability:
+		aiming = ""
+		return
+	var left := ability_left(local_slot, ability)
+	if left > 0.0:
+		flash("%s is ready in %ds" % [ABILITIES[ability]["name"], ceili(left)])
+		return
+	if wave == 0:
+		flash("Abilities work once the first wave has started")
+		return
+	if ability == "meteor":
+		aiming = ability
+		build_type = ""
+	else:
+		act("ability", [ability, Vector2.ZERO])
 
 
 func on_click(p: Vector2) -> void:
+	if state == "won" and not endless and keep_going_rect().has_point(p):
+		act("endless", [])
+		return
 	if state != "playing":
 		return
+	# Aiming Meteor: a click on the map drops it there
+	if aiming != "" and not over_panel(p):
+		act("ability", [aiming, mouse_point()])
+		aiming = ""
+		return
+	for i in ABILITY_ORDER.size():
+		if ability_button_rect(i).has_point(p):
+			use_ability(ABILITY_ORDER[i])
+			return
 	if not asks.is_empty():
 		if ASK_YES_RECT.has_point(p):
 			answer_ask(true)
@@ -652,6 +1007,18 @@ func on_click(p: Vector2) -> void:
 		selected = null
 
 
+# Alt + click: pings that spot for everyone (on the map, or on the small map).
+# Never builds or selects.
+func ping_at(p: Vector2) -> void:
+	if chatting():
+		return
+	var m := minimap_map()
+	if m.has_point(p):
+		send_ping((p - m.position) / m.size * Vector2(map_cols, map_rows) * CELL)
+	elif not over_panel(p):
+		send_ping(mouse_point())
+
+
 func dialog_input(event: InputEvent) -> void:
 	if update_dialog == "downloading":
 		return
@@ -677,8 +1044,12 @@ func dialog_input(event: InputEvent) -> void:
 
 
 func choose_build(type: String) -> void:
+	if not daily_allows(type):
+		flash("Today's challenge doesn't allow %s towers" % TOWERS[type]["name"])
+		return
 	build_type = type
 	selected = null
+	aiming = ""
 
 
 func try_build(c: Vector2i) -> void:
@@ -755,6 +1126,9 @@ func perform(slot: int, action: String, args: Array) -> String:
 			if args.size() == 3 and args[0] is Vector2i and args[1] is int and args[2] is bool:
 				return set_target_mode(slot, args[0], args[1], args[2])
 		"wave":
+			# A loaded game on hold: the host's Space starts it again (no wave yet)
+			if held:
+				return unhold(slot)
 			if state == "playing":
 				return call_wave(slot)
 		"speed":
@@ -770,6 +1144,67 @@ func perform(slot: int, action: String, args: Array) -> String:
 		"answer":
 			if args.size() == 2 and args[0] is int and args[1] is bool:
 				answer_request(slot, args[0], args[1])
+		"ability":
+			# [ability, where] (where: Meteor's spot in map pixels, unused by Freeze all)
+			if args.size() == 2 and args[0] is String and args[1] is Vector2:
+				return do_ability(slot, args[0], args[1])
+		"endless":
+			return keep_going(slot)
+		"gift":
+			# [to slot, amount] (see gift_gold() in game_net.gd)
+			if args.size() == 2 and args[0] is int and args[1] is int:
+				return gift_gold(slot, args[0], args[1])
+	return ""
+
+
+# Host: a player uses an ability (see ABILITIES), if its cooldown is over.
+func do_ability(slot: int, ability: String, at: Vector2) -> String:
+	if not ABILITIES.has(ability) or state != "playing":
+		return ""
+	if wave == 0:
+		return "Abilities work once the first wave has started"
+	if held:
+		return "Abilities work once the game goes on"
+	var left := ability_left(slot, ability)
+	if left > 0.0:
+		return "%s is ready in %ds" % [ABILITIES[ability]["name"], ceili(left)]
+	match ability:
+		"meteor":
+			if not (at.is_finite() and Rect2(0, 0, map_cols * CELL, map_rows * CELL).has_point(at)):
+				return "Drop the meteor on the map"
+			var r: float = ABILITIES["meteor"]["radius"]
+			# Armor doesn't stop it (shields do)
+			var dmg := meteor_damage()
+			for e in enemies:
+				if not e.dead and e.pos.distance_to(at) <= r:
+					damage_enemy(e, dmg, slot, null, true)
+		"freeze":
+			freeze_all()
+	start_cooldown(slot, ability)
+	show_ability(slot, ability, at)
+	send_ability(slot, ability, at)
+	return ""
+
+
+# Host: after beating the last wave, keeps the game going in endless mode. The
+# win is already on the normal leaderboard; the endless run's score is sent
+# when it ends.
+func keep_going(slot: int) -> String:
+	if slot != local_slot:
+		return "Only the host can choose to keep going"
+	if state != "won" or endless:
+		return ""
+	if daily_date != "":
+		return "The daily challenge ends at wave %d" % DAILY_WAVES
+	endless = true
+	state = "playing"
+	end_stats = {}
+	score_sent = false  # (game_net.gd) so the game time keeps counting from wave 1
+	next_wave_timer = WAVE_INTERVAL
+	var text := "Endless mode! How far can you get?"
+	flash(text)
+	send_all("net_message", [text])
+	send_endless()
 	return ""
 
 
@@ -780,6 +1215,8 @@ func set_difficulty(slot: int, d: int) -> String:
 		return "Only the host can change the level"
 	if wave > 0 or state != "playing":
 		return "The level can only change before wave 1"
+	if daily_date != "":
+		return "The daily challenge has its own level"
 	if d < 0 or d >= DIFFICULTIES.size() or d == difficulty:
 		return ""
 	var old_gold := start_gold()
@@ -875,6 +1312,8 @@ func tell(slot: int, text: String) -> void:
 func build_tower(slot: int, c: Vector2i, type: String, allowed := false) -> String:
 	if state != "playing" or not can_build(c):
 		return ""
+	if not daily_allows(type):
+		return "Today's challenge doesn't allow %s towers" % TOWERS[type]["name"]
 	var cost: int = TOWERS[type]["cost"][0]
 	if players[slot].gold < cost:
 		return "Not enough gold"
@@ -951,6 +1390,8 @@ func sell_tower(slot: int, c: Vector2i) -> String:
 		return ""
 	if t.owner != slot:
 		return "That's %s's tower" % name_of(t.owner)
+	if daily_rules().get("no_sell", false):
+		return "Towers can't be sold in today's challenge"
 	players[slot].gold += int(t.spent * 0.7)
 	stat_spent[slot] -= int(t.spent * 0.7)
 	sold_towers.append(t)  # its damage and kills still count at the end
@@ -959,11 +1400,452 @@ func sell_tower(slot: int, c: Vector2i) -> String:
 	return ""
 
 
+# ---------------------------------------------------------------- saving and loading
+# A save is SAVES_DIR/<name>.sav, compressed: a header (what the Load list
+# shows), then the game. Both are plain values in Godot's binary format, read
+# without objects, so a save can't run code, and gold up to GOLD_MAX stays exact.
+# Saved: the map (custom maps too), level, wave and timer, spawning, endless,
+# daily, each player's gold and ability cooldowns (also saved players not back
+# yet), towers, monsters, poison clouds and the end screen's stats. Not saved:
+# shots in flight, effects, the replay. Only the host or a player alone saves
+# and loads, and only while nobody has joined. A loaded game is held until the
+# host presses Space, and never goes on a leaderboard (from_save).
+#
+# For the Esc menu (graphics): can_save(), can_load(), default_save_name(),
+# save_exists(), list_saves(), menu_save(), menu_load(), delete_save(), held_text().
+# For game_net.gd: saved_slot_for(), restore_saved_player(), from_save, held, held_note.
+
+# A new tower or monster field only needs adding here: older saves keep its default.
+const SAVE_TOWER_FIELDS := ["type", "cell", "owner", "level", "path", "mode", "spent", "cooldown", "aim", "dealt", "kills"]
+const SAVE_ENEMY_FIELDS := ["id", "kind", "pos", "wp", "loop_wp", "hp", "max_hp", "speed", "armor", "bounty", "weight",
+		"radius", "slow_factor", "slow_time", "freeze_time", "freeze_immune", "traveled", "special", "shield",
+		"max_shield", "shield_wait", "heal_timer", "weak", "poisoned"]
+const SAVE_CLOUD_FIELDS := {"pos": TYPE_VECTOR2, "r": TYPE_FLOAT, "time": TYPE_FLOAT, "dps": TYPE_FLOAT,
+		"owner": TYPE_INT, "cell": TYPE_VECTOR2I, "boss": TYPE_FLOAT, "weak": TYPE_FLOAT}
+
+
+# Why this computer can't save now, or "".
+func can_save() -> String:
+	if net_mode == "client":
+		return "Only the host can save"
+	if net_mode in ["searching", "connecting", "map_offer"]:
+		return "Can't save while joining a game"
+	if editing:
+		return "Can't save in the map editor"
+	if replay_on or state != "playing":
+		return "Only a game that's still going can be saved"
+	return ""
+
+
+# Why this computer can't load a game now, or "".
+func can_load() -> String:
+	if net_mode == "client":
+		return "Only the host can load a game"
+	if net_mode in ["searching", "connecting", "map_offer"]:
+		return "Can't load while joining a game"
+	if net_mode == "host" and player_count() > 1:
+		return "A game can only be loaded while nobody has joined"
+	if editing:
+		return "Close the map editor first"
+	return ""
+
+
+func save_path(save_name: String) -> String:
+	return "%s/%s.sav" % [SAVES_DIR, save_name.validate_filename()]
+
+
+# The name the Save box suggests: "Wave 37 - Normal - Default".
+func default_save_name() -> String:
+	var title := map_name if daily_date == "" else "Daily %s" % daily_date
+	return clean_text("Wave %d - %s - %s" % [wave, DIFFICULTIES[difficulty], title], SAVE_NAME_MAX)
+
+
+# For the "Overwrite?" question.
+func save_exists(save_name: String) -> bool:
+	return FileAccess.file_exists(save_path(clean_text(save_name, SAVE_NAME_MAX)))
+
+
+# Every save's header, for the Load list: Continue first, then newest first.
+# Each: {name, time (unix seconds), version, wave, level (index in DIFFICULTIES),
+# map, daily, endless, players (names), from_save, auto}. Load or delete one by
+# its name.
+func list_saves() -> Array:
+	var out := []
+	if not DirAccess.dir_exists_absolute(SAVES_DIR):
+		return out
+	for file in DirAccess.get_files_at(SAVES_DIR):
+		if file.get_extension() != "sav":
+			continue
+		var f := FileAccess.open_compressed(SAVES_DIR + "/" + file, FileAccess.READ, FileAccess.COMPRESSION_ZSTD)
+		if f == null:
+			continue
+		var head: Variant = f.get_var(false)
+		f.close()
+		if head is Dictionary and head.get("format") is int and head.get("name") is String:
+			out.append(head)
+	out.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		if (a.name == AUTOSAVE_NAME) != (b.name == AUTOSAVE_NAME):
+			return a.name == AUTOSAVE_NAME
+		return a.get("time", 0) > b.get("time", 0))
+	return out
+
+
+func named_save_count() -> int:
+	return list_saves().filter(func(h: Dictionary) -> bool: return not h.get("auto", false)).size()
+
+
+# The Esc menu's Save (and F5): saves, and says how it went.
+func menu_save(save_name: String) -> void:
+	var problem := save_game(save_name)
+	flash(problem if problem != "" else "Saved \"%s\"" % clean_text(save_name, SAVE_NAME_MAX))
+
+
+# The Esc menu's Load (and F9).
+func menu_load(save_name: String) -> void:
+	var problem := load_game(save_name)
+	if problem != "":
+		flash(problem)
+
+
+func delete_save(save_name: String) -> String:
+	var path := save_path(save_name)
+	if not FileAccess.file_exists(path):
+		return ""
+	return "" if DirAccess.remove_absolute(path) == OK else "Couldn't delete that save"
+
+
+# Saves the game as save_name ("": default_save_name()), over a save with that
+# name. Returns why it couldn't, or "".
+func save_game(save_name: String) -> String:
+	var problem := can_save()
+	if problem != "":
+		return problem
+	save_name = clean_text(save_name, SAVE_NAME_MAX)
+	if save_name == "":
+		save_name = default_save_name()
+	var path := save_path(save_name)
+	var auto := save_name == AUTOSAVE_NAME or save_name == QUICKSAVE_NAME
+	if not auto and not FileAccess.file_exists(path) and named_save_count() >= SAVES_MAX:
+		return "There are %d saves already: delete one first" % SAVES_MAX
+	DirAccess.make_dir_recursive_absolute(SAVES_DIR)
+	var names := []
+	for p in players:
+		if p != null:
+			names.append(name_of(p.slot))
+	var head := {"format": SAVE_FORMAT, "version": version, "name": save_name, "time": int(Time.get_unix_time_from_system()),
+			"wave": wave, "level": difficulty, "map": map_name, "daily": daily_date, "endless": endless,
+			"players": names, "from_save": from_save, "auto": auto}
+	# Written next to it first, so a crash halfway never breaks the old save
+	var tmp := path + ".tmp"
+	var f := FileAccess.open_compressed(tmp, FileAccess.WRITE, FileAccess.COMPRESSION_ZSTD)
+	if f == null:
+		return "Couldn't save (%s)" % error_string(FileAccess.get_open_error())
+	f.store_var(head, false)
+	f.store_var(make_save(), false)
+	var failed := f.get_error() != OK
+	f.close()
+	if failed:
+		DirAccess.remove_absolute(tmp)
+		return "Couldn't save"
+	if FileAccess.file_exists(path):
+		DirAccess.remove_absolute(path)
+	if DirAccess.rename_absolute(tmp, path) != OK:
+		return "Couldn't save"
+	return ""
+
+
+# The Continue save: at every wave start and when the game is closed. Not in
+# headless test runs, so tests don't touch the player's Continue save.
+func autosave() -> void:
+	if wave > 0 and can_save() == "" and DisplayServer.get_name() != "headless":
+		save_game(AUTOSAVE_NAME)
+
+
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_WM_CLOSE_REQUEST:
+		autosave()
+
+
+func pack_fields(o: Object, fields: Array) -> Dictionary:
+	var d := {}
+	for f: String in fields:
+		d[f] = o.get(f)
+	return d
+
+
+# Only values of the right type are taken (a missing one keeps the default).
+func unpack_fields(o: Object, d: Dictionary, fields: Array) -> void:
+	for f: String in fields:
+		if d.has(f) and typeof(d[f]) == typeof(o.get(f)):
+			o.set(f, d[f])
+
+
+# The game, for save_game().
+func make_save() -> Dictionary:
+	var list := []
+	for slot in MAX_PLAYERS:
+		var p: Player = players[slot]
+		if p != null:
+			list.append({"slot": slot, "name": name_of(slot), "gold": p.gold, "cooldowns": p.cooldowns.duplicate()})
+		elif saved_slots.has(slot):
+			list.append(saved_slots[slot].duplicate(true).merged({"slot": slot}))
+	var tower_list := []
+	for t: Tower in towers.values():
+		tower_list.append(pack_fields(t, SAVE_TOWER_FIELDS))
+	var sold := []
+	for t: Tower in sold_towers:
+		sold.append(pack_fields(t, SAVE_TOWER_FIELDS))
+	var monsters := []
+	for e in enemies + new_enemies:
+		if not e.dead:
+			var d := pack_fields(e, SAVE_ENEMY_FIELDS)
+			d["gate"] = routes.find(e.route)  # the route itself comes from the map
+			monsters.append(d)
+	return {"map_name": map_name, "map": map_rows_text.duplicate(), "daily": daily_date, "difficulty": difficulty,
+			"endless": endless, "wave": wave, "timer": next_wave_timer, "run_time": run_time, "spawn_hp": spawn_hp,
+			"spawn_queues": spawn_queues.duplicate(true), "spawn_timers": spawn_timers.duplicate(),
+			"next_enemy_id": next_enemy_id, "host_slot": local_slot, "players": list, "towers": tower_list,
+			"enemies": monsters, "clouds": clouds.duplicate(true), "cloud_tick": cloud_tick, "cloud_turn": cloud_turn,
+			"from_save": from_save,
+			"stats": {"kills": stat_kills, "damage": stat_damage, "start": stat_start, "earned": stat_earned,
+					"spent": stat_spent, "gifted": stat_gifted, "names": stat_names, "sold": sold}}
+
+
+# Whether d has these keys with these types (TYPE_FLOAT also takes whole numbers).
+func has_types(d: Variant, types: Dictionary) -> bool:
+	if not d is Dictionary:
+		return false
+	for k in types:
+		var t := typeof(d.get(k))
+		if t != types[k] and not (types[k] == TYPE_FLOAT and t == TYPE_INT):
+			return false
+	return true
+
+
+# A per-player-slot list of 4 numbers from a save (0 for anything broken).
+func four(v: Variant, as_float: bool) -> Array:
+	var out := [0.0, 0.0, 0.0, 0.0] if as_float else [0, 0, 0, 0]
+	if v is Array and v.size() == MAX_PLAYERS:
+		for i in MAX_PLAYERS:
+			if v[i] is int or v[i] is float:
+				out[i] = float(v[i]) if as_float else int(v[i])
+	return out
+
+
+# Loads a save (by its name) over the game being played. Returns why it
+# couldn't, or "" (then the game is held: see held_text()).
+func load_game(save_name: String) -> String:
+	var problem := can_load()
+	if problem != "":
+		return problem
+	var path := save_path(save_name)
+	if not FileAccess.file_exists(path):
+		return "There's no save called \"%s\"" % save_name
+	var f := FileAccess.open_compressed(path, FileAccess.READ, FileAccess.COMPRESSION_ZSTD)
+	if f == null:
+		return "Couldn't open that save"
+	var head: Variant = f.get_var(false)
+	var d: Variant = f.get_var(false)
+	f.close()
+	if not (head is Dictionary and head.get("format") is int):
+		return "That save is broken"
+	if head.format > SAVE_FORMAT:
+		return "That save is from a newer version of the game (%s)" % str(head.get("version", "?"))
+	# (Saves with an older format would be converted here; format 1 is the first.)
+	if not has_types(d, {"map": TYPE_ARRAY, "map_name": TYPE_STRING, "daily": TYPE_STRING, "difficulty": TYPE_INT,
+			"wave": TYPE_INT, "timer": TYPE_FLOAT, "spawn_queues": TYPE_ARRAY, "spawn_timers": TYPE_ARRAY,
+			"next_enemy_id": TYPE_INT, "host_slot": TYPE_INT, "players": TYPE_ARRAY, "towers": TYPE_ARRAY,
+			"enemies": TYPE_ARRAY, "stats": TYPE_DICTIONARY}) \
+			or d.difficulty < 0 or d.difficulty >= DIFFICULTIES.size() or d.host_slot < 0 or d.host_slot >= MAX_PLAYERS \
+			or d.wave < 0 or d.spawn_queues.size() != MAX_PLAYERS or d.spawn_timers.size() != MAX_PLAYERS:
+		return "That save is broken"
+	var m := read_map(d.map)
+	if m.has("error"):
+		return "That save's map is broken"
+	apply_save(d, m)
+	var text := held_text() if held else "Loaded \"%s\"" % save_name
+	flash(text)
+	return ""
+
+
+func apply_save(d: Dictionary, m: Dictionary) -> void:
+	clear_world()
+	reset_stats()
+	lap_lengths.clear()
+	var title := clean_text(d.map_name, MAP_NAME_MAX)
+	use_map(m, title if title != "" else "Saved map")
+	build_map()
+	var date: String = d.daily
+	if date.length() == 10 and date.replace("-", "").is_valid_int() and map_rows_text == daily_map(date).text:
+		daily_date = date
+	difficulty = d.difficulty
+	endless = d.get("endless") == true
+	wave = d.wave
+	next_wave_timer = d.timer
+	run_time = d.run_time if d.get("run_time") is float else 0.0
+	score_sent = false
+	spawn_hp = d.spawn_hp if d.get("spawn_hp") is float else wave_hp(maxi(wave, 1))
+	for g in MAX_PLAYERS:
+		spawn_queues[g] = []
+		if d.spawn_queues[g] is Array and g < routes.size() and not routes[g].is_empty():
+			for kind in d.spawn_queues[g]:
+				if kind in ENEMY_KINDS:
+					spawn_queues[g].append(kind)
+		spawn_timers[g] = float(d.spawn_timers[g]) if (d.spawn_timers[g] is float or d.spawn_timers[g] is int) else 0.0
+	next_enemy_id = maxi(d.next_enemy_id, 1)
+	game_speed = 1
+	state = "playing"
+	aiming = ""
+	end_stats = {}
+	# Players: this computer gets the saver's slot; the others wait in saved_slots
+	var me: Player = players[local_slot]
+	if me == null:
+		me = Player.new()
+		me.name = my_name()
+	players = [null, null, null, null]
+	saved_slots.clear()
+	local_slot = d.host_slot
+	me.slot = local_slot
+	players[local_slot] = me
+	for item in d.players:
+		if not has_types(item, {"slot": TYPE_INT, "name": TYPE_STRING, "gold": TYPE_INT, "cooldowns": TYPE_DICTIONARY}) \
+				or item.slot < 0 or item.slot >= mini(MAX_PLAYERS, routes.size()) or routes[item.slot].is_empty():
+			continue
+		var gold_left := clampi(item.gold, 0, GOLD_MAX)
+		var cools := {}
+		for a in item.cooldowns:
+			if ABILITIES.has(a) and (item.cooldowns[a] is float or item.cooldowns[a] is int):
+				cools[a] = float(item.cooldowns[a])
+		if item.slot == local_slot:
+			me.gold = gold_left
+			me.cooldowns = cools
+		else:
+			saved_slots[item.slot] = {"name": clean_text(item.name, NAME_MAX), "gold": gold_left, "cooldowns": cools}
+	# Towers
+	for td in d.towers:
+		var t := Tower.new()
+		if td is Dictionary:
+			unpack_fields(t, td, SAVE_TOWER_FIELDS)
+		if not (TOWERS.has(t.type) and in_map(t.cell) and not path_cells.has(t.cell) and not blocked.has(t.cell)
+				and not towers.has(t.cell) and t.owner >= 0 and t.owner < MAX_PLAYERS and t.mode >= 0 and t.mode < TARGET_MODES.size()):
+			continue
+		t.level = clampi(t.level, 0, MAX_LEVEL - 1)
+		t.path = clampi(t.path, 0, 2) if t.level >= PATH_LEVEL else 0
+		t.pos = cell_center(t.cell)
+		towers[t.cell] = t
+		build_tower_node(t)
+	# Stats
+	var s: Dictionary = d.stats
+	stat_kills = four(s.get("kills"), false)
+	stat_damage = four(s.get("damage"), true)
+	stat_start = four(s.get("start"), false)
+	stat_earned = four(s.get("earned"), false)
+	stat_spent = four(s.get("spent"), false)
+	stat_gifted = four(s.get("gifted"), false)
+	var names: Variant = s.get("names")
+	for i in MAX_PLAYERS:
+		stat_names[i] = clean_text(names[i], NAME_MAX) if names is Array and names.size() == MAX_PLAYERS and names[i] is String else ""
+	if s.get("sold") is Array:
+		for td in s.sold:
+			var t := Tower.new()
+			if td is Dictionary:
+				unpack_fields(t, td, SAVE_TOWER_FIELDS)
+			if TOWERS.has(t.type) and t.owner >= 0 and t.owner < MAX_PLAYERS:
+				t.level = clampi(t.level, 0, MAX_LEVEL - 1)
+				sold_towers.append(t)
+	# Monsters, in id order (send_snapshot() needs that)
+	var list: Array = d.enemies.filter(func(ed: Variant) -> bool: return ed is Dictionary and ed.get("id") is int)
+	list.sort_custom(func(a: Dictionary, b: Dictionary) -> bool: return a.id < b.id)
+	for ed: Dictionary in list:
+		var gate: int = ed.get("gate", -1) if ed.get("gate") is int else -1
+		if not (ed.get("kind") in ENEMY_KINDS and gate >= 0 and gate < routes.size() and not routes[gate].is_empty()) \
+				or enemy_by_id.has(ed.id):
+			continue
+		var e := make_enemy(ed.kind)
+		unpack_fields(e, ed, SAVE_ENEMY_FIELDS)
+		e.route = routes[gate]
+		if e.wp < 0 or e.wp >= e.route.size() or e.loop_wp < 0 or e.loop_wp >= e.route.size() or not (e.hp > 0.0):
+			e.node.queue_free()
+			continue
+		enemies.append(e)
+		enemy_by_id[e.id] = e
+		next_enemy_id = maxi(next_enemy_id, e.id + 1)
+	# Poison clouds
+	if d.get("clouds") is Array:
+		for c: Variant in d.clouds:
+			if has_types(c, SAVE_CLOUD_FIELDS):
+				var cloud := {}
+				for k in SAVE_CLOUD_FIELDS:
+					cloud[k] = float(c[k]) if SAVE_CLOUD_FIELDS[k] == TYPE_FLOAT else c[k]
+				clouds.append(cloud)
+				show_cloud(cloud.pos, cloud.r, cloud.time, 2 if cloud.weak > 0.0 else 0)
+	cloud_tick = float(d.get("cloud_tick")) if d.get("cloud_tick") is float else 0.0
+	cloud_turn = posmod(d.get("cloud_turn"), 4) if d.get("cloud_turn") is int else 0
+	from_save = true
+	held = wave > 0
+	held_note = ""
+	menu_open = false
+	send_difficulty()
+
+
+# The line shown while a loaded game is held ("" when not): who it waits for.
+func held_text() -> String:
+	if not held:
+		return ""
+	if net_mode == "client":
+		return held_note
+	var waiting := []
+	for slot in saved_slots:
+		waiting.append("%s (%s)" % [PLAYER_NAMES[slot], saved_slots[slot].name])
+	var text := "Loaded wave %d, on hold." % wave
+	if not waiting.is_empty():
+		text += " Waiting for %s." % ", ".join(waiting)
+	return text + " Press SPACE to go on"
+
+
+# The host's Space while held: the game goes on.
+func unhold(slot: int) -> String:
+	if slot != local_slot:
+		return "The host goes on when everyone is back"
+	held = false
+	var text := "The game goes on!"
+	flash(text)
+	send_all("net_message", [text])
+	return ""
+
+
+# Host, a player joining a loaded game: the saved slot they get back (the one
+# saved with their name, else the first one nobody has taken), -1 if none.
+func saved_slot_for(their_name: String) -> int:
+	var wanted := clean_text(their_name, NAME_MAX).to_lower()
+	for slot: int in saved_slots:
+		if players[slot] == null and wanted != "" and String(saved_slots[slot].name).to_lower() == wanted:
+			return slot
+	for slot in MAX_PLAYERS:
+		if saved_slots.has(slot) and players[slot] == null:
+			return slot
+	return -1
+
+
+# Host: gives a player who just joined (already in players[p.slot]) the gold and
+# cooldowns saved for their slot. True if it did: then their stats stay as saved
+# (no late-join gold, no fresh stats).
+func restore_saved_player(p: Player) -> bool:
+	if not saved_slots.has(p.slot):
+		return false
+	var s: Dictionary = saved_slots[p.slot]
+	saved_slots.erase(p.slot)
+	p.gold = s.gold
+	p.cooldowns = s.cooldowns.duplicate()
+	stat_names[p.slot] = p.name
+	return true
+
+
 # ---------------------------------------------------------------- stats at the end
 
 # Host / alone, once when the game ends: everything the stats screen shows.
-# players: [slot, name, kills, damage, gold earned, gold spent] for everyone who
-# played; towers: the 5 that did the most damage, [type, path, level, owner,
+# players: [slot, name, kills, damage, gold earned, gold spent, gold gifted (got
+# minus given, see gift_gold())] for everyone who played; towers: the 5 that did the most damage, [type, path, level, owner,
 # owner's name, damage, kills]; mvp: the slot with the most damage (kills break a
 # tie), -1 alone.
 func make_end_stats() -> Dictionary:
@@ -974,7 +1856,7 @@ func make_end_stats() -> Dictionary:
 			stat_names[slot] = name_of(slot)
 		elif stat_names[slot] == "":
 			continue
-		rows.append([slot, stat_names[slot], stat_kills[slot], stat_damage[slot], stat_earned[slot], stat_spent[slot]])
+		rows.append([slot, stat_names[slot], stat_kills[slot], stat_damage[slot], stat_earned[slot], stat_spent[slot], stat_gifted[slot]])
 		if mvp < 0 or stat_damage[slot] > stat_damage[mvp] or \
 				(stat_damage[slot] == stat_damage[mvp] and stat_kills[slot] > stat_kills[mvp]):
 			mvp = slot
@@ -986,3 +1868,385 @@ func make_end_stats() -> Dictionary:
 		best.append([t.type, t.path, t.level, t.owner, stat_names[t.owner], t.dealt, t.kills])
 	return {"wave": wave, "won": state == "won", "ms": int(run_time * 1000.0), "players": rows,
 			"towers": best, "mvp": mvp if rows.size() > 1 else -1}
+
+
+# ---------------------------------------------------------------- replay of the last minute
+
+# Every computer records what it sees (no network traffic): every REPLAY_STEP
+# game seconds a frame with each monster's id, place, health and look, plus the
+# shots and effects since the frame before. After losing, V plays the last
+# REPLAY_SECONDS back with the normal visuals. While it plays, the real monsters
+# and shots are put aside and hidden (live_enemies, live_shots), and enemies /
+# shots hold the replay's copies, so the top bar, small map and health bars
+# show the replay. The towers are shown as they are at the end.
+const REPLAY_SECONDS := 60.0  # game seconds kept
+const REPLAY_STEP := 0.1  # game seconds between recorded frames
+const REPLAY_SPEEDS := [0.5, 1.0, 2.0, 4.0]
+const REPLAY_BAR := Rect2(240, BAR_TOP - 64, 800, 22)  # the timeline's clickable track (REPLAY_TRACK in game_ui.gd draws it)
+const REPLAY_BYTES := 12  # per monster in a frame (see record_frame())
+
+# Frames: [game time, wave, alive (see alive_count()), max_alive(), monsters, events].
+# monsters: per monster id (u32), x and y in 1/32 pixels (u16 each), health share
+# of 65535 (u16), its kind + 128 slowed + 64 frozen + 32 got past (has walked a
+# whole lap; known by the host and alone), and its special_bits() + 32 poisoned.
+# events: ["shot", tower cell, monster id], ["bolt", points], ["boom", pos, r],
+# ["frost", pos, r] or ["ability", slot, ability, pos].
+var rec_frames: Array = []
+var rec_time := 0.0  # game seconds recorded
+var rec_since := 0.0  # since the last frame
+var rec_events: Array = []  # since the last frame
+var rec_closed := false  # the game ended and its last frame is in
+var lap_lengths := {}  # a route's first point -> how far a whole lap is
+
+var replay_on := false
+var replay_t := 0.0  # the game time being shown (rec_frames' clock)
+var replay_speed := 1.0
+var replay_paused := false
+var replay_frame := -1  # the frame shown last (its events have been played)
+var replay_ghosts := {}  # recorded monster id -> its replay copy (id -1 - recorded id)
+var replay_past := {}  # replay copies that got past (Enemy -> true)
+var live_enemies: Array[Enemy] = []
+var live_shots: Array[Shot] = []
+var replay_layer: Node2D  # the replay panel, drawn by draw_replay_bar() in game_ui.gd
+var replay_drag := false
+
+
+# Every computer, every frame: keeps the last minute (see REPLAY_SECONDS).
+func record_frame(dt: float) -> void:
+	if replay_on or wave == 0:
+		return
+	if state != "playing":
+		# One last frame when the game ends (an endless run starts recording again)
+		if rec_closed:
+			return
+		rec_closed = true
+	else:
+		rec_closed = false
+		rec_time += dt
+		rec_since += dt
+		if rec_since < REPLAY_STEP:
+			return
+	rec_since = 0.0
+	var data := PackedByteArray()
+	data.resize(enemies.size() * REPLAY_BYTES)
+	var at := 0
+	for e in enemies:
+		data.encode_u32(at, e.id)
+		data.encode_u16(at + 4, clampi(roundi(e.pos.x * 32.0), 0, 65535))
+		data.encode_u16(at + 6, clampi(roundi(e.pos.y * 32.0), 0, 65535))
+		data.encode_u16(at + 8, clampi(roundi(e.hp / e.max_hp * 65535.0), 0, 65535))
+		var flags := ENEMY_KINDS.find(e.kind) | (128 if e.slow_time > 0.0 else 0) | (64 if e.freeze_time > 0.0 else 0)
+		if got_past(e):
+			flags |= 32
+		data[at + 10] = flags
+		# The trait and shield (see special_bits()), + 32 poisoned (host and alone)
+		data[at + 11] = special_bits(e) | (32 if e.poisoned > 0.0 else 0)
+		at += REPLAY_BYTES
+	rec_frames.append([rec_time, wave, alive_count(), max_alive(), data, rec_events])
+	rec_events = []
+	while rec_frames.size() > 1 and rec_frames[0][0] < rec_time - REPLAY_SECONDS:
+		rec_frames.pop_front()
+
+
+# How far a monster walks from its gate once around the loop (only the host and
+# a player alone know the monsters' routes).
+func lap_length(e: Enemy) -> float:
+	var key: Vector2 = e.route[0]
+	if not lap_lengths.has(key):
+		var n := 0.0
+		for i in range(1, e.route.size()):
+			n += e.route[i - 1].distance_to(e.route[i])
+		lap_lengths[key] = n + e.route[e.route.size() - 1].distance_to(e.route[e.loop_wp])
+	return lap_lengths[key]
+
+
+# The host and a player alone know the routes; the other players go by the
+# host's snapshots (Enemy.past).
+func got_past(e: Enemy) -> bool:
+	return e.past if e.route.is_empty() else e.traveled > lap_length(e)
+
+
+func rec_event(ev: Array) -> void:
+	if not replay_on and wave > 0 and state == "playing":
+		rec_events.append(ev)
+
+
+# The effects are recorded where every computer makes them (the other players'
+# come from the host's messages), then made as usual.
+func launch_shot(t: Tower, target: Enemy, visual: bool) -> void:
+	rec_event(["shot", t.cell, target.id])
+	super(t, target, visual)
+	# The poison glob's speed (gameplay; game_world.gd makes the shot)
+	if t.type == "poison" and not shots.is_empty() and shots[-1].tower == t:
+		shots[-1].speed = POISON_SHOT_SPEED
+
+
+func add_bolt(points: PackedVector3Array) -> void:
+	rec_event(["bolt", points])
+	super(points)
+
+
+func add_boom(pos: Vector2, r: float) -> void:
+	rec_event(["boom", pos, r])
+	super(pos, r)
+
+
+func add_frost_ring(pos: Vector2, r: float) -> void:
+	rec_event(["frost", pos, r])
+	super(pos, r)
+
+
+func show_ability(slot: int, ability: String, at: Vector2) -> void:
+	rec_event(["ability", slot, ability, at])
+	super(slot, ability, at)
+
+
+# A new game (or the host's restart) also ends the replay and forgets the recording.
+func clear_world() -> void:
+	stop_replay()
+	rec_frames.clear()
+	rec_events.clear()
+	rec_time = 0.0
+	rec_since = 0.0
+	rec_closed = false
+	super()
+
+
+func start_replay() -> void:
+	if replay_on or rec_frames.size() < 2:
+		return
+	replay_on = true
+	live_enemies = enemies
+	live_shots = shots
+	for e in live_enemies:
+		e.node.visible = false
+	for s in live_shots:
+		s.node.visible = false
+	enemies = []
+	shots = []
+	replay_ghosts.clear()
+	replay_past.clear()
+	replay_speed = 1.0
+	replay_paused = false
+	replay_frame = -1
+	replay_t = trouble_start()
+	selected = null
+	build_type = ""
+	aiming = ""
+	if replay_layer == null:
+		replay_layer = Node2D.new()
+		hud.get_parent().add_child(replay_layer)
+		replay_layer.draw.connect(draw_on.bind(replay_layer, draw_replay_bar))
+	replay_layer.visible = true
+	show_replay_time(replay_t, true)
+
+
+# Where the replay starts: 5 seconds before the monster count last climbed from
+# under half the limit, where it started to go wrong (or the recording's start).
+func trouble_start() -> float:
+	var start: float = rec_frames[0][0]
+	for i in range(rec_frames.size() - 1, -1, -1):
+		var f: Array = rec_frames[i]
+		if f[2] < f[3] * 0.5:
+			start = f[0]
+			break
+	return maxf(start - 5.0, rec_frames[0][0])
+
+
+# Back to the game's real monsters and shots (the stats screen).
+func stop_replay() -> void:
+	if not replay_on:
+		return
+	replay_on = false
+	replay_drag = false
+	var mine := enemies
+	enemies = live_enemies
+	for e in mine:
+		if e.id < 0:
+			e.node.queue_free()
+		else:
+			enemies.append(e)  # a real monster that came in from the host meanwhile
+	for s in shots:
+		s.node.queue_free()
+	shots = live_shots
+	for e in enemies:
+		e.node.visible = true
+	for s in shots:
+		s.node.visible = true
+	live_enemies = []
+	live_shots = []
+	replay_ghosts.clear()
+	replay_past.clear()
+	if replay_layer != null:
+		replay_layer.visible = false
+
+
+func replay_update(delta: float) -> void:
+	# The game went on (a new game from the host): back to it
+	if state == "playing":
+		stop_replay()
+		return
+	var last: float = rec_frames[-1][0]
+	var dt := 0.0 if replay_paused else delta * replay_speed
+	replay_t = clampf(replay_t + dt, rec_frames[0][0], last)
+	if replay_t >= last:
+		replay_paused = true
+	show_replay_time(replay_t, false)
+	update_effects(dt)
+	update_shots(dt)
+	replay_layer.queue_redraw()
+
+
+# The last frame at or before game time t.
+func frame_at(t: float) -> int:
+	var lo := 0
+	var hi := rec_frames.size() - 1
+	while lo < hi:
+		var mid := (lo + hi + 1) / 2
+		if rec_frames[mid][0] <= t:
+			lo = mid
+		else:
+			hi = mid - 1
+	return lo
+
+
+# Puts the replay's monsters where they were at game time t (gliding between
+# two frames). jump: skipped there (no shots or effects on the way, monsters
+# that are gone just vanish instead of falling over).
+func show_replay_time(t: float, jump: bool) -> void:
+	var i := frame_at(t)
+	var j := mini(i + 1, rec_frames.size() - 1)
+	var f: Array = rec_frames[i]
+	var g: Array = rec_frames[j]
+	var a := 0.0 if i == j else clampf((t - f[0]) / (g[0] - f[0]), 0.0, 1.0)
+	var natural := not jump and i >= replay_frame and i - replay_frame <= 20
+	if natural:
+		for k in range(replay_frame + 1, i + 1):
+			play_events(rec_frames[k][5])
+	else:
+		for s in shots:
+			s.node.queue_free()
+		shots.clear()
+	replay_frame = i
+	var next := {}
+	var gd: PackedByteArray = g[4]
+	for at in range(0, gd.size(), REPLAY_BYTES):
+		next[gd.decode_u32(at)] = Vector2(gd.decode_u16(at + 4), gd.decode_u16(at + 6)) / 32.0
+	var fd: PackedByteArray = f[4]
+	var seen := {}
+	for at in range(0, fd.size(), REPLAY_BYTES):
+		var id := fd.decode_u32(at)
+		seen[id] = true
+		var p := Vector2(fd.decode_u16(at + 4), fd.decode_u16(at + 6)) / 32.0
+		if next.has(id):
+			p = p.lerp(next[id], a)
+		var flags: int = fd[at + 10]
+		var e: Enemy = replay_ghosts.get(id)
+		if e == null:
+			e = make_enemy(ENEMY_KINDS[flags & 3])
+			e.id = -1 - id  # never mixed up with the host's monsters
+			e.max_hp = 1.0
+			apply_special_bits(e, fd[at + 11])
+			if e.special == "splitling":
+				e.radius *= 0.75
+			e.node.position = to3d(p)
+			replay_ghosts[id] = e
+			enemies.append(e)
+		e.pos = p
+		e.net_pos = p
+		e.hp = fd.decode_u16(at + 8) / 65535.0
+		e.slow_time = 1.0 if flags & 128 else 0.0
+		e.freeze_time = 1.0 if flags & 64 else 0.0
+		e.shield = 1.0 if fd[at + 11] & 16 else 0.0
+		e.poisoned = 1.0 if fd[at + 11] & 32 else 0.0
+		if flags & 32:
+			replay_past[e] = true
+		else:
+			replay_past.erase(e)
+	for k in range(enemies.size() - 1, -1, -1):
+		var e := enemies[k]
+		var id := -1 - e.id
+		if e.id < 0 and not seen.has(id):
+			replay_ghosts.erase(id)
+			replay_past.erase(e)
+			enemies.remove_at(k)
+			if natural and e.hp < 0.5:
+				drop_corpse(e)
+			else:
+				e.node.queue_free()
+
+
+func play_events(list: Array) -> void:
+	for ev: Array in list:
+		match ev[0]:
+			"shot":
+				var t: Tower = towers.get(ev[1])
+				var target: Enemy = replay_ghosts.get(ev[2])
+				if t != null and target != null:
+					t.aim = (target.pos - t.pos).normalized()
+					launch_shot(t, target, true)
+			"bolt":
+				add_bolt(ev[1])
+			"boom":
+				add_boom(ev[1], ev[2])
+			"frost":
+				add_frost_ring(ev[1], ev[2])
+			"ability":
+				show_ability(ev[1], ev[2], ev[3])
+
+
+# The replay's keys: Space pause, Left / Right 5 seconds, F speed, click or
+# drag the timeline, V or Esc back to the stats, R play again, Enter chat.
+# WASD and the scroll wheel still move the camera.
+func replay_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		match event.keycode:
+			KEY_ESCAPE, KEY_V:
+				stop_replay()
+			KEY_SPACE:
+				if replay_t >= rec_frames[-1][0]:
+					replay_t = trouble_start()
+					show_replay_time(replay_t, true)
+				replay_paused = not replay_paused
+			KEY_LEFT:
+				replay_jump(-5.0)
+			KEY_RIGHT:
+				replay_jump(5.0)
+			KEY_F:
+				replay_speed = REPLAY_SPEEDS[(REPLAY_SPEEDS.find(replay_speed) + 1) % REPLAY_SPEEDS.size()]
+			KEY_R:
+				stop_replay()
+				act("restart", [])
+			KEY_ENTER, KEY_KP_ENTER:
+				open_chat()
+	elif event is InputEventMouseButton:
+		if event.button_index == MOUSE_BUTTON_LEFT:
+			var p := ui_mouse()
+			replay_drag = event.pressed and REPLAY_BAR.grow(8).has_point(p)
+			if replay_drag:
+				replay_scrub(p.x)
+		elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			zoom_camera(-1.0)
+		elif event.pressed and event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			zoom_camera(1.0)
+	elif event is InputEventMouseMotion and replay_drag:
+		replay_scrub(ui_mouse().x)
+
+
+func replay_jump(seconds: float) -> void:
+	replay_t = clampf(replay_t + seconds, rec_frames[0][0], rec_frames[-1][0])
+	show_replay_time(replay_t, true)
+
+
+func replay_scrub(x: float) -> void:
+	var k := clampf((x - REPLAY_BAR.position.x) / REPLAY_BAR.size.x, 0.0, 1.0)
+	replay_t = lerpf(rec_frames[0][0], rec_frames[-1][0], k)
+	show_replay_time(replay_t, true)
+
+
+# What the timeline shows, for drawing it: [wave, alive, max alive, monsters
+# that got past, seconds before the end].
+func replay_info() -> Array:
+	var f: Array = rec_frames[maxi(replay_frame, 0)]
+	return [f[1], f[2], f[3], replay_past.size(), rec_frames[-1][0] - replay_t]
+

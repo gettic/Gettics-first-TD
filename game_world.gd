@@ -124,7 +124,7 @@ func build_world() -> void:
 	build_map()
 	build_monsters()  # at the start, so the first wave doesn't stutter
 	load_arrow_models()  # and upgrades don't either
-	load_cannon_models()
+	load_kit_models()
 
 
 # A 3D color table for env.adjustment_color_correction: shadows a little cool,
@@ -339,6 +339,14 @@ func apply_graphics() -> void:
 	# Monsters cast shadows only on High (hundreds of them can be walking)
 	for e in enemies:
 		e.node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if high else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	# The poison cauldrons' motes and the clouds' puffs only on High
+	for t: Tower in towers.values():
+		if t.type == "poison" and t.head != null:
+			var motes := t.head.get_node_or_null("Motes")
+			if motes != null:
+				motes.visible = high
+	if cloud_puffs != null:
+		cloud_puffs.visible = high
 
 
 func load_settings() -> void:
@@ -896,6 +904,9 @@ func make_effects() -> void:
 		hit_pool.append(burst(10, 0.35, 0.05, 2.5))
 	for i in 8:
 		boom_pool.append(burst(36, 0.7, 0.12, 4.0))
+	make_ability_fx()
+	make_cloud_fx()
+	make_special_fx()
 
 
 func burst(amount: int, life: float, size: float, speed: float) -> GPUParticles3D:
@@ -929,7 +940,11 @@ func shot_spark(s: Shot) -> void:
 	if s.type == "cannon":
 		return
 	var col := Color(0.8, 1.6, 2.4) if s.type == "frost" else Color(1.6, 1.3, 0.7)
-	fire_burst(hit_pool[hit_next % hit_pool.size()], to3d(s.target_pos, 0.35), col)
+	var y := 0.35
+	if s.type == "poison":
+		col = Color(0.9, 2.4, 0.4)  # a green splash where the glob lands
+		y = 0.2
+	fire_burst(hit_pool[hit_next % hit_pool.size()], to3d(s.target_pos, y), col)
 	hit_next += 1
 
 
@@ -964,12 +979,12 @@ func build_tower_node(t: Tower) -> void:
 	add_child(root)
 	# Levels after 4 keep the level 4 look (the level shows on a badge, see draw_level_badges())
 	var look := mini(t.level, 3)
-	if t.type == "arrow" or t.type == "cannon":
+	if t.type == "arrow" or KIT_FILES.has(t.type):
 		var model_head: Node3D
 		if t.type == "arrow":
 			model_head = build_arrow_tower(root, t.level, t.path, t.owner)
 		else:
-			model_head = build_cannon_tower(root, t.level, t.path, t.owner)
+			model_head = build_kit_tower(t.type, root, t.level, t.path, t.owner)
 		add_pips(root, look, Vector3(0, 0.06, 0.44))
 		paint_tree(root)
 		t.node = root
@@ -1185,41 +1200,54 @@ func pack_mat(mesh: Mesh, slot: int) -> ShaderMaterial:
 	return pack_mats[key]
 
 
-# Cannon tower: a dwarven mortar bunker (made for this game with the model kit,
-# see assets/CREDITS.md). An eight-sided stone bunker with a furnace, a banner in
-# the owner's color and a fat mortar on a turret that turns to aim (front -Z).
-# One model per look, like the arrow tower: levels 1-4, then Big Bomb and
-# Cluster each get a new model at levels 5, 10, 15, 20, 30 and 40 (Cluster's
-# mortars match its bomblets: 3, then 4 at level 20 and 5 at level 40). The
-# models have no textures of their own: all share the stone and metal atlas,
-# the team cloth (in the owner's color) and the furnace glow.
-const CANNON_FILE := "res://assets/towers/cannon/cannon_%d_%d.glb"  # path, look
-const CANNON_WIDTH := 0.8  # L1's width on a 1-unit tile
-var cannon_parts := {}  # Vector2i(path, look) -> {"body", "head": [[mesh, transform], ...], "pivot": Transform3D}
-var cannon_mats := {}  # shared painted materials by name (the team cloth also by owner)
-var cannon_scale := 0.0
+# Towers made for this game with the model kit (see assets/CREDITS.md), loaded
+# the same way: one model per look, each loaded once and shared by every tower
+# of its kind. Levels 1-4 have a look each, then each path gets a new model at
+# levels 5, 10, 15, 20, 30 and 40. A turret turns to aim (front -Z). The models
+# have no textures of their own: all share the stone and metal atlas, and each
+# kind has its team cloth (in the owner's color) and glow.
+#
+# Cannon: a dwarven mortar bunker. An eight-sided stone bunker with a furnace, a
+# banner and a fat mortar on the turret; Big Bomb's mortar grows, Cluster's
+# mortars match its bomblets (3, then 4 at level 20 and 5 at level 40).
+#
+# Poison: a plague cauldron. A round stone tower on timber props, brew spilling
+# down its walls and out of a sluice at the front, and a cauldron on a turning
+# yoke, tipped toward its target. Stills with glowing bulbs from level 3. Venom
+# grows a crown of fangs and brews bright acid; Miasma gets smokestacks, more
+# vats and a murky brew. Green motes rise from the cauldron on High.
+const KIT_FILES := {"cannon": "res://assets/towers/cannon/cannon_%d_%d.glb",
+		"poison": "res://assets/towers/poison/poison_%d_%d.glb"}
+const KIT_WIDTH := {"cannon": 0.8, "poison": 0.86}  # L1's width on a 1-unit tile
+var kit_parts := {}  # tower type -> Vector2i(path, look) -> {"body", "head": [[mesh, transform], ...], "pivot", "pot"}
+var kit_mats := {}  # shared materials by type and name (the team cloth also by owner)
+var kit_scale := {}  # tower type -> the scale of all its looks (from L1)
+var mote_process: ParticleProcessMaterial  # the poison cauldron's motes, shared
 
 
-func build_cannon_tower(root: Node3D, level: int, path: int, slot: int) -> Node3D:
-	var d := cannon_model(cannon_look(level, path))
+func build_kit_tower(type: String, root: Node3D, level: int, path: int, slot: int) -> Node3D:
+	var d := kit_model(type, kit_look(level, path))
+	var sc: float = kit_scale[type]
 	var model := Node3D.new()
-	model.scale = Vector3.ONE * cannon_scale
+	model.scale = Vector3.ONE * sc
 	root.add_child(model)
-	add_cannon_part(model, d["body"], slot)
+	add_kit_part(type, model, d["body"], slot)
 	# The turret turns round its own axis; the model's front is +Z, the game's -Z
 	var pivot: Transform3D = d["pivot"]
 	var head := Node3D.new()
-	head.position = pivot.origin * cannon_scale
+	head.position = pivot.origin * sc
 	root.add_child(head)
 	var turn := Node3D.new()
-	turn.transform = Transform3D(Basis(Vector3.UP, PI) * pivot.basis.scaled(Vector3.ONE * cannon_scale), Vector3.ZERO)
+	turn.transform = Transform3D(Basis(Vector3.UP, PI) * pivot.basis.scaled(Vector3.ONE * sc), Vector3.ZERO)
 	head.add_child(turn)
-	add_cannon_part(turn, d["head"], slot)
+	add_kit_part(type, turn, d["head"], slot)
+	if type == "poison":
+		add_brew_motes(head, Basis(Vector3.UP, PI) * pivot.basis * (d["pot"] as Vector3) * sc)
 	return head
 
 
 # Which model a level shows: Vector2i(path, look), looks 1-4, then 5-10 per path
-func cannon_look(level: int, path: int) -> Vector2i:
+func kit_look(level: int, path: int) -> Vector2i:
 	var look := arrow_look(level)
 	if look <= 4 or path <= 0:
 		return Vector2i(0, mini(look, 4))
@@ -1227,17 +1255,21 @@ func cannon_look(level: int, path: int) -> Vector2i:
 
 
 # Loads all the models at the start, so upgrading never stutters
-func load_cannon_models() -> void:
-	for look in range(1, 5):
-		cannon_model(Vector2i(0, look))
-	for path in [1, 2]:
-		for look in range(5, 11):
-			cannon_model(Vector2i(path, look))
+func load_kit_models() -> void:
+	for type: String in KIT_FILES:
+		for look in range(1, 5):
+			kit_model(type, Vector2i(0, look))
+		for path in [1, 2]:
+			for look in range(5, 11):
+				kit_model(type, Vector2i(path, look))
 
 
-func cannon_model(k: Vector2i) -> Dictionary:
-	if not cannon_parts.has(k):
-		var scene: Node3D = load(CANNON_FILE % [k.x, k.y]).instantiate()
+func kit_model(type: String, k: Vector2i) -> Dictionary:
+	if not kit_parts.has(type):
+		kit_parts[type] = {}
+	var store: Dictionary = kit_parts[type]
+	if not store.has(k):
+		var scene: Node3D = load(KIT_FILES[type] % [k.x, k.y]).instantiate()
 		var turret: Node3D = scene.find_child("Turret", true, false)
 		var body := []
 		var head := []
@@ -1248,15 +1280,20 @@ func cannon_model(k: Vector2i) -> Dictionary:
 			pivot = (up as Node3D).transform * pivot
 			up = up.get_parent()
 		collect_meshes(turret, turret.transform.affine_inverse(), head)
+		# The cauldron's brew, in turret space (the motes rise from there)
+		var pot := Vector3.ZERO
+		var pot_node := scene.find_child("Pot", true, false) as Node3D
+		if pot_node != null:
+			pot = pot_node.position + pot_node.basis * Vector3(0, 0.3, 0)
 		scene.free()
-		cannon_parts[k] = {"body": body, "head": head, "pivot": pivot}
+		store[k] = {"body": body, "head": head, "pivot": pivot, "pot": pot}
 		# All looks use L1's size, so higher levels can grow
-		if cannon_scale == 0.0:
+		if not kit_scale.has(type):
 			var box := AABB()
 			for p: Array in body:
 				box = box.merge(p[1] * (p[0] as Mesh).get_aabb())
-			cannon_scale = CANNON_WIDTH / maxf(box.size.x, box.size.z)
-	return cannon_parts[k]
+			kit_scale[type] = KIT_WIDTH[type] / maxf(box.size.x, box.size.z)
+	return store[k]
 
 
 # Like collect_meshes(), but leaves out the node skip and what's under it
@@ -1271,7 +1308,7 @@ func collect_except(n: Node, tr: Transform3D, out: Array, skip: Node) -> void:
 		collect_except(c, tr, out, skip)
 
 
-func add_cannon_part(parent: Node3D, parts: Array, slot: int) -> void:
+func add_kit_part(type: String, parent: Node3D, parts: Array, slot: int) -> void:
 	for p: Array in parts:
 		var mesh: Mesh = p[0]
 		var mi := MeshInstance3D.new()
@@ -1279,30 +1316,67 @@ func add_cannon_part(parent: Node3D, parts: Array, slot: int) -> void:
 		mi.transform = p[1]
 		parent.add_child(mi)
 		for s in mesh.get_surface_count():
-			mi.set_surface_override_material(s, cannon_mat(mesh.surface_get_material(s).resource_name, slot))
+			mi.set_surface_override_material(s, kit_mat(type, mesh.surface_get_material(s).resource_name, slot))
 
 
-# The models' three materials: "Atlas" (stone, iron, brass, wood), "TeamColor"
-# (cloth in the owner's color, seen from both sides) and "Glow" (the furnaces).
+# The models' three materials: "Atlas" (stone, iron, brass, wood; the same for
+# every kind), "TeamColor" (cloth in the owner's color, seen from both sides) and
+# "Glow" (the cannon's furnaces, the poison tower's brew, see brew.gdshader).
 # The baked shading is in the models' vertex colors.
-func cannon_mat(name: String, slot: int) -> Material:
-	var key := "%s %d" % [name, slot] if name == "TeamColor" else name
-	if not cannon_mats.has(key):
+func kit_mat(type: String, name: String, slot: int) -> Material:
+	var key := "Atlas"
+	if name == "TeamColor":
+		key = "%s %s %d" % [type, name, slot]
+	elif name == "Glow":
+		key = "%s %s" % [type, name]
+	if not kit_mats.has(key):
+		var folder := "res://assets/towers/%s/%s_" % [type, type]
+		if name == "Glow" and type == "poison":
+			var b := ShaderMaterial.new()
+			b.shader = load("res://assets/shaders/brew.gdshader")
+			b.set_shader_parameter("tex", load(folder + "glow.jpg"))
+			b.set_shader_parameter("energy", 0.8 if compat else 1.1)
+			kit_mats[key] = b
+			return b
 		var m := StandardMaterial3D.new()
 		m.vertex_color_use_as_albedo = true
 		match name:
 			"TeamColor":
-				m.albedo_texture = load("res://assets/towers/cannon/cannon_team.jpg")
+				m.albedo_texture = load(folder + "team.jpg")
 				m.albedo_color = PLAYER_COLORS[slot]
 				m.cull_mode = BaseMaterial3D.CULL_DISABLED
 			"Glow":
-				m.albedo_texture = load("res://assets/towers/cannon/cannon_glow.jpg")
+				m.albedo_texture = load(folder + "glow.jpg")
 				m.emission_enabled = true
 				m.emission = Color(1.0, 0.75, 0.45)
 			_:
 				m.albedo_texture = load("res://assets/towers/cannon/cannon_atlas.jpg")
-		cannon_mats[key] = painted(m)
-	return cannon_mats[key]
+		kit_mats[key] = painted(m)
+	return kit_mats[key]
+
+
+# Green motes bubbling up out of the poison cauldron (High only, see apply_graphics())
+func add_brew_motes(head: Node3D, at: Vector3) -> void:
+	if mote_process == null:
+		mote_process = ParticleProcessMaterial.new()
+		mote_process.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+		mote_process.emission_sphere_radius = 0.1
+		mote_process.direction = Vector3(0, 1, 0)
+		mote_process.spread = 20.0
+		mote_process.initial_velocity_min = 0.15
+		mote_process.initial_velocity_max = 0.35
+		mote_process.gravity = Vector3.ZERO
+		mote_process.color = Color(0.7, 1.6, 0.4, 0.8)
+		mote_process.color_ramp = fade_ramp()
+		mote_process.scale_min = 0.5
+		mote_process.scale_max = 1.3
+	var p := particles(head, 8, 1.4, 0.04, mote_process)
+	p.name = "Motes"
+	p.position = at
+	p.visible = graphics_high
+	p.visibility_aabb = AABB(Vector3(-1, -1, -1), Vector3(2, 3, 2))
+
+
 # Helpers that build model parts under a temporary node, for merge_parts()
 func part_node(p: Node3D, pos: Vector3, rot: Vector3) -> Node3D:
 	var n := Node3D.new()
@@ -1410,6 +1484,7 @@ func update_visuals(delta: float) -> void:
 	# Keeps the map above the bottom console at every zoom and map size:
 	# the shift grows with the camera's distance
 	camera.v_offset = CAMERA_V_OFFSET * zoom * view_scale
+	update_ability_fx(delta)
 	for g in gate_parts.size():
 		if gate_parts[g] == null:
 			continue
@@ -1418,7 +1493,26 @@ func update_visuals(delta: float) -> void:
 			part.visible = in_use
 		gate_parts[g]["sparks"].rotation.z += delta * 2.0
 	var turn := minf(1.0, delta * 12.0)
+	# Room in the ice MultiMesh for every monster (grows only, so rarely)
+	var ice := ice_shards.multimesh
+	if ice.instance_count < enemies.size():
+		ice.instance_count = enemies.size() + 128
+	var frozen := 0
+	# The replay's monsters that got past (main.gd's replay_past), while it plays
+	var past: Variant = get("replay_past") if get("replay_on") == true else null
+	if past != null and (past as Dictionary).is_empty():
+		past = null
+	show_clouds()
+	# Other players don't know which monsters are poisoned: theirs look poisoned
+	# while they stand in a cloud their own game shows
+	var cloud_look := net_mode == "client" and not cloud_list.is_empty()
+	if cloud_look and cloud_cells_dirty:
+		fill_cloud_cells()
+	start_specials()
 	for e in enemies:
+		# Splitters, splitlings and healers have their own looks (see special_fx())
+		if e.special != "" and e.node.get_meta("sp", "") != e.special:
+			special_look(e)
 		var mob: Array = e.node.get_meta("mob")
 		# Turn toward the way it walks (not on a jump, like a new monster's first move)
 		var p := to3d(e.pos)
@@ -1427,28 +1521,52 @@ func update_visuals(delta: float) -> void:
 		if moved > 1e-7 and moved < 1.0:
 			e.node.rotation.y = lerp_angle(e.node.rotation.y, atan2(d.x, d.z), turn)
 		e.node.position = p
-		# The walk pose for this moment; bob puts each monster at its own point in the step
-		var poses: Array = mob[0]
-		var mesh: Mesh = poses[int((time / mob[2] + e.bob) * poses.size()) % poses.size()]
-		if e.node.mesh != mesh:
-			e.node.mesh = mesh
+		# The walk pose for this moment; bob puts each monster at its own point in the
+		# step. Frozen monsters stop mid-step.
+		if e.freeze_time <= 0.0:
+			var poses: Array = mob[0]
+			var mesh: Mesh = poses[int((time / mob[2] + e.bob) * poses.size()) % poses.size()]
+			if e.node.mesh != mesh:
+				e.node.mesh = mesh
 		# Slowed monsters use their look's icy material, frozen ones the frozen one
+		# and ice around their feet (shrinking as they thaw)
 		var m: Material = mob[1][0]
 		if e.freeze_time > 0.0:
 			m = mob[1][2]
+			if frozen < ice.instance_count:
+				var s := e.radius / 10.0 * clampf(e.freeze_time / 0.25, 0.0, 1.0)
+				ice.set_instance_transform(frozen, Transform3D(Basis(Vector3.UP, e.bob * TAU).scaled(Vector3(s, s, s)), p))
+				frozen += 1
+		elif e.poisoned > 0.0 or (cloud_look and in_cloud(e.pos)):
+			# Poisoned: sickly green (and icy green when also slowed)
+			m = mob[1][5] if e.slow_time > 0.0 else mob[1][4]
 		elif e.slow_time > 0.0:
 			m = mob[1][1]
+		# The replay: monsters that got past glow red
+		if past != null and past.has(e):
+			m = mob[1][3]
 		if e.node.material_override != m:
 			e.node.material_override = m
+		if e.special != "" or e.max_shield > 0.0:
+			special_fx(e, p, mob[3] * e.node.scale.y)
+	ice.visible_instance_count = frozen
+	end_specials(delta)
 	update_corpses(delta)
 	for t: Tower in towers.values():
-		if t.type == "arrow" or t.type == "cannon":
+		if t.type == "arrow" or KIT_FILES.has(t.type):
 			t.head.rotation.y = atan2(-t.aim.x, -t.aim.y)
 		else:
 			t.head.rotation.y += delta * 2.0
 	for s in shots:
 		var y := 0.6
-		if s.node.has_meta("from_y"):
+		if s.node.has_meta("lob_y"):
+			# An arc, higher for longer throws, the glob wobbling as it flies
+			var dist: float = s.node.get_meta("from_dist")
+			var k := 1.0 - clampf(s.pos.distance_to(s.target_pos) / dist, 0.0, 1.0)
+			y = lerpf(s.node.get_meta("lob_y"), 0.2, k) + sin(k * PI) * (0.2 + dist / CELL * 0.12)
+			var w := sin(time * 22.0 + s.node.get_instance_id() % 97) * 0.14
+			s.node.scale = Vector3(1.0 + w, 1.0 - w, 1.0 + w)
+		elif s.node.has_meta("from_y"):
 			var left := clampf(s.pos.distance_to(s.target_pos) / s.node.get_meta("from_dist"), 0.0, 1.0)
 			y = lerpf(0.6, s.node.get_meta("from_y"), left)
 		s.node.position = to3d(s.pos, y)
@@ -1530,6 +1648,7 @@ func make_enemy(kind: String) -> Enemy:
 	e.mat = mob[1][0]
 	e.node = add_mesh(self, mob[0][0], e.mat, to3d(e.pos))
 	e.node.set_meta("mob", mob)
+	e.node.set_meta("look", look)
 	if not graphics_high:
 		e.node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	e.bob = randf()
@@ -1550,9 +1669,15 @@ const DEATH_POSES := 12  # the fall when a monster dies (see drop_corpse())
 const MOB_WHITE := Color(0.97, 0.96, 1.0)
 const RAINBOW := [Color(1.0, 0.55, 0.7), Color(1.0, 0.72, 0.4), Color(1.0, 0.93, 0.45), Color(0.55, 0.9, 0.6), Color(0.5, 0.75, 1.0), Color(0.75, 0.55, 1.0)]
 
-# Look -> [walk poses (one shared mesh each), [normal, slowed, frozen] material,
-# seconds per step, height, death poses (empty: the monster just vanishes)]
+const SPLIT_TINT := Color(0.8, 0.6, 1.0)  # splitters and splitlings: purple bones...
+const SPLIT_GLOW := Color(0.5, 0.15, 0.9)  # ...glowing faintly
+const SPLIT_HEAD := Vector3(0.3, -0.14, -0.03)  # where the splitter's second skull sits, from the first (model units)
+
+# Look -> [walk poses (one shared mesh each), its materials (see mob_mats()),
+# seconds per step, height, death poses (empty: the monster just vanishes)].
+# The specials' looks are "<look> split", "<look> splitling" and "<look> heal".
 var mobs := {}
+var mob_base := {}  # look -> its material before painting (the specials' looks start from it)
 var walk_anims: AnimationLibrary
 var mob_ball: SphereMesh
 var mob_rod: CylinderMesh
@@ -1568,6 +1693,14 @@ func build_monsters() -> void:
 	walk_anims = load("res://assets/monsters/monster_walks.res")
 	add_glb_monster("minion", BONE_WARRIOR, BONE_WARRIOR_HEIGHT, Color.WHITE)
 	add_glb_monster("warrior", BONE_WARRIOR, BONE_WARRIOR_HEIGHT * 1.1, Color(0.85, 0.9, 1.0))
+	# The specials (waves from 31 are skeleton warriors, see special_look()):
+	# splitters purple with a second skull, splitlings purple, healers golden
+	for look: String in ["minion", "warrior"]:
+		var h := BONE_WARRIOR_HEIGHT * (1.1 if look == "warrior" else 1.0)
+		var tint: Color = mob_base[look].albedo_color
+		add_glb_monster(look + " split", BONE_WARRIOR, h * 1.06, tint * SPLIT_TINT, SPLIT_GLOW, mobs[look][4])
+		add_mob_variant(look, "splitling", SPLIT_TINT, SPLIT_GLOW)
+		add_mob_variant(look, "heal", Color(1.0, 0.9, 0.6), Color(1.0, 0.72, 0.25))
 	add_skeleton("mage", "Skeleton_Mage", "Walking_C", SKELETON_SIZE * 1.8,
 			[["Skeleton_Staff", "handslot.r"]], Color(1.0, 0.75, 0.75))
 	mob_ball = SphereMesh.new()
@@ -1587,8 +1720,9 @@ func build_monsters() -> void:
 	add_creature("spider", spider_pose, 0.35)
 
 
-# The three painted materials of a look: normal, icy for slowed monsters, and
-# frozen solid (whiter, with a cold glow) for Deep Freeze
+# The painted materials of a look: normal, icy for slowed monsters, frozen solid
+# (whiter, with a cold glow) for Deep Freeze, glowing red for the replay's
+# monsters that got past, sickly green for poisoned ones, and poisoned and slowed
 func mob_mats(base: StandardMaterial3D) -> Array:
 	var icy := base.duplicate() as StandardMaterial3D
 	icy.albedo_color = base.albedo_color * Color(0.6, 0.85, 1.3)
@@ -1597,7 +1731,19 @@ func mob_mats(base: StandardMaterial3D) -> Array:
 	frozen.emission_enabled = true
 	frozen.emission = Color(0.35, 0.65, 1.0)
 	frozen.emission_energy_multiplier = 0.45
-	return [painted(base), painted(icy), painted(frozen)]
+	var past := base.duplicate() as StandardMaterial3D
+	past.albedo_color = base.albedo_color * Color(1.4, 0.45, 0.4)
+	past.emission_enabled = true
+	past.emission = Color(1.0, 0.15, 0.08)
+	past.emission_energy_multiplier = 0.6
+	var sick := base.duplicate() as StandardMaterial3D
+	sick.albedo_color = base.albedo_color * Color(0.8, 1.0, 0.66)
+	sick.emission_enabled = true
+	sick.emission = Color(0.3, 0.85, 0.08)
+	sick.emission_energy_multiplier = 0.22
+	var sick_icy := sick.duplicate() as StandardMaterial3D
+	sick_icy.albedo_color = base.albedo_color * Color(0.55, 0.95, 0.85)
+	return [painted(base), painted(icy), painted(frozen), painted(past), painted(sick), painted(sick_icy)]
 
 
 # One mesh from the collected parts, with simpler versions for far away
@@ -1683,7 +1829,9 @@ func add_skeleton(look: String, file: String, walk: String, size: float, weapons
 
 # A monster from one .glb with its own "Walk" and "Death": 16 poses of the walk
 # and DEATH_POSES of the death, each one shared mesh, feet on the ground.
-func add_glb_monster(look: String, file: String, height: float, tint: Color) -> void:
+# glow: a faint glow in that color (black: none). falls: another look's death
+# poses to share; then this look is a splitter, with a second skull.
+func add_glb_monster(look: String, file: String, height: float, tint: Color, glow := Color.BLACK, falls := []) -> void:
 	var root: Node3D = load(file).instantiate()
 	add_child(root)
 	var player: AnimationPlayer = root.find_children("*", "AnimationPlayer", true, false)[0]
@@ -1697,13 +1845,14 @@ func add_glb_monster(look: String, file: String, height: float, tint: Color) -> 
 		box = box.expand(v)
 	var s := height / box.size.y
 	var top := Transform3D(Basis.from_scale(Vector3.ONE * s), Vector3(0, -box.position.y * s, 0))
+	var two_heads := not falls.is_empty()
 	var poses := []
 	for f in 16:
-		poses.append(pose_mesh(glb_pose(root, player, walk.length * f / 16.0, top)))
-	var falls := []
-	player.play("Death")
-	for f in DEATH_POSES:
-		falls.append(pose_mesh(glb_pose(root, player, death.length * f / (DEATH_POSES - 1.0), top)))
+		poses.append(pose_mesh(glb_pose(root, player, walk.length * f / 16.0, top, two_heads)))
+	if falls.is_empty():
+		player.play("Death")
+		for f in DEATH_POSES:
+			falls.append(pose_mesh(glb_pose(root, player, death.length * f / (DEATH_POSES - 1.0), top)))
 	var base: StandardMaterial3D = null
 	for mi: MeshInstance3D in root.find_children("*", "MeshInstance3D", true, false):
 		if mi.mesh != null and base == null:
@@ -1711,16 +1860,40 @@ func add_glb_monster(look: String, file: String, height: float, tint: Color) -> 
 	root.free()
 	var m := base.duplicate() as StandardMaterial3D
 	m.albedo_color = tint
+	glow_mat(m, glow)
+	mob_base[look] = m
 	mobs[look] = [poses, mob_mats(m), walk.length, poses[0].get_aabb().end.y, falls]
 
 
-# Every mesh of the model at time t of the playing animation, in one set of parts
-func glb_pose(root: Node3D, player: AnimationPlayer, t: float, top: Transform3D) -> Dictionary:
+# A faint glow in color glow (black: none)
+func glow_mat(m: StandardMaterial3D, glow: Color) -> void:
+	if glow != Color.BLACK:
+		m.emission_enabled = true
+		m.emission = glow
+		m.emission_energy_multiplier = 0.22
+
+
+# Another look of a monster: the same poses with its own tint and glow
+func add_mob_variant(look: String, special: String, tint: Color, glow: Color) -> void:
+	var m := mob_base[look].duplicate() as StandardMaterial3D
+	m.albedo_color = m.albedo_color * tint
+	glow_mat(m, glow)
+	var from: Array = mobs[look]
+	mobs[look + " " + special] = [from[0], mob_mats(m), from[2], from[3], from[4]]
+
+
+# Every mesh of the model at time t of the playing animation, in one set of parts.
+# two_heads: a second, smaller skull grows out of the left shoulder (splitters).
+func glb_pose(root: Node3D, player: AnimationPlayer, t: float, top: Transform3D, two_heads := false) -> Dictionary:
 	player.seek(t, true)
 	var parts := new_parts()
+	var back := root.global_transform.affine_inverse()
 	for mi: MeshInstance3D in root.find_children("*", "MeshInstance3D", true, false):
 		if mi.mesh != null:
-			add_part(parts, mi.mesh, top * root.global_transform.affine_inverse() * mi.global_transform)
+			add_part(parts, mi.mesh, top * back * mi.global_transform)
+			if two_heads and mi.name == "Skull":
+				var lean := Transform3D(Basis(Vector3.UP, 0.6) * Basis(Vector3.BACK, -0.35) * Basis.from_scale(Vector3.ONE * 0.78), Vector3.ZERO)
+				add_part(parts, mi.mesh, top * Transform3D(Basis(), SPLIT_HEAD) * back * mi.global_transform * lean)
 	return parts
 
 
@@ -1756,11 +1929,26 @@ func update_corpses(delta: float) -> void:
 			corpses.remove_at(i)
 
 
-# The corpses go with the monsters when the game is cleared
+# The corpses go with the monsters when the game is cleared, and so do the
+# abilities' effects
 func clear_world() -> void:
 	for node in corpses:
 		node.queue_free()
 	corpses.clear()
+	for r: Dictionary in meteor_rigs:
+		end_meteor(r)
+	if not freeze_rig.is_empty():
+		freeze_rig["t"] = -1.0
+		freeze_rig["plane"].visible = false
+	freeze_flash = 0.0
+	shake = 0.0
+	# The clouds go with the effects
+	cloud_list.clear()
+	if cloud_ground != null:
+		cloud_ground.multimesh.visible_instance_count = 0
+		cloud_puffs.multimesh.visible_instance_count = 0
+	cloud_cells_dirty = true
+	bubble_breaks.clear()
 	super()
 
 
@@ -1896,6 +2084,10 @@ func launch_shot(t: Tower, target: Enemy, visual: bool) -> void:
 		shot_mats[t.type] = mat(TOWERS[t.type]["color"], 2.0)
 		var ball := SphereMesh.new()
 		ball.radius = 0.12 if t.type == "cannon" else 0.07
+		if t.type == "poison":
+			# A glob of glowing green brew
+			ball.radius = 0.09
+			shot_mats[t.type] = mat(Color(0.5, 1.0, 0.22), 1.2 if compat else 2.4)
 		ball.height = ball.radius * 2.0
 		ball.radial_segments = 16
 		ball.rings = 8
@@ -1907,6 +2099,10 @@ func launch_shot(t: Tower, target: Enemy, visual: bool) -> void:
 		s.node.mesh = arrow_mesh
 		s.node.material_override = null
 		s.node.set_meta("from_y", t.head.global_position.y + 0.08)
+		s.node.set_meta("from_dist", maxf(s.pos.distance_to(target.pos), 1.0))
+	# Poison globs are lobbed up out of the cauldron and splash down on the monster
+	elif t.type == "poison":
+		s.node.set_meta("lob_y", t.head.global_position.y + 0.22)
 		s.node.set_meta("from_dist", maxf(s.pos.distance_to(target.pos), 1.0))
 	shots.append(s)
 
@@ -1924,3 +2120,686 @@ func add_boom(pos: Vector2, r: float) -> void:
 	# and a burst of sparks and fire
 	fire_burst(boom_pool[boom_next % boom_pool.size()], to3d(pos, 0.2), Color(2.4, 1.2, 0.4))
 	boom_next += 1
+
+
+# ---------------------------------------------------------------- abilities
+
+# Meteor: a burning rock falls (the damage is already done when it's used, so the
+# fall is short), bursts in fire and rocks with a shock wave, and leaves burnt
+# ground with glowing cracks. Freeze all: a frost wave sweeps over the map with ice
+# sparkles, the screen's edge frosts over (game_ui.gd) and frozen monsters stand
+# in ice (see update_visuals()). Everything is made once at the start and reused.
+const METEOR_FALL := 0.15  # seconds from the sky to the ground
+const METEOR_FROM := Vector3(-3.2, 6.5, 1.2)  # where it falls from, seen from where it hits (from the upper left on screen)
+const SCORCH_TIME := 9.0  # seconds the burnt ground stays
+const FREEZE_WAVE := 1.1  # seconds of the frost wave over the map
+const FREEZE_EDGE := 1.4  # seconds of the frosty screen edge
+var meteor_rigs: Array[Dictionary] = []  # per player slot: their Meteor's nodes
+var freeze_rig := {}
+var ice_shards: MultiMeshInstance3D  # ice at frozen monsters' feet, one draw call for all
+var shake := 0.0  # seconds of camera shake left
+var freeze_flash := 0.0  # seconds of the frosty screen edge left
+
+
+func make_ability_fx() -> void:
+	var glow_shader: Shader = load("res://assets/shaders/ability_glow.gdshader")
+	var scorch_shader: Shader = load("res://assets/shaders/scorch.gdshader")
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(2, 2)  # scaled by the radius
+	# Shared by every Meteor: the rock, its halo and the hot debris
+	var rock := SphereMesh.new()
+	rock.radius = 0.3
+	rock.height = 0.55
+	rock.radial_segments = 7
+	rock.rings = 4
+	var rock_mat := mat(Color(0.3, 0.14, 0.07), 2.0)
+	rock_mat.emission = Color(1.0, 0.38, 0.08)
+	var halo := QuadMesh.new()
+	halo.size = Vector2(1.5, 1.5)
+	var halo_mat := StandardMaterial3D.new()
+	halo_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	halo_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	halo_mat.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+	halo_mat.billboard_mode = BaseMaterial3D.BILLBOARD_ENABLED
+	halo_mat.albedo_texture = soft_dot()
+	halo_mat.albedo_color = Color(1.0, 0.5, 0.15)
+	halo.material = halo_mat
+	var dome := SphereMesh.new()
+	dome.radius = 1.0
+	dome.height = 2.0
+	dome.radial_segments = 24
+	dome.rings = 8
+	var chunk := BoxMesh.new()
+	chunk.size = Vector3(0.09, 0.07, 0.08)
+	chunk.material = mat(Color(0.22, 0.12, 0.07), 1.2)
+	(chunk.material as StandardMaterial3D).emission = Color(1.0, 0.35, 0.05)
+	var smoke_mat := StandardMaterial3D.new()
+	smoke_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	smoke_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	smoke_mat.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+	smoke_mat.vertex_color_use_as_albedo = true
+	smoke_mat.albedo_texture = soft_dot()
+	for slot in MAX_PLAYERS:
+		var root := Node3D.new()
+		root.visible = false
+		add_child(root)
+		var r := {"root": root, "t": -1.0, "hit": false, "at": Vector3.ZERO}
+		r["rock"] = add_mesh(root, rock, rock_mat)
+		add_mesh(r["rock"], halo, null)
+		r["warn"] = ground_fx(root, plane, glow_shader)
+		r["shock"] = ground_fx(root, plane, glow_shader)
+		r["scorch"] = ground_fx(root, plane, scorch_shader)
+		r["dome"] = add_mesh(root, dome, mat(Color(1.0, 0.42, 0.1), 0.0, 0.35))
+		r["dome"].material_override.blend_mode = BaseMaterial3D.BLEND_MODE_ADD
+		r["dome"].material_override.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		r["dome"].cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+		# The fire trail stays where it was made (not local), so it streaks behind the rock
+		var pm := fire_process(0.15, 0.3, 1.0)
+		pm.gravity = Vector3(0, 1.5, 0)
+		r["trail"] = particles(root, 70, 0.32, 0.4, pm)
+		r["trail"].emitting = false
+		r["trail"].fixed_fps = 0
+		r["trail"].local_coords = false
+		r["trail"].visibility_aabb = AABB(Vector3(-6, -2, -6), Vector3(12, 14, 12))
+		pm = fire_process(0.45, 2.5, 8.0)
+		pm.spread = 80.0
+		pm.gravity = Vector3(0, -3, 0)
+		pm.damping_min = 3.0
+		pm.damping_max = 6.0
+		r["burst"] = one_shot(particles(root, 120, 0.9, 0.26, pm))
+		# Hot rocks thrown out
+		pm = ParticleProcessMaterial.new()
+		pm.direction = Vector3(0, 1, 0)
+		pm.spread = 55.0
+		pm.initial_velocity_min = 3.5
+		pm.initial_velocity_max = 7.0
+		pm.gravity = Vector3(0, -20, 0)
+		pm.scale_min = 0.6
+		pm.scale_max = 1.6
+		pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+		pm.emission_sphere_radius = 0.3
+		var debris := GPUParticles3D.new()
+		debris.amount = 18
+		debris.lifetime = 0.75
+		debris.process_material = pm
+		debris.draw_pass_1 = chunk
+		root.add_child(debris)
+		r["debris"] = one_shot(debris)
+		# Smoke rising after the blast (High only)
+		pm = ParticleProcessMaterial.new()
+		pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+		pm.emission_sphere_radius = 0.8
+		pm.direction = Vector3(0, 1, 0)
+		pm.spread = 25.0
+		pm.initial_velocity_min = 0.4
+		pm.initial_velocity_max = 1.0
+		pm.gravity = Vector3(0.15, 0.2, 0)
+		pm.damping_min = 0.3
+		pm.damping_max = 0.6
+		pm.scale_min = 0.7
+		pm.scale_max = 1.6
+		pm.color = Color(0.16, 0.13, 0.11, 0.55)
+		pm.color_ramp = fade_ramp()
+		r["smoke"] = particles(root, 22, 2.4, 0.9, pm)
+		r["smoke"].draw_pass_1.material = smoke_mat
+		r["smoke"].one_shot = true
+		r["smoke"].explosiveness = 0.7
+		r["smoke"].emitting = false
+		r["smoke"].visibility_aabb = AABB(Vector3(-4, -1, -4), Vector3(8, 8, 8))
+		var light := OmniLight3D.new()
+		light.light_color = Color(1.0, 0.55, 0.2)
+		light.omni_range = 6.0
+		light.visible = false
+		root.add_child(light)
+		r["light"] = light
+		meteor_rigs.append(r)
+
+	# Freeze all: one frost plane over the map and ice sparkles
+	var froot := Node3D.new()
+	add_child(froot)
+	var fplane := PlaneMesh.new()
+	fplane.size = Vector2(1, 1)  # scaled to the map
+	# Compatibility adds light in sRGB, which turns ice on grass green: there the
+	# frost is laid over the ground instead of added to it
+	var frost_shader := glow_shader
+	if compat:
+		frost_shader = Shader.new()
+		frost_shader.code = glow_shader.code.replace("blend_add", "blend_mix")
+	freeze_rig = {"t": -1.0, "plane": ground_fx(froot, fplane, frost_shader)}
+	freeze_rig["plane"].visible = false
+	var spm := ParticleProcessMaterial.new()
+	spm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	spm.direction = Vector3(0, 1, 0)
+	spm.spread = 30.0
+	spm.initial_velocity_min = 0.2
+	spm.initial_velocity_max = 1.0
+	spm.gravity = Vector3.ZERO
+	spm.color = Color(1.4, 2.0, 2.8)
+	spm.color_ramp = fade_ramp()
+	spm.scale_min = 0.5
+	spm.scale_max = 1.5
+	freeze_rig["sparkles"] = one_shot(particles(froot, 300, 1.4, 0.07, spm))
+	freeze_rig["sparkles"].explosiveness = 0.5
+
+	# Ice shards around a frozen monster's feet, leaning out
+	var parts := Node3D.new()
+	for i in 7:
+		var a := i * TAU / 7.0
+		var out := Vector3(cos(a), 0, sin(a))
+		var h := 0.2 + 0.09 * ((i * 5) % 3)
+		var foot := out * (0.1 + 0.03 * (i % 3)) - Vector3(0, 0.05, 0)
+		part_beam(parts, foot, foot + out * h * 0.5 + Vector3(0, h, 0), 0.05 + 0.012 * (i % 2), 0.0, Color.WHITE, 5)
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = merge_parts(parts)
+	mm.instance_count = 256
+	mm.visible_instance_count = 0
+	ice_shards = MultiMeshInstance3D.new()
+	ice_shards.multimesh = mm
+	var ice := mat(Color(0.7, 0.9, 1.0), 0.0, 0.72)
+	ice.emission_enabled = true
+	ice.emission = Color(0.3, 0.6, 1.0)
+	ice.emission_energy_multiplier = 0.9
+	ice.roughness = 0.1
+	ice.rim_enabled = true
+	ice.rim = 0.6
+	ice_shards.material_override = ice
+	ice_shards.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(ice_shards)
+
+
+# A flat effect on the ground with its own copy of the shader's settings
+func ground_fx(parent: Node3D, plane: Mesh, shader: Shader) -> MeshInstance3D:
+	var m := ShaderMaterial.new()
+	m.shader = shader
+	var node := add_mesh(parent, plane, m)
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.visible = false
+	return node
+
+
+# Fire: hot yellow, then orange, red and gone
+func fire_process(spread_r: float, v_min: float, v_max: float) -> ParticleProcessMaterial:
+	var g := Gradient.new()
+	g.set_color(0, Color(1.0, 0.95, 0.7, 1.0))
+	g.set_color(1, Color(0.35, 0.06, 0.02, 0.0))
+	g.add_point(0.25, Color(1.0, 0.6, 0.2, 1.0))
+	g.add_point(0.6, Color(0.85, 0.25, 0.06, 0.7))
+	var ramp := GradientTexture1D.new()
+	ramp.gradient = g
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+	pm.emission_sphere_radius = spread_r
+	pm.direction = Vector3(0, 1, 0)
+	pm.spread = 180.0
+	pm.initial_velocity_min = v_min
+	pm.initial_velocity_max = v_max
+	pm.color = Color(1.5, 1.5, 1.5)
+	pm.color_ramp = ramp
+	pm.scale_min = 0.6
+	pm.scale_max = 1.4
+	var curve := Curve.new()
+	curve.add_point(Vector2(0, 1))
+	curve.add_point(Vector2(1, 0.3))
+	var shrink := CurveTexture.new()
+	shrink.curve = curve
+	pm.scale_curve = shrink
+	return pm
+
+
+func one_shot(p: GPUParticles3D) -> GPUParticles3D:
+	p.one_shot = true
+	p.explosiveness = 0.95
+	p.emitting = false
+	p.visibility_aabb = AABB(Vector3(-5, -2, -5), Vector3(10, 8, 10))
+	return p
+
+
+# Every computer: the look of an ability being used (see ABILITIES)
+func show_ability(slot: int, ability: String, at: Vector2) -> void:
+	if ability == "meteor":
+		start_meteor(meteor_rigs[clampi(slot, 0, meteor_rigs.size() - 1)], to3d(at))
+	elif ability == "freeze":
+		start_freeze()
+
+
+func start_meteor(r: Dictionary, at: Vector3) -> void:
+	var high := graphics_high
+	r["t"] = 0.0
+	r["hit"] = false
+	r["at"] = at
+	r["root"].visible = true
+	r["rock"].visible = true
+	r["rock"].position = at + METEOR_FROM
+	r["trail"].amount = 110 if high else 56
+	r["trail"].position = r["rock"].position
+	r["trail"].emitting = true
+	var size: float = ABILITIES["meteor"]["radius"] / CELL
+	for k: String in ["warn", "shock", "scorch"]:
+		var n: MeshInstance3D = r[k]
+		n.position = at + Vector3(0, 0.03 + (0.01 if k != "scorch" else 0.0), 0)
+		n.scale = Vector3(size, 1, size) * (1.25 if k == "scorch" else 1.0)
+		n.visible = k == "warn"
+	var warn: ShaderMaterial = r["warn"].material_override
+	warn.set_shader_parameter("tint", Color(1.0, 0.42, 0.12))
+	warn.set_shader_parameter("ring", 0.96)
+	warn.set_shader_parameter("width", 0.03)
+	warn.set_shader_parameter("fill", 0.14)
+	warn.set_shader_parameter("energy", 1.2)
+	var shock: ShaderMaterial = r["shock"].material_override
+	shock.set_shader_parameter("tint", Color(1.0, 0.62, 0.3))
+	shock.set_shader_parameter("energy", 1.6)
+	shock.set_shader_parameter("fill", 0.12)
+	r["scorch"].material_override.set_shader_parameter("seed", randf() * 10.0)
+	r["dome"].visible = false
+	r["burst"].amount = 120 if high else 60
+	r["smoke"].visible = high
+	r["light"].visible = false
+
+
+func end_meteor(r: Dictionary) -> void:
+	r["t"] = -1.0
+	r["root"].visible = false
+	r["trail"].emitting = false
+	r["light"].visible = false
+
+
+func update_meteor(r: Dictionary, delta: float) -> void:
+	var t: float = r["t"] + delta
+	r["t"] = t
+	var at: Vector3 = r["at"]
+	var size: float = ABILITIES["meteor"]["radius"] / CELL
+	var warn: ShaderMaterial = r["warn"].material_override
+	if t < METEOR_FALL:
+		# Falling faster and faster, tumbling, the aim ring glowing up under it
+		var fell := t / METEOR_FALL
+		var rock: MeshInstance3D = r["rock"]
+		rock.position = at + METEOR_FROM * (1.0 - fell * fell) + Vector3(0, 0.25, 0) * fell
+		rock.rotate(Vector3(1, 0, 1).normalized(), delta * 9.0)
+		r["trail"].position = rock.position
+		warn.set_shader_parameter("alpha", 0.35 + 0.65 * fell)
+		return
+	var u := t - METEOR_FALL  # since it hit
+	if not r["hit"]:
+		r["hit"] = true
+		r["rock"].visible = false
+		r["trail"].emitting = false
+		for part: String in ["burst", "debris", "smoke"]:
+			var p: GPUParticles3D = r[part]
+			p.position = at + Vector3(0, 0.15, 0)
+			p.restart()
+		r["shock"].visible = true
+		r["scorch"].visible = true
+		r["dome"].visible = true
+		r["dome"].position = at
+		r["light"].visible = graphics_high and not compat
+		r["light"].position = at + Vector3(0, 1.2, 0)
+		shake = maxf(shake, 0.4)
+	warn.set_shader_parameter("alpha", clampf(1.0 - u / 0.15, 0.0, 1.0))
+	r["warn"].visible = u < 0.15
+	# Shock wave running out to the edge of the hit area
+	var k := clampf(u / 0.45, 0.0, 1.0)
+	var shock: ShaderMaterial = r["shock"].material_override
+	shock.set_shader_parameter("ring", lerpf(0.1, 1.05, 1.0 - pow(1.0 - k, 3.0)))
+	shock.set_shader_parameter("width", lerpf(0.12, 0.04, k))
+	shock.set_shader_parameter("alpha", 1.0 - k)
+	r["shock"].visible = k < 1.0
+	# A ball of fire swelling and fading
+	k = clampf(u / 0.4, 0.0, 1.0)
+	var s := size * lerpf(0.3, 0.95, 1.0 - pow(1.0 - k, 2.0))
+	r["dome"].scale = Vector3(s, s * 0.55, s)
+	r["dome"].material_override.albedo_color = Color(1.0, 0.42, 0.1, 0.35 * (1.0 - k))
+	r["dome"].visible = k < 1.0
+	r["light"].light_energy = 3.5 * clampf(1.0 - u / 0.45, 0.0, 1.0)
+	if u > 0.45:
+		r["light"].visible = false
+	# Burnt ground: the cracks cool down, then it fades
+	var scorch: ShaderMaterial = r["scorch"].material_override
+	scorch.set_shader_parameter("embers", clampf(1.0 - u / 3.0, 0.0, 1.0))
+	scorch.set_shader_parameter("alpha", clampf(u / 0.08, 0.0, 1.0) * clampf((SCORCH_TIME - u) / 3.0, 0.0, 1.0))
+	if u > SCORCH_TIME:
+		end_meteor(r)
+
+
+func start_freeze() -> void:
+	var f := freeze_rig
+	f["t"] = 0.0
+	var w := map_cols + 2.0
+	var h := map_rows + 2.0
+	var plane: MeshInstance3D = f["plane"]
+	plane.visible = true
+	plane.position = Vector3(map_cols / 2.0, 0.05, map_rows / 2.0)
+	plane.scale = Vector3(w, 1, h)
+	var m: ShaderMaterial = plane.material_override
+	m.set_shader_parameter("tint", Color(0.72, 0.88, 1.0) if compat else Color(0.55, 0.8, 1.0))
+	m.set_shader_parameter("aspect", Vector2(w, h) / maxf(w, h))
+	m.set_shader_parameter("tiles", maxf(w, h) * 0.45)
+	m.set_shader_parameter("energy", 1.0 if compat else 0.55)
+	var sp: GPUParticles3D = f["sparkles"]
+	var pm := sp.process_material as ParticleProcessMaterial
+	pm.emission_box_extents = Vector3(map_cols / 2.0, 0.4, map_rows / 2.0)
+	sp.amount = 300 if graphics_high else 110
+	sp.position = Vector3(map_cols / 2.0, 0.3, map_rows / 2.0)
+	sp.visibility_aabb = AABB(-pm.emission_box_extents - Vector3(1, 1, 1), pm.emission_box_extents * 2.0 + Vector3(2, 4, 2))
+	sp.restart()
+	freeze_flash = FREEZE_EDGE
+
+
+func update_freeze(delta: float) -> void:
+	var f := freeze_rig
+	var t: float = f["t"] + delta
+	f["t"] = t
+	var m: ShaderMaterial = f["plane"].material_override
+	# The wave runs from the middle past the corners; frost stays behind it, fading
+	var k := clampf(t / FREEZE_WAVE, 0.0, 1.0)
+	m.set_shader_parameter("ring", 1.5 * minf(t / (FREEZE_WAVE * 0.55), 1.0))
+	m.set_shader_parameter("width", 0.05)
+	m.set_shader_parameter("fill", 0.1)
+	m.set_shader_parameter("frost", 0.7)
+	m.set_shader_parameter("alpha", 1.0 - k * k)
+	if t >= FREEZE_WAVE:
+		f["t"] = -1.0
+		f["plane"].visible = false
+
+
+func update_ability_fx(delta: float) -> void:
+	for r in meteor_rigs:
+		if r["t"] >= 0.0:
+			update_meteor(r, delta)
+	if not freeze_rig.is_empty() and freeze_rig["t"] >= 0.0:
+		update_freeze(delta)
+	freeze_flash = maxf(freeze_flash - delta, 0.0)
+	# A short shake when a Meteor hits
+	if shake > 0.0:
+		shake = maxf(shake - delta, 0.0)
+		camera.v_offset += sin(time * 75.0) * 0.18 * shake * zoom * view_scale
+
+
+# ---------------------------------------------------------------- poison clouds
+
+# Every computer: a poison cloud where a glob landed (see main.gd), radius r
+# (map pixels), gone after seconds. A swirling green haze on the ground with
+# puffs drifting over it (High only): Venom's brighter, Miasma's murkier and
+# thicker. All clouds are two MultiMeshes (one draw each, however many there
+# are), and each cloud fades in and out on the graphics card from when it was
+# made (see cloud.gdshader), so nothing is updated per cloud each frame. The
+# clouds keep their own clock, which follows the effects' time (so they pause
+# with the replay).
+const CLOUD_PUFFS := 5  # puffs per cloud
+const CLOUD_REBASE := 100.0  # seconds before the clock starts again from 0 (keeps the times precise)
+var cloud_ground: MultiMeshInstance3D
+var cloud_puffs: MultiMeshInstance3D
+var cloud_list: Array[Dictionary] = []  # the clouds shown, in MultiMesh order
+var cloud_clock := 0.0
+var cloud_cells := PackedByteArray()  # other players: 1 for the tiles in a cloud (see in_cloud())
+var cloud_cells_dirty := true
+var fx_noise: ImageTexture  # soft tiling noise for the clouds and shields
+
+
+func make_cloud_fx() -> void:
+	var n := FastNoiseLite.new()
+	n.noise_type = FastNoiseLite.TYPE_SIMPLEX_SMOOTH
+	n.frequency = 0.03
+	n.fractal_octaves = 3
+	var img := n.get_seamless_image(128, 128)
+	img.generate_mipmaps()
+	fx_noise = ImageTexture.create_from_image(img)
+	var shader: Shader = load("res://assets/shaders/cloud.gdshader")
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(2, 2)  # scaled by the radius
+	var quad := QuadMesh.new()
+	quad.size = Vector2(1, 1)
+	var ground := ShaderMaterial.new()
+	ground.shader = shader
+	ground.set_shader_parameter("noise", fx_noise)
+	# Compatibility blends brighter: a thinner haze there
+	ground.set_shader_parameter("strength", 0.8 if compat else 1.0)
+	var puffs := ground.duplicate() as ShaderMaterial
+	puffs.set_shader_parameter("puffs", true)
+	cloud_ground = fx_multimesh(plane, ground, 64)
+	cloud_puffs = fx_multimesh(quad, puffs, 64 * CLOUD_PUFFS)
+	cloud_puffs.visible = graphics_high
+
+
+# A MultiMesh of mesh for effects, with custom data per instance, none shown yet
+func fx_multimesh(mesh: Mesh, material: Material, count: int) -> MultiMeshInstance3D:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_custom_data = true
+	mm.mesh = mesh
+	mm.instance_count = count
+	mm.visible_instance_count = 0
+	var node := MultiMeshInstance3D.new()
+	node.multimesh = mm
+	node.material_override = material
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(node)
+	return node
+
+
+# The whole board, so effects MultiMeshes never need their size worked out
+func fx_box(mm: MultiMesh) -> void:
+	var box := AABB(Vector3(-4, -1, -4), Vector3(map_cols + 8, 8, map_rows + 8))
+	if mm.custom_aabb != box:
+		mm.custom_aabb = box
+
+
+func show_cloud(pos: Vector2, r: float, seconds: float, path: int) -> void:
+	# In the effects list for its time (main.gd counts it down); no node to free
+	var fx := {"kind": "cloud", "time": seconds, "max": seconds, "pos": pos, "r": r, "path": path,
+			"born": cloud_clock, "seed": randf()}
+	effects.append(fx)
+	var i := cloud_list.size()
+	cloud_list.append(fx)
+	var gm := cloud_ground.multimesh
+	var pm := cloud_puffs.multimesh
+	if gm.instance_count <= i:
+		# More room: that clears them, so all are written again
+		gm.instance_count = i * 2
+		pm.instance_count = i * 2 * CLOUD_PUFFS
+		for k in i:
+			write_cloud(k)
+	fx_box(gm)
+	fx_box(pm)
+	write_cloud(i)
+	gm.visible_instance_count = cloud_list.size()
+	pm.visible_instance_count = cloud_list.size() * CLOUD_PUFFS
+	cloud_cells_dirty = true
+
+
+# Puts cloud i of cloud_list into the MultiMeshes
+func write_cloud(i: int) -> void:
+	var fx: Dictionary = cloud_list[i]
+	var r: float = fx["r"] / CELL
+	var seed: float = fx["seed"]
+	var path: int = fx["path"]
+	var at := to3d(fx["pos"], 0.04 + 0.003 * (i % 8))
+	var gm := cloud_ground.multimesh
+	gm.set_instance_transform(i, Transform3D(Basis(Vector3.UP, seed * TAU).scaled(Vector3(r * 1.2, 1.0, r * 1.2)), at))
+	gm.set_instance_custom_data(i, Color(fx["born"], fx["max"], seed, path))
+	var pm := cloud_puffs.multimesh
+	var big := 1.2 if path == 2 else 1.0
+	for j in CLOUD_PUFFS:
+		var h := fposmod(seed * 7.31 + j * 0.618, 1.0)
+		var a := seed * TAU + j * TAU / CLOUD_PUFFS + h
+		var off := Vector3(cos(a), 0.0, sin(a)) * r * (0.1 + 0.4 * h)
+		var size := r * (0.5 + 0.3 * h) * big
+		pm.set_instance_transform(i * CLOUD_PUFFS + j, Transform3D(Basis.from_scale(Vector3.ONE * size), at + off + Vector3(0, 0.08, 0)))
+		pm.set_instance_custom_data(i * CLOUD_PUFFS + j, Color(fx["born"], fx["max"], fposmod(seed + j * 0.37, 1.0), path))
+
+
+# Takes cloud i out: the last one moves into its place
+func remove_cloud(i: int) -> void:
+	var last := cloud_list.size() - 1
+	cloud_list[i] = cloud_list[last]
+	cloud_list.pop_back()
+	if i < last:
+		write_cloud(i)
+	cloud_ground.multimesh.visible_instance_count = cloud_list.size()
+	cloud_puffs.multimesh.visible_instance_count = cloud_list.size() * CLOUD_PUFFS
+	cloud_cells_dirty = true
+
+
+func show_clouds() -> void:
+	if cloud_list.is_empty():
+		cloud_clock = 0.0
+		return
+	var first: Dictionary = cloud_list[0]
+	cloud_clock = first["born"] + first["max"] - first["time"]
+	for i in range(cloud_list.size() - 1, -1, -1):
+		if cloud_list[i]["time"] <= 0.0:
+			remove_cloud(i)
+	# Now and then the clock starts again from 0, and every cloud is written again
+	if cloud_clock > CLOUD_REBASE:
+		for fx in cloud_list:
+			fx["born"] -= cloud_clock
+		cloud_clock = 0.0
+		for i in cloud_list.size():
+			write_cloud(i)
+	(cloud_ground.material_override as ShaderMaterial).set_shader_parameter("now", cloud_clock)
+	(cloud_puffs.material_override as ShaderMaterial).set_shader_parameter("now", cloud_clock)
+
+
+# Other players: marks the tiles whose middle is in a cloud
+func fill_cloud_cells() -> void:
+	cloud_cells_dirty = false
+	cloud_cells.resize(map_cols * map_rows)
+	cloud_cells.fill(0)
+	for fx in cloud_list:
+		var at: Vector2 = fx["pos"]
+		var r: float = fx["r"] + CELL * 0.3
+		for y in range(maxi(int((at.y - r) / CELL), 0), mini(int((at.y + r) / CELL), map_rows - 1) + 1):
+			for x in range(maxi(int((at.x - r) / CELL), 0), mini(int((at.x + r) / CELL), map_cols - 1) + 1):
+				if cell_center(Vector2i(x, y)).distance_squared_to(at) <= r * r:
+					cloud_cells[y * map_cols + x] = 1
+
+
+func in_cloud(p: Vector2) -> bool:
+	var x := int(p.x / CELL)
+	var y := int(p.y / CELL)
+	if x < 0 or y < 0 or x >= map_cols or y >= map_rows:
+		return false
+	return cloud_cells[y * map_cols + x] == 1
+
+
+# ---------------------------------------------------------------- monster specials
+
+# Splitters have purple bones and a second skull, their splitlings are smaller
+# and purple (see build_monsters()). Healers are golden with a halo, and send a
+# golden ring out to the heal's reach every HEAL_EVERY seconds (timed on each
+# computer: just a look). A shield is a glowing bubble while it holds; it cracks
+# and bursts when it breaks. The halos, rings and bubbles are three MultiMeshes,
+# filled each frame from update_visuals().
+const HEAL_PULSE := 0.9  # seconds a healer's ring takes to run out
+const BUBBLE_BREAK := 0.35  # seconds a broken shield takes to burst
+var halo_mm: MultiMeshInstance3D
+var ring_mm: MultiMeshInstance3D
+var bubble_mm: MultiMeshInstance3D
+var bubble_breaks: Array = []  # broken shields bursting: [Transform3D, seconds since]
+var halos := 0  # instances filled this frame
+var rings := 0
+var bubbles := 0
+
+
+func make_special_fx() -> void:
+	var torus := TorusMesh.new()
+	torus.inner_radius = 0.07
+	torus.outer_radius = 0.095
+	torus.rings = 20
+	torus.ring_segments = 6
+	halo_mm = fx_multimesh(torus, mat(Color(1.0, 0.8, 0.3), 1.2 if compat else 2.6), 32)
+	var ring_shader: Shader = load("res://assets/shaders/heal_ring.gdshader")
+	var shield_shader: Shader = load("res://assets/shaders/shield.gdshader")
+	# Compatibility adds light in sRGB (see make_ability_fx()): there they're laid over instead
+	if compat:
+		for s: Shader in [ring_shader, shield_shader]:
+			var c := Shader.new()
+			c.code = s.code.replace("blend_add", "blend_mix")
+			if s == ring_shader:
+				ring_shader = c
+			else:
+				shield_shader = c
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(2, 2)  # scaled by the heal's reach
+	var rm := ShaderMaterial.new()
+	rm.shader = ring_shader
+	ring_mm = fx_multimesh(plane, rm, 32)
+	var ball := SphereMesh.new()
+	ball.radius = 0.5
+	ball.height = 1.0
+	ball.radial_segments = 20
+	ball.rings = 10
+	var bm := ShaderMaterial.new()
+	bm.shader = shield_shader
+	bm.set_shader_parameter("noise", fx_noise)
+	bm.set_shader_parameter("energy", 0.8 if compat else 1.0)
+	bubble_mm = fx_multimesh(ball, bm, 64)
+
+
+# Before the monsters: room for every monster's halo, ring and bubble
+func start_specials() -> void:
+	halos = 0
+	rings = 0
+	bubbles = 0
+	var need := enemies.size() + bubble_breaks.size()
+	for node: MultiMeshInstance3D in [halo_mm, ring_mm, bubble_mm]:
+		var mm := node.multimesh
+		if mm.instance_count < need:
+			mm.instance_count = need + 64
+		fx_box(mm)
+	(bubble_mm.material_override as ShaderMaterial).set_shader_parameter("now", time)
+
+
+# A splitter's, splitling's or healer's look, once its special is known
+func special_look(e: Enemy) -> void:
+	e.node.set_meta("sp", e.special)
+	var key := "%s %s" % [e.node.get_meta("look", ""), e.special]
+	if mobs.has(key):
+		e.node.set_meta("mob", mobs[key])
+	e.node.scale = Vector3.ONE * (0.75 if e.special == "splitling" else 1.0)
+
+
+# A special monster's halo, ring and shield at p; h is its height
+func special_fx(e: Enemy, p: Vector3, h: float) -> void:
+	if e.special == "heal":
+		var bob := sin(time * 3.0 + e.bob * TAU) * 0.015
+		halo_mm.multimesh.set_instance_transform(halos, Transform3D(Basis(Vector3.RIGHT, 0.25), p + Vector3(0, h + 0.06 + bob, 0)))
+		halos += 1
+		var t := fposmod(time + e.bob * HEAL_EVERY, HEAL_EVERY)
+		if t < HEAL_PULSE:
+			var s := HEAL_RANGE / CELL
+			ring_mm.multimesh.set_instance_transform(rings, Transform3D(Basis.from_scale(Vector3(s, 1, s)), p + Vector3(0, 0.05 + 0.002 * (rings % 8), 0)))
+			ring_mm.multimesh.set_instance_custom_data(rings, Color(t / HEAL_PULSE, 0, 0, 0))
+			rings += 1
+	if e.max_shield > 0.0:
+		var up := e.shield > 0.0
+		var xf := Transform3D(Basis.from_scale(Vector3.ONE * h * 1.1), p + Vector3(0, h * 0.5, 0))
+		if up and bubbles < bubble_mm.multimesh.instance_count:
+			bubble_mm.multimesh.set_instance_transform(bubbles, xf)
+			bubble_mm.multimesh.set_instance_custom_data(bubbles, Color(0, e.bob, 0, 0))
+			bubbles += 1
+		var was: bool = e.node.get_meta("shield", false)
+		if was != up:
+			e.node.set_meta("shield", up)
+			if was:
+				# It broke: the bubble cracks and bursts, with a spray of shards
+				bubble_breaks.append([xf, 0.0])
+				fire_burst(hit_pool[hit_next % hit_pool.size()], xf.origin, Color(1.0, 1.7, 2.6))
+				hit_next += 1
+
+
+# After the monsters: the bursting bubbles, then how many of each to show
+func end_specials(delta: float) -> void:
+	var mm := bubble_mm.multimesh
+	for i in range(bubble_breaks.size() - 1, -1, -1):
+		var b: Array = bubble_breaks[i]
+		b[1] += delta
+		if b[1] >= BUBBLE_BREAK:
+			bubble_breaks.remove_at(i)
+		elif bubbles < mm.instance_count:
+			mm.set_instance_transform(bubbles, b[0])
+			mm.set_instance_custom_data(bubbles, Color(maxf(b[1] / BUBBLE_BREAK, 0.01), 0.3, 0, 0))
+			bubbles += 1
+	halo_mm.multimesh.visible_instance_count = halos
+	ring_mm.multimesh.visible_instance_count = rings
+	mm.visible_instance_count = bubbles

@@ -36,6 +36,23 @@ const DIFFICULTY_GOLD := [1.5, 1.0, 1.0, 1.0]  # start gold
 const MAX_ALIVE := 50  # per player: you lose when this many monsters are alive at once (a boss counts as 5)
 const WAVE_INTERVAL := 25.0  # seconds between waves once the game has started
 const GAME_SPEEDS := [1, 2, 3, 5]  # the speed button (F) goes through these
+# Abilities: free, each player has their own cooldowns, counted in game time (so the
+# speed button doesn't make them weaker). Ready from wave 1.
+# Meteor (Z, then click): hits everything within "radius" for "damage" times a
+# monster's health in this wave (and level), ignoring armor.
+# Freeze all (C): every monster stands still for "time" seconds (bosses half).
+const ABILITIES := {
+	"meteor": {"name": "Meteor", "key": "Z", "cooldown": 60.0, "radius": 90.0, "damage": 8.0},
+	"freeze": {"name": "Freeze all", "key": "C", "cooldown": 90.0, "time": 3.0},
+}
+const ABILITY_ORDER := ["meteor", "freeze"]  # the order of their buttons
+# Endless mode: after beating wave MAX_WAVE the host can keep going (K). Monster
+# health then grows ENDLESS_HP_GROWTH a wave, so a run ends somewhere around wave
+# 550-650; ENDLESS_LAST_WAVE is only a safe upper end nobody reaches.
+const ENDLESS_HP_GROWTH := 1.04
+const ENDLESS_LAST_WAVE := 9999
+const GOLD_CAP := 1000000000000000  # 1e15: the most gold one wave or one kill gives (keeps whole numbers safe)
+const GOLD_MAX := 1000000000000000000  # 1e18: the most gold a player can have
 
 # The map is data (see read_map()): one letter per tile, . grass, # path,
 # 1-4 a player's gate (standing on a path tile), r rock, t tree, w water.
@@ -110,7 +127,7 @@ const RELAY_URL := "https://gtd-relay.gtd-relay.workers.dev"
 # Tower stats for levels 1-4 (index 0 = level 1). "cost"[0] is the build price,
 # the rest are upgrade prices. Levels go on after 4 (see make_towers()): the
 # game uses TOWERS, which has every level up to MAX_LEVEL.
-const TOWER_TYPES := ["arrow", "cannon", "frost", "spark"]
+const TOWER_TYPES := ["arrow", "cannon", "frost", "spark", "poison"]
 # Which monster in range a tower shoots (T or the button in the tower panel picks it).
 # The path loops forever, so "First" is the monster that has walked furthest: the
 # oldest one, which has counted toward the limit the longest. New towers use First.
@@ -154,7 +171,24 @@ const TOWER_BASE := {
 		"cooldown": [1.2, 1.1, 1.0, 0.9],
 		"chain": [3, 4, 5, 6],
 	},
+	# Poison: a slow glob that lands where the monster is and leaves a cloud there.
+	# "damage" is per second, to every monster in the cloud, and goes through armor.
+	"poison": {
+		"name": "Poison", "color": Color(0.45, 0.9, 0.25),
+		"desc": "Clouds that hurt every monster inside",
+		"cost": [90, 90, 180, 360],
+		"damage": [13, 29, 60, 130],
+		"range": [110.0, 120.0, 130.0, 140.0],
+		"cooldown": [1.5, 1.4, 1.3, 1.2],
+		"cloud": [40.0, 44.0, 50.0, 56.0],  # the cloud's radius
+	},
 }
+# Poison clouds last CLOUD_TIME seconds (Miasma longer) and hurt 4 times a second.
+# A monster is hurt by only one cloud of each tower at a time (a tower's own
+# clouds overlapping don't add up); different towers' clouds do add up.
+const CLOUD_TIME := 3.0
+const CLOUD_TICK := 0.25
+const POISON_SHOT_SPEED := 300.0  # the glob flies like a cannon ball (set in main.gd's launch_shot())
 # Levels after 4. Each one adds LEVEL_GAIN damage plus a bit more (0 to
 # LEVEL_GAIN_SPREAD), different for every level and tower but the same in every
 # game. Every 5th level (5, 10, 15...) is a big one. Upgrades cost LEVEL_COST
@@ -169,8 +203,8 @@ const LEVEL_RANGE := 3.0  # range added a level, up to LEVEL_RANGE_MAX in all
 const LEVEL_RANGE_MAX := 60.0
 # Specializations: the upgrade to level 5 (index PATH_LEVEL) picks one of a
 # tower's 2 paths, for good (selling is the only way back). From then on its
-# numbers are the normal ones times the path's: "damage", "cooldown", "range"
-# and "splash" multiply, "chain_add" / "chain_set" change the chain. Lists of 3
+# numbers are the normal ones times the path's: "damage", "cooldown", "range",
+# "splash", "cloud" (size) and "cloud_time" multiply, "chain_add" / "chain_set" change the chain. Lists of 3
 # are the path's extra at levels 5, 20 and 40 (see path_step()).
 const PATH_LEVEL := 4  # the first level index with a path (level 5)
 const PATHS := {
@@ -189,6 +223,11 @@ const PATHS := {
 	"spark": [
 		{"name": "Storm", "desc": "Longer chains that fade less", "damage": 0.9, "chain_add": 3, "falloff": 0.9, "jump": 150.0},
 		{"name": "Overload", "desc": "One huge bolt, chains once", "damage": 2.0, "cooldown": 1.2, "chain_set": 2, "mode": 2, "boss": 2.0},
+	],
+	"poison": [
+		{"name": "Venom", "desc": "Small deadly clouds, worse for bosses", "damage": 1.9, "cloud": 0.7, "mode": 2, "boss": 1.75},
+		{"name": "Miasma", "desc": "Big lasting clouds: monsters inside take more damage", "damage": 1.0, "cloud": 1.5,
+				"cloud_time": 1.5, "weaken": [0.15, 0.2, 0.25]},
 	],
 }
 const BOMBLET_REACH := 130.0  # Cluster: bomblets land on monsters this close to the blast...
@@ -295,6 +334,17 @@ class Enemy:
 	var freeze_immune := 0.0  # host: can't be frozen again while above 0
 	var traveled := 0.0
 	var dead := false
+	var sent := false  # host: a snapshot has had it, so the players know it (see send_shot())
+	var past := false  # other players: the host says it got past (once round the loop, see got_past())
+	# Monster SPECIALS (see wave_special()): "" none, "split" (breaks in 2 when it
+	# dies), "splitling" (one of those 2), "heal" (heals monsters near it)
+	var special := ""
+	var shield := 0.0  # host: takes hits before health and armor (0: none or broken)
+	var max_shield := 0.0  # 0: this monster has no shield
+	var shield_wait := 0.0  # host: seconds since it was last hit (the shield regrows after SHIELD_REGROW)
+	var heal_timer := 0.0  # host: healers, seconds to the next heal
+	var weak := 0.0  # host: Miasma, extra damage taken (0.2: +20%), set each poison tick
+	var poisoned := 0.0  # host: seconds it still looks poisoned (for the looks)
 	var node: MeshInstance3D
 	var mat: Material
 	var bob := 0.0
@@ -337,6 +387,7 @@ class Player:
 	var slot := 0  # 0-3: which gate and color
 	var gold := 0
 	var name := ""  # chosen by the player, checked by the host ("": not known yet)
+	var cooldowns := {}  # ability (see ABILITIES) -> game seconds until it's ready again (missing: ready)
 
 
 # The map being played (set by use_map())
@@ -356,6 +407,11 @@ var next_enemy_id := 1
 var towers := {}  # Vector2i -> Tower
 var shots: Array[Shot] = []
 var effects := []  # Dictionaries: bolts and explosions
+# Host: poison clouds, {pos (Vector2), r, time (seconds left), dps, owner (slot),
+# cell (the tower's Vector2i), boss (damage factor on bosses), weak (Miasma)}
+var clouds: Array = []
+var cloud_tick := 0.0  # host: seconds to the next poison tick
+var new_enemies: Array[Enemy] = []  # host: splitlings born this frame, added in remove_dead()
 
 var players: Array = [null, null, null, null]  # Player per slot, null = free
 var local_slot := 0  # this computer's player
@@ -381,6 +437,8 @@ var build_type := ""
 var selected: Tower = null
 var game_speed := 1
 var state := "playing"  # "playing", "won" or "lost"
+var endless := false  # kept going after beating wave MAX_WAVE (see last_wave())
+var aiming := ""  # the ability being aimed with the mouse ("meteor"), "" if none
 var menu_open := false  # the Esc menu; it only pauses the game when playing alone
 
 # Multiplayer
@@ -469,6 +527,11 @@ func clear_world() -> void:
 	towers.clear()
 	shots.clear()
 	effects.clear()
+	clouds.clear()
+	cloud_tick = 0.0
+	for e in new_enemies:
+		e.node.queue_free()
+	new_enemies.clear()
 	for q in spawn_queues:
 		q.clear()
 	build_type = ""
@@ -757,6 +820,7 @@ func use_map(m: Dictionary, title := "Default") -> void:
 	loop_starts = m.loop_starts
 	blocked = m.blocked
 	area_of = m.areas
+	daily_date = ""  # another map ends the daily challenge (start_daily() sets it after this)
 
 
 func flash(text: String) -> void:
@@ -778,9 +842,89 @@ func kind_for_wave(w: int) -> String:
 	return "normal"
 
 
-# A monster's health in wave w: +17% a wave up to wave 25, then +2.5% a wave.
+# ----- monster SPECIALS
+# From wave 31, waves ending in 1 are splitters, normal waves ending in 4 carry
+# shields (not armored ones), and waves ending in 7 bring healers (every 6th
+# monster). Boss waves 200, 220, 240... get shields too. Same on every level,
+# in endless mode and in the daily challenge.
+const SPECIALS := ["", "split", "splitling", "heal"]  # index: sent in 2 bits (see special_bits())
+const SPLIT_HP := 0.55  # a splitter's health (times normal)...
+const SPLITLING_HP := 0.25  # ...and each of its 2 splitlings'
+const SPLITLING_SPEED := 1.25
+const HEALER_EVERY := 6  # every 6th monster of a healer wave is a healer
+const HEALER_HP := 0.8
+const HEAL_EVERY := 2.5  # seconds between heals
+const HEAL_RANGE := 80.0  # pixels
+const HEAL_SHARE := 0.04  # of the healed monster's full health (bosses HEAL_BOSS)
+const HEAL_BOSS := 0.015
+const SHIELD_SHARE := 0.2  # a shield is worth this much of the monster's health (bosses SHIELD_BOSS)
+const SHIELD_BOSS := 0.1
+const SHIELD_REGROW := 5.0  # seconds without being hit before the shield regrows...
+const SHIELD_REGROW_RATE := 0.1  # ...by this share of it a second
+
+
+# The wave's trait: "", "split", "shield" or "heal".
+func wave_special(w: int) -> String:
+	var kind := kind_for_wave(w)
+	if kind == "boss":
+		return "shield" if w >= 200 and w % 20 == 0 else ""
+	if w < 31:
+		return ""
+	match w % 10:
+		1: return "split"
+		4: return "shield" if kind == "normal" else ""
+		7: return "heal"
+	return ""
+
+
+# A monster's trait and shield in 3 bits, for snapshots and the replay:
+# SPECIALS index * 4 (bits 4 and 8), + 16 while its shield is up.
+func special_bits(e: Enemy) -> int:
+	return maxi(SPECIALS.find(e.special), 0) * 4 | (16 if e.shield > 0.0 else 0)
+
+
+# The other players' (and the replay's) copy of a monster: its trait and whether
+# its shield is up (max_shield 1, shield 1 or 0) from special_bits().
+func apply_special_bits(e: Enemy, bits: int) -> void:
+	e.special = SPECIALS[(bits >> 2) & 3]
+	e.max_shield = 1.0 if bits & 16 else e.max_shield
+	e.shield = 1.0 if bits & 16 else 0.0
+
+
+# Every computer: a poison cloud's look at pos (map pixels), radius r, for
+# seconds. A placeholder flat green disc; game_world.gd can make the real one.
+# path: the tower's path (0 none, 1 Venom, 2 Miasma).
+func show_cloud(pos: Vector2, r: float, seconds: float, _path: int) -> void:
+	var disc := CylinderMesh.new()
+	disc.top_radius = r / CELL
+	disc.bottom_radius = r / CELL
+	disc.height = 0.04
+	var m := StandardMaterial3D.new()
+	m.albedo_color = Color(0.4, 0.9, 0.2, 0.3)
+	m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	var node := MeshInstance3D.new()
+	node.mesh = disc
+	node.material_override = m
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	node.position = to3d(pos, 0.05)
+	add_child(node)
+	effects.append({"kind": "cloud", "node": node, "time": seconds, "max": seconds})
+
+
+# The last wave: MAX_WAVE, DAILY_WAVES in the daily challenge (no endless mode
+# there), or (practically) never in endless mode.
+func last_wave() -> int:
+	if daily_date != "":
+		return DAILY_WAVES
+	return ENDLESS_LAST_WAVE if endless else MAX_WAVE
+
+
+# A monster's health in wave w: +17% a wave up to wave 25, then +2.5% a wave,
+# and in endless mode +4% a wave after MAX_WAVE (ENDLESS_HP_GROWTH).
 func wave_hp(w: int) -> float:
-	return 25.0 * pow(1.17, mini(w, 25) - 1) * pow(1.025, maxi(w - 25, 0))
+	var hp := 25.0 * pow(1.17, mini(w, 25) - 1) * pow(1.025, clampi(w, 25, MAX_WAVE) - 25)
+	return hp * pow(ENDLESS_HP_GROWTH, maxi(w - MAX_WAVE, 0))
 
 
 # Monsters out of each gate in wave w: one more each wave up to 32, bosses up to 5.
@@ -792,26 +936,206 @@ func wave_count(w: int) -> int:
 
 # Gold every player gets when wave w starts.
 func wave_income(w: int) -> int:
-	return maxi(10 + w * 2, int(wave_hp(w) / 35.0))
+	return maxi(10 + w * 2, int(minf(wave_hp(w) / 35.0, GOLD_CAP)))
 
 
 # Gold for killing a monster in wave w (a boss gives 40 + 12 times this).
 # Playing alone pays about 15% more later on, since nobody helps.
 func wave_bounty(w: int) -> int:
 	var hp_per_gold := 175.0 if player_count() < 2 else 200.0
-	return maxi(2 + int(mini(w, 30) / 4.0), int(wave_hp(w) / hp_per_gold))
+	return maxi(2 + int(mini(w, 30) / 4.0), int(minf(wave_hp(w) / hp_per_gold, GOLD_CAP)))
 
 
 # All the gold a player who killed everything would have earned before wave w
 # (for players joining late).
 func gold_before_wave(w: int) -> int:
 	var total := start_gold()
-	for i in range(1, mini(w, MAX_WAVE + 1)):
+	for i in range(1, mini(w, last_wave() + 1)):
 		var bounty := wave_bounty(i)
 		if kind_for_wave(i) == "boss":
 			bounty = 40 + bounty * 12
-		total += wave_income(i) + bounty * wave_count(i)
+		total = mini(total + wave_income(i) + bounty * wave_count(i), GOLD_MAX)
 	return total
+
+
+# ----- abilities (see ABILITIES)
+
+# Game seconds until a player's ability is ready again (0: ready).
+func ability_left(slot: int, ability: String) -> float:
+	var p: Player = players[slot] if slot >= 0 and slot < MAX_PLAYERS else null
+	return p.cooldowns.get(ability, 0.0) if p != null else 0.0
+
+
+# Starts a player's cooldown for an ability (the host when it's used; the other
+# players when the host tells them).
+func start_cooldown(slot: int, ability: String) -> void:
+	var p: Player = players[slot] if slot >= 0 and slot < MAX_PLAYERS else null
+	if p != null and ABILITIES.has(ability):
+		p.cooldowns[ability] = ABILITIES[ability]["cooldown"]
+
+
+# Counts every player's cooldowns down (game seconds).
+func tick_cooldowns(dt: float) -> void:
+	for p in players:
+		if p != null:
+			for a: String in p.cooldowns.keys():
+				p.cooldowns[a] = maxf(p.cooldowns[a] - dt, 0.0)
+
+
+# Meteor's damage in this wave (and level).
+func meteor_damage() -> float:
+	return ABILITIES["meteor"]["damage"] * wave_hp(maxi(wave, 1)) * DIFFICULTY_HP[difficulty]
+
+
+# Freeze all: every monster stands still (bosses half as long), even one Deep
+# Freeze made immune; after it thaws, it's immune like after Deep Freeze.
+func freeze_all() -> void:
+	var seconds: float = ABILITIES["freeze"]["time"]
+	for e in enemies:
+		e.freeze_time = maxf(e.freeze_time, seconds * (0.5 if e.kind == "boss" else 1.0))
+		e.freeze_immune = 0.0
+
+
+# Where the mouse points on the ground, in map pixels (for aiming Meteor).
+func mouse_point() -> Vector2:
+	var mp := get_viewport().get_mouse_position()
+	var from := camera.project_ray_origin(mp)
+	var dir := camera.project_ray_normal(mp)
+	if absf(dir.y) < 0.0001:
+		return Vector2(-1000, -1000)
+	var hit := from + dir * (-from.y / dir.y)
+	return Vector2(hit.x, hit.z) * CELL
+
+
+# The ability buttons on the console (i: index in ABILITY_ORDER) and the "Keep
+# going" button on the win screen. Empty here (nothing to click) until the
+# graphics agent places them; the keys work without them.
+func ability_button_rect(_i: int) -> Rect2:
+	return Rect2()
+
+
+func keep_going_rect() -> Rect2:
+	return Rect2()
+
+
+# Hooks, empty here. game_net.gd fills in the sending (like send_difficulty()),
+# game_world.gd the effects.
+# Host: tells the other players a player used an ability (they start its cooldown
+# with start_cooldown() and show it with show_ability(); for "freeze" also freeze_all()).
+func send_ability(_slot: int, _ability: String, _at: Vector2) -> void:
+	pass
+
+
+# Host: tells the other players the game keeps going in endless mode (they set
+# endless = true, state = "playing" and end_stats = {}).
+func send_endless() -> void:
+	pass
+
+
+# Every computer: the look of an ability being used (Meteor at "at", or Freeze all).
+func show_ability(_slot: int, _ability: String, _at: Vector2) -> void:
+	pass
+
+
+# Whether a monster got past (walked once round the loop), for the replay. The
+# host and a player alone work it out (main.gd); the other players only know
+# what the host's snapshots say (Enemy.past).
+func got_past(e: Enemy) -> bool:
+	return e.past
+
+
+# Every computer: a player's ping at pos (map pixels), for PING_TIME seconds
+# (see send_ping() in game_net.gd). The look is the graphics agent's.
+func show_ping(_slot: int, _pos: Vector2) -> void:
+	pass
+
+
+# ---------------------------------------------------------------- pings and gifts
+
+const PING_TIME := 4.0  # seconds a ping shows
+const PING_BURST := 3.0  # pings a player may send at once...
+const PING_REFILL := 2.0  # ...and then one per this many seconds
+const GIFT_SHARES := [0.1, 0.25, 0.5]  # the gift box's buttons: this share of your gold
+const GIFT_WAIT := 2.0  # seconds between one player's gifts
+
+
+# ---------------------------------------------------------------- daily challenge
+# The same map and rules for everyone each UTC day, worked out from the date by
+# every game (no server needed): the map in game_net.gd (daily_map_rows()), the
+# rules here. Everything comes from our own small random numbers, so a Godot
+# update can never change a day's map or rules.
+
+const DAILY_VERSION := 1  # raise when the map maker or the twists change (that day's map changes too)
+const DAILY_WAVES := 40  # the daily challenge is won after this wave (the server knows it too)
+const DAILY_LEVELS := [1, 1, 2]  # index in DIFFICULTIES, picked from these: Normal twice as often as Hard
+# One twist per day. Numbers multiply (1.0: no change); main.gd applies them.
+#   start_gold: start gold    count: monsters per wave    hp: monster health
+#   bounty: kill gold    income: wave gold    towers: how many tower types can be built (0: all)
+#   no_sell: towers can't be sold    armored: every wave that would be "normal" is "armored"
+const DAILY_TWISTS := {
+	"rich": {"name": "Rich start", "desc": "Twice the start gold.", "start_gold": 2.0},
+	"swarm": {"name": "Swarm", "desc": "50% more monsters, with 35% less health.", "count": 1.5, "hp": 0.65},
+	"two_towers": {"name": "Two towers", "desc": "Only two tower types can be built.", "towers": 2},
+	"no_selling": {"name": "No selling", "desc": "Towers can't be sold.", "no_sell": true},
+	"armored": {"name": "Armored day", "desc": "Normal waves are armored.", "armored": true},
+	"tight": {"name": "Tight budget", "desc": "30% less kill gold, 30% more wave gold.", "bounty": 0.7, "income": 1.3},
+}
+var daily_date := ""  # "2026-11-02" while playing that day's challenge, "" otherwise
+var daily_state := 1  # the daily random numbers (see daily_seed())
+var daily_cache := {}  # the last daily_rules() worked out
+
+
+# Today in UTC, "2026-11-02": everyone's daily challenge changes at the same moment.
+func daily_today() -> String:
+	return Time.get_date_string_from_system(true)
+
+
+# Starts the daily random numbers for a text (FNV-1a hash into xorshift32).
+func daily_seed(text: String) -> void:
+	var h := 2166136261
+	for b in text.to_utf8_buffer():
+		h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+	daily_state = h if h != 0 else 1
+
+
+func daily_next() -> int:
+	daily_state ^= (daily_state << 13) & 0xFFFFFFFF
+	daily_state ^= daily_state >> 17
+	daily_state ^= (daily_state << 5) & 0xFFFFFFFF
+	return daily_state
+
+
+# A whole number from lo to hi (both included).
+func daily_roll(lo: int, hi: int) -> int:
+	return lo + daily_next() % (hi - lo + 1)
+
+
+# The day's rules, or {} when this game isn't a daily challenge (date "": the one
+# being played). Every key is always there, so main.gd can just use them:
+# {date, name, desc, level, waves, start_gold, count, hp, bounty, income,
+#  towers (the tower types that can be built), no_sell, armored}
+func daily_rules(date := "") -> Dictionary:
+	if date == "":
+		date = daily_date
+	if date == "":
+		return {}
+	if daily_cache.get("date", "") == date:
+		return daily_cache  # cheap enough to ask every frame
+	daily_seed("gtd-daily-rules-%d-%s" % [DAILY_VERSION, date])
+	var level: int = DAILY_LEVELS[daily_roll(0, DAILY_LEVELS.size() - 1)]
+	var keys := DAILY_TWISTS.keys()
+	keys.sort()  # the same order everywhere
+	var key: String = keys[daily_roll(0, keys.size() - 1)]
+	var tw: Dictionary = DAILY_TWISTS[key]
+	var types: Array = TOWER_TYPES.duplicate()
+	var keep: int = tw.get("towers", 0)
+	while keep > 0 and types.size() > keep:
+		types.remove_at(daily_roll(0, types.size() - 1))
+	daily_cache = {"date": date, "twist": key, "name": tw.name, "desc": tw.desc, "level": level, "waves": DAILY_WAVES,
+			"start_gold": tw.get("start_gold", 1.0), "count": tw.get("count", 1.0), "hp": tw.get("hp", 1.0),
+			"bounty": tw.get("bounty", 1.0), "income": tw.get("income", 1.0), "towers": types,
+			"no_sell": tw.get("no_sell", false), "armored": tw.get("armored", false)}
+	return daily_cache
 
 
 # Every tower level up to MAX_LEVEL: levels 1-4 from TOWER_BASE, then each level
@@ -836,6 +1160,8 @@ func make_towers() -> Dictionary:
 			d["cooldown"].append(snappedf(d["cooldown"][top] * maxf(pow(0.98, n), 0.75), 0.01))
 			if d.has("splash"):
 				d["splash"].append(d["splash"][top] + minf(n * 2.0, 40.0))
+			if d.has("cloud"):
+				d["cloud"].append(d["cloud"][top] + minf(n * 2.0, 40.0))
 			if d.has("slow"):
 				d["slow"].append(snappedf(0.15 + (d["slow"][top] - 0.15) * pow(0.95, n), 0.01))
 			if d.has("chain"):
@@ -852,6 +1178,8 @@ func make_towers() -> Dictionary:
 				pd["range"][lv] = roundf(d["range"][lv] * p.get("range", 1.0))
 				if pd.has("splash"):
 					pd["splash"][lv] = roundf(d["splash"][lv] * p.get("splash", 1.0))
+				if pd.has("cloud"):
+					pd["cloud"][lv] = roundf(d["cloud"][lv] * p.get("cloud", 1.0))
 				if pd.has("chain"):
 					pd["chain"][lv] = p["chain_set"] if p.has("chain_set") else mini(d["chain"][lv] + p.get("chain_add", 0), 15)
 			paths.append(pd)
@@ -953,8 +1281,9 @@ func remove_tower(c: Vector2i) -> void:
 
 # The host (or a player alone) counts per player slot, so a player who leaves
 # still shows up at the end. Cheap: a few additions per hit and per kill.
-# Their gold always adds up: gold = stat_start + stat_earned - stat_spent.
+# Their gold always adds up: gold = stat_start + stat_earned - stat_spent + stat_gifted.
 var stat_kills := [0, 0, 0, 0]
+var stat_gifted := [0, 0, 0, 0]  # gold other players gave them, minus what they gave (see gift_gold())
 var stat_damage := [0.0, 0.0, 0.0, 0.0]  # health really taken off (no overkill)
 var stat_start := [0, 0, 0, 0]  # start gold (joining late: the gold they got then)
 var stat_earned := [0, 0, 0, 0]  # wave gold, early bonus and kill gold
@@ -972,6 +1301,26 @@ func reset_stats() -> void:
 	stat_start = [0, 0, 0, 0]
 	stat_earned = [0, 0, 0, 0]
 	stat_spent = [0, 0, 0, 0]
+	stat_gifted = [0, 0, 0, 0]
 	stat_names = ["", "", "", ""]
 	sold_towers = []
 	end_stats = {}
+
+
+# ---------------------------------------------------------------- saving and loading
+# See save_game() / load_game() in main.gd. Only the host (or a player alone)
+# saves and loads; a loaded game never goes on the leaderboards.
+
+const SAVE_FORMAT := 1  # raise when a save's layout changes (older saves: converted in load_game(), newer: refused)
+const SAVES_DIR := "user://saves"  # <name>.sav: a header (for the list), then the game
+const SAVE_NAME_MAX := 32
+const SAVES_MAX := 50  # named saves (the Continue and Quicksave slots don't count)
+const AUTOSAVE_NAME := "Continue"  # written at every wave start and when the game is closed
+const QUICKSAVE_NAME := "Quicksave"  # F5 / F9
+var from_save := false  # this game was loaded from a save: no scores (see submit_score())
+var held := false  # a loaded game waits, nothing moving, until the host presses Space
+var held_note := ""  # other players: the host's "waiting for" text while held (see held_text())
+# Host, after loading a game with more players: slot -> {name, gold, cooldowns}
+# of saved players not back yet. Their towers stay; a player joining gets one of
+# these slots back (see saved_slot_for() and restore_saved_player() in main.gd).
+var saved_slots := {}

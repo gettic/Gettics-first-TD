@@ -3,10 +3,13 @@ extends "res://game_ui.gd"
 ## The map being edited is plain text (rows of letters, see DEFAULT_MAP). After
 ## every change it's checked with read_map() and shown on the 3D map right away.
 
+const MapShare := preload("res://map_share.gd")  # map codes and QR codes
+
 # Esc menu: the editor button, left of Graphics, and the box asking before a game ends
 const EDITOR_RECT := Rect2(400, 50, 124, 28)
 # Esc menu: the map being played and the difficulty level, under the title
-const MAP_PICK_RECT := Rect2(530, 125, 320, 27)
+const MAP_PICK_RECT := Rect2(530, 125, 186, 27)
+const DAILY_RECT := Rect2(722, 125, 128, 27)  # the daily challenge, right of the map
 const LEVEL_RECT := Rect2(530, 156, 320, 27)
 # Joining a game on a map you don't have: the preview and Download / Cancel
 const JOIN_BOX := Rect2(312, 100, 656, 470)
@@ -33,11 +36,23 @@ const ED_NEW_RECT := Rect2(980, 586, 134, 36)
 const ED_LOAD_RECT := Rect2(1124, 586, 134, 36)
 const ED_SAVE_RECT := Rect2(980, 630, 134, 36)
 const ED_PLAY_RECT := Rect2(1124, 630, 134, 36)
-const ED_EXIT_RECT := Rect2(980, 674, 278, 36)
-# The list of maps to load
+const ED_SHARE_RECT := Rect2(980, 674, 134, 36)
+const ED_EXIT_RECT := Rect2(1124, 674, 134, 36)
+# The list of maps to load, each row with a share button, and Paste / Cancel under it
 const ED_LIST_RECT := Rect2(440, 60, 400, 470)
 const ED_LIST_ROWS := 9
-const ED_LIST_CANCEL := Rect2(480, 470, 320, 40)
+const ED_LIST_PASTE := Rect2(480, 470, 156, 40)
+const ED_LIST_CANCEL := Rect2(644, 470, 156, 40)
+# Sharing a map: its QR code, code and Copy
+const SHARE_BOX := Rect2(390, 66, 500, 576)
+const SHARE_QR := Rect2(490, 142, 300, 300)  # the most the QR code (with its white edge) may take
+const SHARE_COPY := Rect2(450, 580, 180, 40)
+const SHARE_CLOSE := Rect2(650, 580, 180, 40)
+# A pasted map code: its preview, Save / Play / Cancel
+const PASTE_BOX := Rect2(312, 100, 656, 470)
+const PASTE_SAVE := Rect2(340, 518, 190, 40)
+const PASTE_PLAY := Rect2(545, 518, 190, 40)
+const PASTE_CANCEL := Rect2(750, 518, 190, 40)
 const ED_UNEVEN := 1.5  # areas: a warning when the biggest is this much bigger than the smallest
 const ED_RESERVED := ["CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "LPT1", "LPT2", "LPT3"]
 
@@ -64,6 +79,14 @@ var ed_before: Array = []  # the map played before the editor, to go back to
 var ed_before_name := ""
 var map_name_input: LineEdit
 var pick_open := false  # Esc menu: the list of maps to play
+var share_open := false  # the share box: a map's QR code and code
+var share_code := ""
+var share_qr: Array = []  # MapShare.qr_grid(): rows of modules (1 dark)
+var share_tex: ImageTexture  # share_qr drawn once, a pixel per module, scaled up sharp
+var share_title := ""
+var share_size := Vector2i.ZERO
+var paste_map: Dictionary = {}  # a pasted map code's map, shown before it's kept: {name, rows, check, info}
+var share_at := 0  # when the share or pasted-map box opened (older messages aren't shown in it)
 
 
 # main.gd has the real one
@@ -165,20 +188,40 @@ func bad_map_name(n: String) -> String:
 # checked with read_map() again whenever it's loaded). Nothing happens when the
 # same map is saved already; a name in use gets " (2)".
 func keep_map(title: String, rows: Array) -> void:
+	if find_map(rows) != "":
+		return
+	var n := store_map(title, rows, "Downloaded map")
+	if n != "":
+		map_name = n
+		add_chat(-1, "", "The map is in your map list now, as %s" % n)
+
+
+# The name this map is saved under (Default too), or "".
+func find_map(rows: Array) -> String:
+	if rows == DEFAULT_MAP:
+		return "Default"
 	for n in saved_maps():
 		if load_map_rows(n) == rows:
-			return
+			return n
+	return ""
+
+
+# Saves a map (already checked) in the map list. Returns its name: the name it
+# got (a name in use gets " (2)"), the name it already has if the same map is
+# saved, or "" if saving failed. fallback: the name when title can't be one.
+func store_map(title: String, rows: Array, fallback := "Shared map") -> String:
+	var have := find_map(rows)
+	if have != "":
+		return have
 	var base := clean_map_name(title)
 	if bad_map_name(base) != "":
-		base = "Downloaded map"
+		base = fallback
 	var n := base
 	var k := 2
 	while FileAccess.file_exists(map_file(n)):
 		n = "%s (%d)" % [base.left(MAP_NAME_MAX - 5).strip_edges(), k]
 		k += 1
-	if save_map_rows(n, rows):
-		map_name = n
-		add_chat(-1, "", "The map is in your map list now, as %s" % n)
+	return n if save_map_rows(n, rows) else ""
 
 
 # ---------------------------------------------------------------- choosing the map
@@ -193,19 +236,29 @@ func can_pick_map() -> bool:
 
 func open_picker() -> void:
 	if not can_pick_map():
-		if net_mode == "host" and player_count() > 1:
-			flash("The map can only change while nobody has joined")
-		elif net_mode == "" or net_mode == "host":
-			flash("The map can only change before wave 1")
+		var why := pick_block_reason()
+		if why != "":
+			flash(why)
 		return
 	ed_list = ["Default"] + saved_maps()
 	ed_list_top = 0
 	pick_open = true
 
 
+# Why the map can't change now ("" for players in someone else's game).
+func pick_block_reason() -> String:
+	if net_mode == "host" and player_count() > 1:
+		return "The map can only change while nobody has joined"
+	if net_mode == "" or net_mode == "host":
+		return "The map can only change before wave 1"
+	return ""
+
+
 func pick_click(p: Vector2) -> void:
 	if ED_LIST_CANCEL.has_point(p) or not ED_LIST_RECT.has_point(p):
 		pick_open = false
+		return
+	if list_extra_click(p):
 		return
 	for i in mini(ED_LIST_ROWS, ed_list.size() - ed_list_top):
 		if not ed_list_row(i).has_point(p):
@@ -265,33 +318,18 @@ func draw_join_box() -> void:
 	centered(b.position.y + 86, "%s's game is on a map you don't have yet:" % map_offer.host, 16, UI_GREY)
 	recess(JOIN_PREVIEW.grow(4))
 	draw_map_preview(rows, JOIN_PREVIEW)
-	var counts := {"t": 0, "r": 0, "w": 0}
 	var size := 0
 	for row: String in rows:
 		size += row.length() + 1
-		for ch in counts:
-			counts[ch] += row.count(ch)
-	var gates: int = MAX_PLAYERS - check.gates.count(null)
-	var info := [
-		["Map", map_offer.name, Color(1, 0.85, 0.3)],
-		["From", "%s (the host)" % map_offer.host, UI_TEXT],
-		["Size", "%d x %d tiles" % [check.cols, check.rows], UI_TEXT],
-		["Gates", "%d  (up to %d player%s)" % [gates, gates, "" if gates == 1 else "s"], UI_TEXT],
-		["Path", "%d tiles + %d road%s" % [check.loop, gates, "" if gates == 1 else "s"], UI_TEXT],
-		["Nature", "%d trees, %d rocks, %d water" % [counts.t, counts.r, counts.w], UI_TEXT],
-		["Download", "%.1f KB of map tiles" % (size / 1024.0), UI_TEXT],
-	]
-	for i in info.size():
-		var y := JOIN_PREVIEW.position.y + 18 + i * 28
-		text(Vector2(652, y), info[i][0], 15, UI_GREY)
-		text(Vector2(738, y), fit_text(info[i][1], 222, 16), 16, info[i][2])
+	var info := [["Map", map_offer.name, Color(1, 0.85, 0.3)], ["From", "%s (the host)" % map_offer.host, UI_TEXT]]
+	info.append_array(map_facts(rows, check))
+	info.append(["Download", "%.1f KB of map tiles" % (size / 1024.0), UI_TEXT])
+	draw_map_info(info)
 	hud.draw_multiline_string(font, Vector2(340, JOIN_PREVIEW.end.y + 24), "Only the map's tiles are downloaded. Your game checks them and builds the map itself, like the map editor does.", HORIZONTAL_ALIGNMENT_LEFT, 600, 14, 2, UI_GREY)
-	var keep: bool = map_offer.keep
-	hud.draw_rect(JOIN_KEEP, Color(0.06, 0.06, 0.065))
-	hud.draw_rect(JOIN_KEEP, UI_GOLD, false, 1.5)
-	if keep:
-		hud.draw_polyline(PackedVector2Array([JOIN_KEEP.position + Vector2(4, 10), JOIN_KEEP.position + Vector2(8, 15), JOIN_KEEP.position + Vector2(16, 4)]), UI_GOLD_LIGHT, 2.5)
-	text(JOIN_KEEP.position + Vector2(30, 16), "Keep this map in my map list after the game", 15, UI_TEXT)
+	if offer_is_daily():
+		text(JOIN_KEEP.position + Vector2(0, 16), "Today's daily challenge map: everyone gets the same one, so it isn't kept.", 15, UI_GREY)
+	else:
+		draw_keep_box()
 	if map_offer.accepted:
 		button(JOIN_YES, "Joining...", false)
 	else:
@@ -299,12 +337,44 @@ func draw_join_box() -> void:
 	button(JOIN_NO, "Cancel")
 
 
+# A map's size, gates, path and nature, as [label, value, color] lines.
+func map_facts(rows: Array, check: Dictionary) -> Array:
+	var counts := {"t": 0, "r": 0, "w": 0}
+	for row: String in rows:
+		for ch in counts:
+			counts[ch] += row.count(ch)
+	var gates: int = MAX_PLAYERS - check.gates.count(null)
+	return [
+		["Size", "%d x %d tiles" % [check.cols, check.rows], UI_TEXT],
+		["Gates", "%d  (up to %d player%s)" % [gates, gates, "" if gates == 1 else "s"], UI_TEXT],
+		["Path", "%d tiles + %d road%s" % [check.loop, gates, "" if gates == 1 else "s"], UI_TEXT],
+		["Nature", "%d trees, %d rocks, %d water" % [counts.t, counts.r, counts.w], UI_TEXT],
+	]
+
+
+# The lines right of the map preview (see JOIN_PREVIEW).
+func draw_map_info(info: Array) -> void:
+	for i in info.size():
+		var y := JOIN_PREVIEW.position.y + 18 + i * 28
+		text(Vector2(652, y), info[i][0], 15, UI_GREY)
+		text(Vector2(738, y), fit_text(info[i][1], 222, 16), 16, info[i][2])
+
+
+func draw_keep_box() -> void:
+	var keep: bool = map_offer.keep
+	hud.draw_rect(JOIN_KEEP, Color(0.06, 0.06, 0.065))
+	hud.draw_rect(JOIN_KEEP, UI_GOLD, false, 1.5)
+	if keep:
+		hud.draw_polyline(PackedVector2Array([JOIN_KEEP.position + Vector2(4, 10), JOIN_KEEP.position + Vector2(8, 15), JOIN_KEEP.position + Vector2(16, 4)]), UI_GOLD_LIGHT, 2.5)
+	text(JOIN_KEEP.position + Vector2(30, 16), "Keep this map in my map list after the game", 15, UI_TEXT)
+
+
 func join_box_click(p: Vector2) -> void:
 	if map_offer.accepted:
 		if JOIN_NO.has_point(p):
 			cancel_offer()
 		return
-	if Rect2(JOIN_KEEP.position, Vector2(380, JOIN_KEEP.size.y)).has_point(p):
+	if Rect2(JOIN_KEEP.position, Vector2(380, JOIN_KEEP.size.y)).has_point(p) and not offer_is_daily():
 		map_offer.keep = not map_offer.keep
 	elif JOIN_YES.has_point(p):
 		accept_offer(map_offer.keep)
@@ -403,7 +473,11 @@ func update_visuals(delta: float) -> void:
 		ed_show()
 	super(delta)
 	# The map-name box hides while the Esc menu or the map list is open (they're drawn under it)
-	var show_name := editing and not menu_open and not ed_list_open
+	# Outside the editor the share boxes live in the Esc menu: they close with it
+	if not editing and not menu_open and (share_open or not paste_map.is_empty()):
+		share_open = false
+		paste_map = {}
+	var show_name := editing and not menu_open and not ed_list_open and not share_open and paste_map.is_empty()
 	if map_name_input != null and map_name_input.visible != show_name:
 		if not show_name:
 			map_name_input.release_focus()
@@ -523,6 +597,14 @@ func ed_tool_rect(i: int) -> Rect2:
 
 
 func editor_input(event: InputEvent) -> void:
+	# The share and pasted-map boxes take every click while open
+	if share_open or not paste_map.is_empty():
+		if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT:
+			map_name_input.release_focus()
+			ed_confirm_was = ed_confirm
+			ed_confirm = ""
+			share_boxes_click(ui_mouse(true))
+		return
 	var p := ui_mouse(ed_list_open)
 	if event is InputEventMouseButton:
 		if not event.pressed:
@@ -609,6 +691,14 @@ func ed_console_click(p: Vector2) -> void:
 		else:
 			var title := clean_map_name(map_name_input.text)
 			close_editor(ed_rows, title if title != "" else "New map")
+	elif ED_SHARE_RECT.has_point(p):
+		if ed_check.has("error"):
+			flash("Fix the map first: " + ed_check.error)
+			return
+		var title := clean_map_name(map_name_input.text)
+		if title == "":
+			title = ed_name if ed_name != "" else "My map"
+		open_share(title, ed_rows)
 	elif ED_EXIT_RECT.has_point(p):
 		ed_leave()
 
@@ -640,12 +730,31 @@ func ed_save() -> void:
 
 
 func ed_list_row(i: int) -> Rect2:
-	return Rect2(480, 130 + i * 36, 320, 32)
+	return Rect2(480, 130 + i * 36, 280, 32)
+
+
+# The share button at a row's right end.
+func ed_list_share(i: int) -> Rect2:
+	return Rect2(766, 130 + i * 36, 34, 32)
+
+
+# The map lists' Paste button and share buttons. True: the click was theirs.
+func list_extra_click(p: Vector2) -> bool:
+	if ED_LIST_PASTE.has_point(p):
+		import_code(DisplayServer.clipboard_get())
+		return true
+	for i in mini(ED_LIST_ROWS, ed_list.size() - ed_list_top):
+		if ed_list_share(i).has_point(p):
+			share_saved_map(ed_list[ed_list_top + i])
+			return true
+	return false
 
 
 func ed_list_click(p: Vector2) -> void:
 	if ED_LIST_CANCEL.has_point(p) or not ED_LIST_RECT.has_point(p):
 		ed_list_open = false
+		return
+	if list_extra_click(p):
 		return
 	for i in mini(ED_LIST_ROWS, ed_list.size() - ed_list_top):
 		if not ed_list_row(i).has_point(p):
@@ -683,9 +792,14 @@ func draw_menu() -> void:
 	else:
 		var label := map_name + ("   (change)" if can_pick_map() else "")
 		button(MAP_PICK_RECT, label, can_pick_map(), false)
+	if net_mode != "client":
+		button(DAILY_RECT, "Daily challenge", can_pick_map(), daily_date != "")
 	draw_level_row()
-	if not (pick_open or ed_ask_open or board_open or settings_open or net_mode == "map_offer") and level_row().has_point(ui_mouse(true)):
+	var free := not (pick_open or ed_ask_open or board_open or settings_open or save_open or load_open or net_mode == "map_offer")
+	if free and level_row().has_point(ui_mouse(true)):
 		draw_level_tip()
+	elif free and net_mode != "client" and DAILY_RECT.has_point(ui_mouse(true)):
+		draw_daily_tip()
 	if pick_open:
 		ed_draw_list("CHOOSE A MAP", map_name)
 	if net_mode == "map_offer" and not map_offer.is_empty():
@@ -701,6 +815,11 @@ func draw_menu() -> void:
 		draw_board()
 	if settings_open:
 		draw_settings()
+	if save_open:
+		draw_save_box()
+	if load_open:
+		draw_load_box()
+	draw_share_boxes()
 
 
 func menu_click(p: Vector2) -> void:
@@ -714,8 +833,11 @@ func menu_click(p: Vector2) -> void:
 				menu_open = false
 			ed_leave()
 		return
-	if board_open or settings_open:
-		super(p)  # the leaderboard or settings box gets the click
+	if share_open or not paste_map.is_empty():
+		share_boxes_click(p)
+		return
+	if board_open or settings_open or save_open or load_open:
+		super(p)  # the leaderboard, settings, Save or Load box gets the click
 		return
 	if ed_ask_open:
 		if ED_ASK_YES_RECT.has_point(p):
@@ -732,6 +854,9 @@ func menu_click(p: Vector2) -> void:
 		return
 	if MAP_PICK_RECT.has_point(p) and net_mode != "client":
 		open_picker()
+		return
+	if DAILY_RECT.has_point(p) and net_mode != "client":
+		call("menu_daily")  # in main.gd, after this file
 		return
 	if LEVEL_RECT.has_point(p):
 		if can_pick_level():
@@ -751,6 +876,11 @@ func toggle_menu() -> void:
 	# Esc in the join preview is Cancel; in the map list it closes the list
 	if net_mode == "map_offer" and menu_open:
 		cancel_offer()
+		return
+	# Esc closes the share or pasted-map box first
+	if share_open or not paste_map.is_empty():
+		share_open = false
+		paste_map = {}
 		return
 	if pick_open:
 		pick_open = false
@@ -807,6 +937,39 @@ func draw_level_tip() -> void:
 		text(r.position + Vector2(12, 48 + j * 20), lines[j], 14, UI_TEXT)
 
 
+# Right of the menu: today's daily challenge, and how (or why not) to start it.
+func draw_daily_tip() -> void:
+	var date := daily_today()
+	var rules := daily_rules(date)
+	var lv: int = rules.get("level", 1)
+	var lines := [str(rules.get("desc", "")), "%s level, %d waves, the day's own map." % [DIFFICULTIES[lv], DAILY_WAVES],
+			"Same for everyone today, with its own leaderboard."]
+	if daily_date == date:
+		lines.append("You're playing it now.")
+	elif can_pick_map():
+		lines.append("Click: start it (this ends the game you're playing).")
+	elif net_mode == "host" and player_count() > 1:
+		lines.append("It can only start while nobody has joined.")
+	else:
+		lines.append("It can only start before wave 1.")
+	var r := Rect2(MENU_RECT.end.x + 8, DAILY_RECT.position.y - 6, 390, 34 + lines.size() * 20 + 10)
+	hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.9), false, 1.0)
+	hud.draw_rect(r, Color(0.05, 0.05, 0.055, 0.92))
+	hud.draw_rect(r, UI_GOLD_DARK, false, 1.0)
+	text(r.position + Vector2(12, 24), "Daily %s:  %s" % [date, rules.get("name", "")], 16, Color(1, 0.85, 0.3))
+	for j in lines.size():
+		text(r.position + Vector2(12, 48 + j * 20), fit_text(lines[j], r.size.x - 24, 14), 14, LEVEL_COLORS[lv] if j == 1 else UI_TEXT)
+
+
+# A map offer for the daily challenge: it's made again from the date, so it's never kept.
+func offer_is_daily() -> bool:
+	var n: String = map_offer.get("name", "")
+	if not n.begins_with("Daily "):
+		return false
+	var date := n.trim_prefix("Daily ")
+	return date.replace("-", "").is_valid_int() and map_offer.rows == daily_map(date).text
+
+
 func ed_draw_menu() -> void:
 	hud.draw_rect(screen_rect(), Color(0, 0, 0, 0.5))
 	ui_box(ED_MENU_RECT)
@@ -832,8 +995,9 @@ func draw_hud() -> void:
 	hud.draw_set_transform(Vector2(0, ui_extra / 2.0))
 	if ed_list_open:
 		ed_draw_list()
+	draw_share_boxes()
 	hud.draw_set_transform(Vector2(0, ui_extra))
-	if message_time > 0.0 and not menu_open:
+	if message_time > 0.0 and not menu_open and not ed_list_open and not share_open and paste_map.is_empty():
 		outlined(Vector2(SCREEN_W / 2.0, MESSAGE_Y), message, 18, Color(1, 1, 0.6, minf(message_time, 1.0)))
 	hud.draw_set_transform(Vector2(0, ui_extra / 2.0))
 	if menu_open:
@@ -880,7 +1044,7 @@ func ed_draw_marks() -> void:
 		hud.draw_circle(sp, 11, Color(0, 0, 0, 0.7))
 		hud.draw_circle(sp, 9, PLAYER_COLORS[g])
 		text(sp + Vector2(-4.5, 6), str(g + 1), 16, Color.BLACK)
-	if ed_list_open or menu_open or ed_over_console(ui_mouse()):
+	if ed_list_open or menu_open or share_open or not paste_map.is_empty() or ed_over_console(ui_mouse()):
 		return
 	var c := mouse_cell()
 	if in_map(c):
@@ -994,6 +1158,8 @@ func ed_draw_console() -> void:
 	button(ED_LOAD_RECT, "Load...")
 	button(ED_SAVE_RECT, "Save", true, ed_changed)
 	button(ED_PLAY_RECT, "Play this map", not ed_check.has("error"))
+	button(ED_SHARE_RECT, "Share", not ed_check.has("error"))
+	icon_share(ED_SHARE_RECT.position + Vector2(30, 18), UI_GOLD_LIGHT if not ed_check.has("error") else UI_DIM)
 	button(ED_EXIT_RECT, "Exit the editor")
 	hud.draw_set_transform(Vector2.ZERO)
 
@@ -1016,9 +1182,249 @@ func ed_draw_list(title := "LOAD A MAP", current := ed_name) -> void:
 	ui_box(ED_LIST_RECT)
 	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 28).x
 	ui_title(Rect2(ED_LIST_RECT.position.x, ED_LIST_RECT.position.y, ED_LIST_RECT.size.x, 54), Vector2((SCREEN_W - tw) / 2.0, ED_LIST_RECT.position.y + 40), title, 28)
+	var mouse := ui_mouse(true)
 	for i in mini(ED_LIST_ROWS, ed_list.size() - ed_list_top):
 		var n: String = ed_list[ed_list_top + i]
-		button(ed_list_row(i), n + ("  (built in)" if n == "Default" else ""), true, n == current)
-	if ed_list.size() > ED_LIST_ROWS:
+		button(ed_list_row(i), fit_text(n + ("  (built in)" if n == "Default" else ""), 260, 16), true, n == current)
+		var sr := ed_list_share(i)
+		ui_button_bg(sr, true, sr.has_point(mouse))
+		icon_share(sr.get_center(), UI_GOLD_LIGHT if sr.has_point(mouse) else UI_TEXT)
+	# Messages (like a bad map code) show here: the message line is under the list
+	var note := recent_message() if editing or flash_menu else ""
+	if note != "" and not share_open and paste_map.is_empty():
+		centered(ED_LIST_CANCEL.position.y - 8, fit_text(note, ED_LIST_RECT.size.x - 30, 14), 14, Color(1, 1, 0.6))
+	elif ed_list.size() > ED_LIST_ROWS:
 		centered(ED_LIST_CANCEL.position.y - 6, "Scroll for more (%d maps)" % ed_list.size(), 13, UI_DIM)
+	button(ED_LIST_PASTE, "Paste map code")
 	button(ED_LIST_CANCEL, "Cancel")
+	# Over a share button: what it does
+	for i in mini(ED_LIST_ROWS, ed_list.size() - ed_list_top):
+		if ed_list_share(i).has_point(mouse):
+			var r := Rect2(ED_LIST_RECT.end.x + 8, ed_list_share(i).position.y - 4, 250, 40)
+			hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.9), false, 1.0)
+			hud.draw_rect(r, Color(0.05, 0.05, 0.055, 0.92))
+			hud.draw_rect(r, UI_GOLD_DARK, false, 1.0)
+			text(r.position + Vector2(12, 25), "Share: copy its map code", 15, Color(1, 0.85, 0.3))
+	if ED_LIST_PASTE.has_point(mouse):
+		var r := Rect2(ED_LIST_RECT.end.x + 8, ED_LIST_PASTE.position.y - 4, 300, 48)
+		hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.9), false, 1.0)
+		hud.draw_rect(r, Color(0.05, 0.05, 0.055, 0.92))
+		hud.draw_rect(r, UI_GOLD_DARK, false, 1.0)
+		text(r.position + Vector2(12, 21), "A map code a friend sent you", 15, Color(1, 0.85, 0.3))
+		text(r.position + Vector2(12, 40), "Copy it, then click here or press Ctrl+V.", 13, UI_TEXT)
+
+
+# ---------------------------------------------------------------- sharing maps
+# A map travels as a map code (text, see map_share.gd), copied to the clipboard
+# and shown as a QR code. Pasting one shows the map first; it's only kept or
+# played when the player says so, and it's checked with read_map() like any map.
+
+# Ctrl+V in the map lists or the editor: paste a map code (not while typing in a box).
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_V \
+			and event.is_command_or_control_pressed() and get_viewport().gui_get_focus_owner() == null \
+			and ((menu_open and pick_open and not editing) or (editing and not menu_open)):
+		import_code(DisplayServer.clipboard_get())
+		get_viewport().set_input_as_handled()
+		return
+	super(event)
+
+
+# A saved map's share button.
+func share_saved_map(n: String) -> void:
+	var rows := load_map_rows(n)
+	var check := read_map(rows)
+	if check.has("error"):
+		flash("Can't share %s: %s" % [n, check.error])
+		return
+	open_share(n, rows)
+
+
+# Copies the map's code and opens the share box with its QR code.
+func open_share(title: String, rows: Array) -> void:
+	share_code = MapShare.map_to_code(title, rows)
+	DisplayServer.clipboard_set(share_code)
+	share_qr = MapShare.qr_grid(share_code)
+	share_tex = qr_texture(share_qr)
+	share_title = title
+	share_size = Vector2i(String(rows[0]).length(), rows.size())
+	share_open = true
+	paste_map = {}
+	map_name_input.release_focus()
+	share_at = Time.get_ticks_msec()
+	flash("Map code copied")
+
+
+# The QR code as a texture, made once: a white edge of 4 modules around it, each
+# module a square of whole pixels (as big as fits SHARE_QR), so it stays sharp.
+func qr_texture(grid: Array) -> ImageTexture:
+	var n := grid.size()
+	if n == 0:
+		return null
+	var side := n + 8
+	var img := Image.create(side, side, false, Image.FORMAT_L8)
+	img.fill(Color.WHITE)
+	for y in n:
+		var row: PackedByteArray = grid[y]
+		for x in n:
+			if row[x] == 1:
+				img.set_pixel(x + 4, y + 4, Color.BLACK)
+	var k := maxi(floori(SHARE_QR.size.x / side), 1)
+	img.resize(side * k, side * k, Image.INTERPOLATE_NEAREST)
+	return ImageTexture.create_from_image(img)
+
+
+# A pasted map code: checked, then shown in the preview box.
+func import_code(code: String) -> void:
+	var d := MapShare.code_to_map(code)
+	if d.has("error"):
+		flash(d.error)
+		return
+	var check := read_map(d.rows)
+	if check.has("error"):
+		flash("Can't use this map: " + check.error)
+		return
+	var title := clean_map_name(d.name)
+	if bad_map_name(title) != "":
+		title = "Shared map"
+	share_open = false
+	map_name_input.release_focus()
+	var info := [["Map", title, Color(1, 0.85, 0.3)]]
+	info.append_array(map_facts(d.rows, check))
+	var have := find_map(d.rows)
+	info.append(["Your maps", "Already there, as " + have if have != "" else "Not yet", UI_TEXT if have != "" else UI_GREY])
+	paste_map = {"name": title, "rows": d.rows, "check": check, "info": info}
+	share_at = Time.get_ticks_msec()
+
+
+func draw_share_boxes() -> void:
+	if share_open:
+		draw_share_box()
+	elif not paste_map.is_empty():
+		draw_paste_box()
+
+
+func draw_share_box() -> void:
+	var b := SHARE_BOX
+	hud.draw_rect(screen_rect(), Color(0, 0, 0, 0.5))
+	ui_box(b)
+	var title := "SHARE MAP"
+	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 34).x
+	ui_title(Rect2(b.position.x, b.position.y, b.size.x, 60), Vector2((SCREEN_W - tw) / 2.0, b.position.y + 44), title, 34)
+	# The QR code on white, in the middle of its room
+	if share_tex != null:
+		var s := share_tex.get_size()
+		var at := (SHARE_QR.position + (SHARE_QR.size - s) / 2.0).floor()
+		hud.draw_rect(Rect2(at, s).grow(3), UI_GOLD_DARK)
+		hud.draw_texture_rect(share_tex, Rect2(at, s), false)
+	else:
+		recess(SHARE_QR)
+		hud.draw_multiline_string(font, SHARE_QR.position + Vector2(20, 140), "This map is too big for a QR code. Send the code instead: it's copied.", HORIZONTAL_ALIGNMENT_CENTER, SHARE_QR.size.x - 40, 15, 3, UI_GREY)
+	var y := SHARE_QR.end.y + 30
+	centered(y, fit_text("%s   %d x %d tiles" % [share_title, share_size.x, share_size.y], b.size.x - 40, 17), 17, Color(1, 0.85, 0.3))
+	# The code, shortened, in a sunken strip
+	var strip := Rect2(b.position.x + 30, y + 14, b.size.x - 60, 30)
+	recess(strip)
+	var shown := share_code if share_code.length() <= 34 else share_code.left(20) + "..." + share_code.right(10)
+	text(strip.position + Vector2(10, 21), shown, 15, UI_TEXT)
+	right_text(Vector2(strip.end.x - 10, strip.position.y + 21), "%d letters" % share_code.length(), 13, UI_DIM)
+	var note := recent_message() if flash_ms >= share_at else ""
+	if note == "" or note == "Map code copied":
+		note = "Copied! Paste it in a map list (Ctrl+V), or scan the QR code."
+	centered(SHARE_COPY.position.y - 12, fit_text(note, b.size.x - 30, 14), 14, UI_GREY)
+	button(SHARE_COPY, "Copy again", true, true)
+	button(SHARE_CLOSE, "Close (Esc)")
+
+
+func draw_paste_box() -> void:
+	var b := PASTE_BOX
+	hud.draw_rect(screen_rect(), Color(0, 0, 0, 0.5))
+	ui_box(b)
+	var title := "SHARED MAP"
+	var tw := title_font.get_string_size(title, HORIZONTAL_ALIGNMENT_LEFT, -1, 34).x
+	ui_title(Rect2(b.position.x, b.position.y, b.size.x, 60), Vector2((SCREEN_W - tw) / 2.0, b.position.y + 44), title, 34)
+	centered(b.position.y + 86, "A map from a map code. Have a look before you keep or play it:", 16, UI_GREY)
+	recess(JOIN_PREVIEW.grow(4))
+	draw_map_preview(paste_map.rows, JOIN_PREVIEW)
+	draw_map_info(paste_map.info)
+	var note := recent_message() if flash_ms >= share_at else ""
+	if note != "":
+		centered(JOIN_PREVIEW.end.y + 32, fit_text(note, b.size.x - 40, 15), 15, Color(1, 1, 0.6))
+	else:
+		hud.draw_multiline_string(font, Vector2(340, JOIN_PREVIEW.end.y + 24), "Only the map's tiles come with a code. Your game checks them and builds the map itself.", HORIZONTAL_ALIGNMENT_LEFT, 600, 14, 2, UI_GREY)
+	button(PASTE_SAVE, "Save to my maps")
+	button(PASTE_PLAY, "Play it", editing or can_pick_map(), true)
+	button(PASTE_CANCEL, "Cancel (Esc)")
+
+
+func share_boxes_click(p: Vector2) -> void:
+	if share_open:
+		if SHARE_COPY.has_point(p):
+			DisplayServer.clipboard_set(share_code)
+			flash("Map code copied")
+		elif SHARE_CLOSE.has_point(p) or not SHARE_BOX.has_point(p):
+			share_open = false
+		return
+	if paste_map.is_empty():
+		return
+	if PASTE_CANCEL.has_point(p) or not PASTE_BOX.has_point(p):
+		paste_map = {}
+	elif PASTE_SAVE.has_point(p):
+		var had := find_map(paste_map.rows)
+		var n := store_map(paste_map.name, paste_map.rows)
+		if n == "":
+			flash("Couldn't save the map")
+		elif had != "":
+			flash("You already have this map as %s" % n)
+		else:
+			flash("Saved as %s" % n)
+			paste_map.info[-1] = ["Your maps", "Already there, as " + n, UI_TEXT]
+			if pick_open:
+				ed_list = ["Default"] + saved_maps()
+			elif ed_list_open:
+				ed_list = ["Default"] + saved_maps()
+	elif PASTE_PLAY.has_point(p):
+		play_pasted()
+
+
+# The pasted map's Play: kept in the map list, then played like a map picked in
+# the Esc menu (in the editor: like its Play button).
+func play_pasted() -> void:
+	if editing:
+		if ed_changed and not ed_sure("Play pasted", "Not saved yet: click Play again to leave the editor anyway"):
+			return
+	elif not can_pick_map():
+		var why := pick_block_reason()
+		flash(why if why != "" else "Only the host can change the map")
+		return
+	var rows: Array = paste_map.rows
+	var check: Dictionary = paste_map.check
+	var n := store_map(paste_map.name, rows)
+	if n == "":
+		n = paste_map.name
+	paste_map = {}
+	if editing:
+		close_editor(rows, n)
+		return
+	pick_open = false
+	use_map(check, n)
+	build_map()
+	var open := menu_open
+	new_game()
+	menu_open = open
+	flash("Map: %s" % n)
+
+
+# Two little nodes joined to a third, the usual share mark.
+func icon_share(c: Vector2, col: Color) -> void:
+	var a := c + Vector2(-6, 0)
+	var b := c + Vector2(5, -6)
+	var d := c + Vector2(5, 6)
+	for pass_i in 2:
+		var lc := Color(0, 0, 0, 0.7) if pass_i == 0 else col
+		var w := 3.5 if pass_i == 0 else 1.8
+		hud.draw_line(a, b, lc, w)
+		hud.draw_line(a, d, lc, w)
+	for q in [a, b, d]:
+		hud.draw_circle(q, 3.6, Color(0, 0, 0, 0.7))
+		hud.draw_circle(q, 2.7, col)

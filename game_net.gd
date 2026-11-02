@@ -182,6 +182,28 @@ func check_wave_votes() -> bool:
 	return false
 
 
+func new_game() -> void:
+	pass
+
+
+# Saved games (main.gd has the real ones): a loaded game's saved player slots.
+func saved_slot_for(_their_name: String) -> int:
+	return -1
+
+
+func restore_saved_player(_p: Player) -> bool:
+	return false
+
+
+func held_text() -> String:
+	return ""
+
+
+# game_ui.gd has the real one (gold as "12.3K").
+func short(n: float) -> String:
+	return str(int(n))
+
+
 # map_editor.gd has the real one: saves a map from the host in the player's map list.
 func keep_map(_title: String, _rows: Array) -> void:
 	pass
@@ -479,7 +501,7 @@ func _on_games_listed(result: int, code: int, _headers: PackedStringArray, body:
 # Each board is named after the last wave, this number and the difficulty level
 # ("300w-3-hard"): raise the number after a balance change, so new scores aren't
 # mixed with ones from the old rules. Each level has its own board (and stats).
-const BOARD_SEASON := 3  # 2: tower specializations, 3: difficulty levels
+const BOARD_SEASON := 4  # 2: tower specializations, 3: difficulty levels, 4: abilities and endless mode
 const BOARD_ROWS := 10
 
 var board_open := false  # the leaderboard box in the Esc menu
@@ -496,8 +518,16 @@ var score_sent := false
 var score_http: HTTPRequest
 
 
-func board_id(level := -1) -> String:
+# The board a game's score goes on: "300w-4-hard", "endless-4-hard" for a run
+# kept going in endless mode (see keep_going() in main.gd), or "daily-2026-11-02"
+# for the daily challenge. endless_board: -1 follows the game (daily, endless),
+# 0 the normal board, 1 the endless board.
+func board_id(level := -1, endless_board := -1) -> String:
 	var d := difficulty if level < 0 else level
+	if endless_board < 0 and daily_date != "":
+		return daily_board_id(daily_date)
+	if endless_board == 1 or (endless_board < 0 and endless):
+		return "endless-%d-%s" % [BOARD_SEASON, DIFFICULTIES[d].to_lower()]
 	return "%dw-%d-%s" % [MAX_WAVE, BOARD_SEASON, DIFFICULTIES[d].to_lower()]
 
 
@@ -531,8 +561,12 @@ func scores_allowed() -> bool:
 
 
 func submit_score() -> void:
-	# Only the Default map: on a map of your own the waves can be made easy
-	if relay_url == "" or map_rows_text != DEFAULT_MAP or score_http != null or not scores_allowed():
+	# A loaded game never goes on a leaderboard (it could be loaded again and again)
+	if from_save:
+		return
+	# Only the Default map or the day's daily map: on a map of your own the waves can be made easy
+	var map_ok: bool = map_rows_text == DEFAULT_MAP if daily_date == "" else map_rows_text == daily_map(daily_date).text
+	if relay_url == "" or not map_ok or score_http != null or not scores_allowed():
 		return
 	var names := []
 	for p in players:
@@ -549,7 +583,9 @@ func submit_score() -> void:
 		if p != null:
 			gold_left += p.gold
 	var stats := {"tower_gold": tower_gold, "gold_left": gold_left, "top_level": top_level, "speed": game_speed}
-	var body := JSON.stringify({"board": board_id(), "names": names, "wave": wave, "won": state == "won", "ms": int(run_time * 1000.0), "stats": stats})
+	# An endless run can't be won: it goes on its own board, ranked by the wave reached
+	var won := state == "won" and not endless
+	var body := JSON.stringify({"board": board_id(), "names": names, "wave": wave, "won": won, "ms": int(run_time * 1000.0), "stats": stats})
 	score_http = HTTPRequest.new()
 	score_http.timeout = 10.0
 	add_child(score_http)
@@ -568,9 +604,10 @@ func _on_score_sent(result: int, code: int, _headers: PackedStringArray, body: P
 		return
 	board_asked = -100.0  # show the new list next time
 	board_saved.erase(difficulty)
-	var text := "You're #%d on the leaderboard!" % int(r.rank)
+	var list := "daily leaderboard" if daily_date != "" else ("endless leaderboard" if endless else "leaderboard")
+	var text := "You're #%d on the %s!" % [int(r.rank), list]
 	if player_count() > 1:
-		text = "Your team is #%d on the leaderboard!" % int(r.rank)
+		text = "Your team is #%d on the %s!" % [int(r.rank), list]
 	flash(text)
 	send_all("net_message", [text])
 
@@ -631,7 +668,8 @@ func load_board() -> void:
 	board_http.timeout = 8.0
 	add_child(board_http)
 	board_http.request_completed.connect(_on_board_loaded)
-	var url := relay_url + "/scores?board=%s&me=%s" % [board_id(board_level), my_name().to_lower().uri_encode()]
+	# The box shows the normal boards (it has no endless tab yet)
+	var url := relay_url + "/scores?board=%s&me=%s" % [board_id(board_level, 0), my_name().to_lower().uri_encode()]
 	if board_http.request(url) != OK:
 		_on_board_loaded(HTTPRequest.RESULT_CANT_CONNECT, 0, PackedStringArray(), PackedByteArray())
 
@@ -658,6 +696,304 @@ func _on_board_loaded(result: int, code: int, _headers: PackedStringArray, body:
 		board_me.rank = int(r.me.get("rank", 0)) if r.me.get("rank") is float else 0
 	board_saved[board_level] = [board_asked, board_top, board_me]
 	board_status = "Nobody is on the leaderboard yet. Be the first!" if board_top.is_empty() else ""
+
+
+# ----- daily challenge (the rules and random numbers are in game_base.gd)
+
+const DAILY_BLOCK := 3  # map tiles per block: the loop's parallel lines are this far apart
+const DAILY_MARGIN := 3  # tiles around the loop, for the gates' roads
+var daily_maps := {}  # date -> read_map() result, worked out once
+
+
+func daily_board_id(date: String) -> String:
+	return "daily-" + date
+
+
+func daily_title(date: String) -> String:
+	return "Daily " + date
+
+
+# The day's map, checked by read_map() like any map (the Default map if the
+# maker never found a good one, which didn't happen in 60 days of tests).
+func daily_map(date: String) -> Dictionary:
+	if not daily_maps.has(date):
+		var rows := daily_map_rows(date)
+		var m := read_map(rows)
+		daily_maps[date] = m if not m.has("error") else read_map(DEFAULT_MAP)
+	return daily_maps[date]
+
+
+# The day's map as rows of letters (see DEFAULT_MAP): a rectangle of blocks with
+# notches cut from its sides, whose outline is the loop; four gates on short
+# straight roads, one per quarter of the loop; a few rocks and trees. Maps where
+# one player's area has much less room to build than another's are made again.
+func daily_map_rows(date: String) -> Array:
+	daily_seed("gtd-daily-map-%d-%s" % [DAILY_VERSION, date])
+	for attempt in 40:
+		var rows := daily_try_map()
+		if rows.is_empty():
+			continue
+		var m := read_map(rows)
+		if m.has("error"):
+			continue
+		var room := [0, 0, 0, 0]
+		for c: Vector2i in m.areas:
+			if m.areas[c] >= 0 and not m.path.has(c) and not m.blocked.has(c):
+				room[m.areas[c]] += 1
+		if room.min() >= room.max() * 0.6:
+			return rows
+	return DEFAULT_MAP.duplicate()
+
+
+func daily_try_map() -> Array:
+	var s := DAILY_BLOCK
+	var bw := daily_roll(6, 9)
+	var bh := daily_roll(4, 6)
+	var blocks := {}
+	for i in bw:
+		for j in bh:
+			blocks[Vector2i(i, j)] = true
+	for n in daily_roll(2, 5):
+		var w := daily_roll(1, 3)
+		var h := daily_roll(1, 2)
+		var r: Rect2i
+		match daily_roll(0, 3):
+			0: r = Rect2i(daily_roll(1, bw - 1 - w), 0, w, h)  # top
+			1: r = Rect2i(daily_roll(1, bw - 1 - w), bh - h, w, h)  # bottom
+			2: r = Rect2i(0, daily_roll(1, bh - 1 - h), h, w if w < bh - 1 else 1)  # left
+			_: r = Rect2i(bw - h, daily_roll(1, bh - 1 - h), h, w if w < bh - 1 else 1)  # right
+		for i in range(r.position.x, r.end.x):
+			for j in range(r.position.y, r.end.y):
+				blocks.erase(Vector2i(i, j))
+	var cols := bw * s + 1 + 2 * DAILY_MARGIN
+	var rows_n := bh * s + 1 + 2 * DAILY_MARGIN
+	var grid := []
+	for y in rows_n:
+		var row := []
+		row.resize(cols)
+		row.fill(".")
+		grid.append(row)
+	# The outline: every block side with no block beyond it
+	for b: Vector2i in blocks:
+		var x0 := DAILY_MARGIN + b.x * s
+		var y0 := DAILY_MARGIN + b.y * s
+		for k in s + 1:
+			if not blocks.has(b + Vector2i(0, -1)):
+				grid[y0][x0 + k] = "#"
+			if not blocks.has(b + Vector2i(0, 1)):
+				grid[y0 + s][x0 + k] = "#"
+			if not blocks.has(b + Vector2i(-1, 0)):
+				grid[y0 + k][x0] = "#"
+			if not blocks.has(b + Vector2i(1, 0)):
+				grid[y0 + k][x0 + s] = "#"
+	var first := Vector2i(-1, -1)
+	var count := 0
+	for y in rows_n:
+		for x in cols:
+			if grid[y][x] == "#":
+				count += 1
+				if first.x < 0:
+					first = Vector2i(x, y)
+	if count < 20:
+		return []
+	var ring := daily_walk(grid, first)
+	if ring.size() != count:
+		return []  # a pinch or a hole: not one simple loop
+	var q := ring.size() / 4
+	var offset := daily_roll(0, ring.size() - 1)
+	for g in MAX_PLAYERS:
+		var placed := false
+		for k in q:
+			var c: Vector2i = ring[(offset + g * q + daily_roll(0, q - 1)) % ring.size()]
+			if daily_gate(grid, c, g, daily_roll(2, 3)):
+				placed = true
+				break
+		if not placed:
+			return []
+	# Rocks and trees on some grass away from the path
+	for y in rows_n:
+		for x in cols:
+			if grid[y][x] == "." and not daily_near_path(grid, Vector2i(x, y)) and daily_roll(0, 99) < 5:
+				grid[y][x] = "r" if daily_roll(0, 2) == 0 else "t"
+	var out := []
+	for row: Array in grid:
+		out.append("".join(row))
+	return out
+
+
+func daily_at(grid: Array, c: Vector2i) -> String:
+	if c.y < 0 or c.y >= grid.size() or c.x < 0 or c.x >= grid[0].size():
+		return "X"
+	return grid[c.y][c.x]
+
+
+# The loop's tiles in order, from start.
+func daily_walk(grid: Array, start: Vector2i) -> Array:
+	var ring := [start]
+	var prev := start
+	var cur := start
+	while ring.size() < 5000:
+		var nxt := cur
+		for d: Vector2i in DIRS:
+			if cur + d != prev and daily_at(grid, cur + d) == "#":
+				nxt = cur + d
+				break
+		if nxt == start or nxt == cur:
+			break
+		ring.append(nxt)
+		prev = cur
+		cur = nxt
+	return ring
+
+
+func daily_near_path(grid: Array, c: Vector2i) -> bool:
+	for d: Vector2i in DIRS:
+		if daily_at(grid, c + d) in ["#", "1", "2", "3", "4"]:
+			return true
+	return false
+
+
+# A straight road of `length` tiles from loop tile c, away from the loop, with
+# gate g at its end; nothing else may touch the road.
+func daily_gate(grid: Array, c: Vector2i, g: int, length: int) -> bool:
+	for d: Vector2i in DIRS:
+		var cells := []
+		var ok := true
+		for k in range(1, length + 1):
+			var t: Vector2i = c + d * k
+			if daily_at(grid, t) != ".":
+				ok = false
+				break
+			for e: Vector2i in DIRS:
+				var n: Vector2i = t + e
+				if n != t - d and daily_at(grid, n) not in [".", "X"]:
+					ok = false
+			cells.append(t)
+		if ok:
+			for k in cells.size():
+				grid[cells[k].y][cells[k].x] = str(g + 1) if k == cells.size() - 1 else "#"
+			return true
+	return false
+
+
+# Starts the daily challenge (date "": today) alone, or as the host before anyone
+# joined, before wave 1 (the Esc menu checks that, like picking a map). The day's
+# level is set, and the map is built. Returns a message for the player.
+func start_daily(date := "") -> String:
+	if date == "":
+		date = daily_today()
+	if net_mode not in ["", "host"] or (net_mode == "host" and player_count() > 1):
+		return "The daily challenge can only start while nobody has joined"
+	use_map(daily_map(date), daily_title(date))
+	build_map()
+	daily_date = date
+	var rules := daily_rules(date)
+	difficulty = rules.level
+	new_game()
+	send_difficulty()
+	send_all("net_set_daily", [date])
+	return "Daily challenge %s (%s): %s. %s" % [date, DIFFICULTIES[difficulty], rules.name, rules.desc]
+
+
+# The host's daily challenge (its date), when we join a game playing one. Only
+# used when our map (from the host) really is that day's map. Its name sorts
+# after net_refused (see net_say).
+@rpc("authority", "call_remote", "reliable")
+func net_set_daily(date: Variant) -> void:
+	if net_mode != "client" or not date is String:
+		return
+	if date == "":
+		daily_date = ""
+	elif date.length() == 10 and date.substr(4, 1) == "-" and date.substr(7, 1) == "-" \
+			and date.replace("-", "").is_valid_int() and map_rows_text == daily_map(date).text:
+		daily_date = date
+
+
+# ----- pings (Alt + click on the map, see show_ping())
+
+var ping_budget := [PING_BURST, PING_BURST, PING_BURST, PING_BURST]  # host: pings each player may still send
+var ping_budget_time := [0.0, 0.0, 0.0, 0.0]
+var ping_warned := [false, false, false, false]  # host: told to slow down since their last ping
+
+
+# This player pings pos (map pixels, like mouse_point()).
+func send_ping(pos: Vector2) -> void:
+	match net_mode:
+		"client":
+			net_request.rpc_id(1, "ping", [pos])
+		"host":
+			host_ping(local_slot, pos)
+		"":
+			show_ping(local_slot, pos)  # alone: only here
+
+
+# Host: a player's ping, shown to everyone unless they ping too fast.
+func host_ping(slot: int, pos: Vector2) -> void:
+	if players[slot] == null or not pos.is_finite() or not Rect2(0, 0, map_cols * CELL, map_rows * CELL).has_point(pos):
+		return
+	var now := Time.get_ticks_msec() / 1000.0
+	var budget: float = minf(ping_budget[slot] + (now - ping_budget_time[slot]) / PING_REFILL, PING_BURST)
+	ping_budget_time[slot] = now
+	if budget < 1.0:
+		ping_budget[slot] = budget
+		if not ping_warned[slot]:
+			ping_warned[slot] = true
+			note_to(slot, "Slow down, you're pinging too fast")
+		return
+	ping_budget[slot] = budget - 1.0
+	ping_warned[slot] = false
+	show_ping(slot, pos)
+	send_all("net_show_ping", [slot, pos])
+
+
+# Its name sorts after net_refused (see net_say).
+@rpc("authority", "call_remote", "reliable")
+func net_show_ping(slot: Variant, pos: Variant) -> void:
+	if net_mode != "client" or not (slot is int and pos is Vector2) or slot < 0 or slot >= MAX_PLAYERS or not pos.is_finite():
+		return
+	show_ping(slot, pos)
+
+
+# Host: a message for one player (flash on their screen).
+func note_to(slot: int, text: String) -> void:
+	if players[slot] == null:
+		return
+	if slot == local_slot:
+		flash(text)
+	else:
+		net_message.rpc_id(players[slot].peer, text)
+
+
+# ----- gifts (perform("gift") in main.gd calls gift_gold())
+
+var gift_time := [-100.0, -100.0, -100.0, -100.0]  # host: when each player last gave gold
+
+
+# Host: player `slot` gives `amount` gold to player `to`. Returns a message for
+# the giver if it can't be done, or "". Everyone sees it in the chat, and the
+# stats count it apart from gold earned and spent (stat_gifted).
+func gift_gold(slot: int, to: int, amount: int) -> String:
+	if state != "playing" or slot < 0 or slot >= MAX_PLAYERS or players[slot] == null:
+		return ""
+	if to < 0 or to >= MAX_PLAYERS or to == slot or players[to] == null:
+		return "That player isn't in the game"
+	if amount < 1 or amount > players[slot].gold:
+		return "Not enough gold"
+	var now := Time.get_ticks_msec() / 1000.0
+	if now - gift_time[slot] < GIFT_WAIT:
+		return "Wait a moment before giving gold again"
+	amount = mini(amount, GOLD_MAX - players[to].gold)
+	if amount < 1:
+		return "%s can't carry more gold" % name_of(to)
+	gift_time[slot] = now
+	players[slot].gold -= amount
+	players[to].gold += amount
+	stat_gifted[slot] -= amount
+	stat_gifted[to] += amount
+	chat_note("%s gave %s gold to %s" % [name_of(slot), short(amount), name_of(to)])
+	note_to(to, "%s gave you %s gold!" % [name_of(slot), short(amount)])
+	note_to(slot, "You gave %s gold to %s" % [short(amount), name_of(to)])
+	return ""
 
 
 # Host: the difficulty level changed (see set_difficulty() in main.gd).
@@ -957,6 +1293,7 @@ func send_tower(t: Tower) -> void:
 # it covers, so the players can tell which monsters are gone even when one of
 # the messages doesn't arrive. The game server has no such limit: one message.
 func send_snapshot() -> void:
+	send_held()
 	var golds := []
 	for p in players:
 		golds.append(p.gold if p != null else 0)
@@ -978,17 +1315,66 @@ func send_snapshot() -> void:
 		for i in range(start, end):
 			var e := enemies[i]
 			data.encode_u16(at, e.id - base)
-			# Positions in 1/32 pixels, health as a share of full health
-			data.encode_u16(at + 2, clampi(roundi(e.pos.x * 32.0), 0, 65535))
-			data.encode_u16(at + 4, clampi(roundi(e.pos.y * 32.0), 0, 65535))
-			data.encode_u16(at + 6, clampi(roundi(e.hp / e.max_hp * 65535.0), 0, 65535))
-			data[at + 8] = ENEMY_KINDS.find(e.kind) | (128 if e.slow_time > 0.0 else 0) | (64 if e.freeze_time > 0.0 else 0)
+			encode_monster(data, at + 2, e)
+			e.sent = true
 			at += 9
 		# The wave, timer and gold only go with the first message
 		send_all("net_snapshot", [info if start == 0 else [], data])
 		start = end
 		if start >= enemies.size():
 			break
+
+
+# A monster's 7 bytes in snapshots: x and y in 1/32 pixels (u16 each), health
+# as a share of full health (u16), and one byte: its kind (bits 0-1), its trait
+# and shield (bits 2-4, see special_bits()), 32 when it got past (for the
+# replay), 64 when it's frozen, 128 when it's slowed. That byte is full: being
+# poisoned isn't sent (it would cost a 10th byte per monster).
+func encode_monster(data: PackedByteArray, at: int, e: Enemy) -> void:
+	data.encode_u16(at, clampi(roundi(e.pos.x * 32.0), 0, 65535))
+	data.encode_u16(at + 2, clampi(roundi(e.pos.y * 32.0), 0, 65535))
+	data.encode_u16(at + 4, clampi(roundi(e.hp / e.max_hp * 65535.0), 0, 65535))
+	data[at + 6] = ENEMY_KINDS.find(e.kind) | special_bits(e) | (32 if got_past(e) else 0) \
+			| (64 if e.freeze_time > 0.0 else 0) | (128 if e.slow_time > 0.0 else 0)
+
+
+# Players: a monster from its 7 bytes (see encode_monster), made if it's new.
+func decode_monster(id: int, data: PackedByteArray, at: int) -> Enemy:
+	var p := Vector2(data.decode_u16(at), data.decode_u16(at + 2)) / 32.0
+	var e: Enemy = enemy_by_id.get(id)
+	if e == null:
+		e = make_enemy(ENEMY_KINDS[data[at + 6] & 3])
+		e.id = id
+		e.pos = p
+		# Its trait (splitter, splitling, healer); splitlings are smaller, like on the host
+		apply_special_bits(e, data[at + 6])
+		if e.special == "splitling":
+			e.radius *= 0.75
+		enemies.append(e)
+		enemy_by_id[id] = e
+	e.net_pos = p
+	e.max_hp = 1.0
+	e.hp = data.decode_u16(at + 4) / 65535.0
+	e.slow_time = 1.0 if data[at + 6] & 128 else 0.0
+	e.freeze_time = 1.0 if data[at + 6] & 64 else 0.0
+	e.past = (data[at + 6] & 32) != 0
+	# Whether its shield is up (it breaks and regrows on the host)
+	apply_special_bits(e, data[at + 6])
+	return e
+
+
+# Host: tells the other players tower t shot at monster e. A monster that no
+# snapshot has had yet (it just came out of its gate) comes with the shot, or
+# the players wouldn't know it and would drop the shot (a Sniper by a gate kills
+# most of its targets before the next snapshot).
+func send_shot(t: Tower, e: Enemy) -> void:
+	if e.sent:
+		send_all("net_shot", [t.cell, e.id])
+		return
+	var rec := PackedByteArray()
+	rec.resize(7)
+	encode_monster(rec, 0, e)
+	send_all("net_shot_new", [t.cell, e.id, rec])
 
 
 # ----- messages from a player to the host
@@ -1015,7 +1401,10 @@ func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant) -
 	var peer := multiplayer.get_remote_sender_id()
 	if not joining.has(peer) or not (their_name is String and their_map is String and confirmed is bool):
 		return
-	var slot := free_slot()
+	# A loaded game: the slot saved with their name (or another saved one) first
+	var slot := saved_slot_for(their_name)
+	if slot < 0:
+		slot = free_slot()
 	if slot < 0:
 		joining.erase(peer)
 		var n := map_slots()
@@ -1036,25 +1425,42 @@ func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant) -
 	p.peer = peer
 	p.slot = slot
 	p.name = unique_name(their_name, slot)
-	# Joining late: half the gold the others could have earned by now (at least the start gold)
-	p.gold = maxi(start_gold(), int(gold_before_wave(wave) / 2.0))
 	players[slot] = p
-	# The stats start fresh for this slot (an earlier player there is forgotten)
-	stat_kills[slot] = 0
-	stat_damage[slot] = 0.0
-	stat_start[slot] = p.gold
-	stat_earned[slot] = 0
-	stat_spent[slot] = 0
-	stat_names[slot] = p.name
+	# Back in a loaded game: their saved gold, cooldowns and stats
+	var restored := restore_saved_player(p)
+	if not restored:
+		# Joining late: half the gold the others could have earned by now (at least the start gold)
+		p.gold = maxi(start_gold(), int(gold_before_wave(wave) / 2.0))
+		# The stats start fresh for this slot (an earlier player there is forgotten)
+		stat_kills[slot] = 0
+		stat_damage[slot] = 0.0
+		stat_start[slot] = p.gold
+		stat_earned[slot] = 0
+		stat_spent[slot] = 0
+		stat_gifted[slot] = 0
+		stat_names[slot] = p.name
+	gift_time[slot] = -100.0
+	ping_budget[slot] = PING_BURST
 	net_welcome.rpc_id(peer, slot, mine)
 	net_set_difficulty.rpc_id(peer, difficulty)
+	if endless:
+		net_set_endless.rpc_id(peer, true)
+	if daily_date != "":
+		net_set_daily.rpc_id(peer, daily_date)
 	for t: Tower in towers.values():
 		net_tower.rpc_id(peer, t.cell, t.type, t.level, t.owner, t.spent, t.mode, t.path)
 	# Joining a game that just ended: its stats too
 	if not end_stats.is_empty():
 		net_stats.rpc_id(peer, end_stats)
 	send_players()
-	chat_note("%s joined the game" % p.name)
+	# After the player list (which starts a new player's cooldowns empty)
+	if restored and not p.cooldowns.is_empty():
+		send_all("net_set_cooldowns", [slot, p.cooldowns])
+	# A loaded game on hold: the newcomer gets the hold, everyone the new "waiting for"
+	if held:
+		net_set_held.rpc_id(peer, true, held_text())
+	send_held()
+	chat_note("%s is back" % p.name if restored else "%s joined the game" % p.name)
 
 
 @rpc("any_peer", "call_remote", "reliable")
@@ -1067,6 +1473,9 @@ func net_request(action: String, args: Array) -> void:
 			# Chat is for the network, not the game rules
 			if action == "chat" and args.size() == 1 and args[0] is String:
 				host_chat(p.slot, args[0])
+				return
+			if action == "ping" and args.size() == 1 and args[0] is Vector2:
+				host_ping(p.slot, args[0])
 				return
 			var error := perform(p.slot, action, args)
 			if error != "":
@@ -1123,6 +1532,7 @@ func net_welcome(slot: Variant, map: Variant) -> void:
 	map_offer = {}
 	net_mode = "client"
 	clear_world()
+	daily_date = ""  # the host says if it plays the daily challenge (net_set_daily)
 	if not rows.is_empty():
 		if own_map.is_empty():
 			own_map = [map_rows_text, map_name]
@@ -1155,16 +1565,19 @@ func net_refused(reason: String) -> void:
 func net_players(list: Array) -> void:
 	if net_mode != "client":
 		return
-	var golds := []
-	for p in players:
-		golds.append(p.gold if p != null else 0)
+	var old := players
 	players = [null, null, null, null]
 	for item in list:
 		var p := Player.new()
 		p.peer = item[0]
 		p.slot = item[1]
 		p.name = clean_text(str(item[2]), NAME_MAX)
-		p.gold = golds[p.slot]
+		var was: Player = old[p.slot]
+		if was != null:
+			p.gold = was.gold
+			# The same player keeps their ability cooldowns (a new one starts with none)
+			if was.peer == p.peer:
+				p.cooldowns = was.cooldowns
 		players[p.slot] = p
 
 
@@ -1185,6 +1598,83 @@ func net_set_difficulty(d: Variant) -> void:
 		show_board_level(d)
 	else:
 		board_level = d
+
+
+# Host: a player used an ability (see do_ability() in main.gd).
+func send_ability(slot: int, ability: String, at: Vector2) -> void:
+	send_all("net_used_ability", [slot, ability, at])
+
+
+# Host: the game keeps going in endless mode (see keep_going() in main.gd).
+func send_endless() -> void:
+	send_all("net_set_endless", [true])
+
+
+# A player used an ability: their cooldown starts here too, and it shows. The
+# damage and the freezing are the host's (the monsters come in the snapshots);
+# freeze_all() here only makes them stand still right away. Its name sorts
+# after net_refused (see net_say).
+@rpc("authority", "call_remote", "reliable")
+func net_used_ability(slot: Variant, ability: Variant, at: Variant) -> void:
+	if net_mode != "client" or not (slot is int and ability is String and at is Vector2 and ABILITIES.has(ability)):
+		return
+	if slot < 0 or slot >= MAX_PLAYERS or not at.is_finite():
+		return
+	start_cooldown(slot, ability)
+	show_ability(slot, ability, at)
+	if ability == "freeze":
+		freeze_all()
+
+
+# Endless mode, when the host keeps going after the last wave and when we join
+# a game in endless mode (net_reset turns it off). Its name sorts after net_refused.
+@rpc("authority", "call_remote", "reliable")
+func net_set_endless(on: Variant) -> void:
+	if net_mode != "client" or not on is bool:
+		return
+	endless = on
+	if on:
+		state = "playing"
+		end_stats = {}
+
+
+# ----- a loaded game on hold (see held_text() in main.gd)
+
+var held_sent := [false, ""]  # host: the hold and its text the players last got
+
+
+# Host, with every snapshot and when someone joins: tells the players when the
+# hold or who it waits for changed (a few messages per loaded game).
+func send_held() -> void:
+	var now := [held, held_text()]
+	if now != held_sent:
+		held_sent = now
+		send_all("net_set_held", now)
+
+
+# Whether the host's loaded game is on hold, and its "waiting for" line. Its
+# name sorts after net_refused (see net_say).
+@rpc("authority", "call_remote", "reliable")
+func net_set_held(on: Variant, note: Variant) -> void:
+	if net_mode != "client" or not (on is bool and note is String):
+		return
+	held = on
+	held_note = clean_text(note, 200) if on else ""
+	if on:
+		flash(held_note)
+
+
+# A player back in a loaded game: their saved ability cooldowns. Its name sorts
+# after net_refused (see net_say).
+@rpc("authority", "call_remote", "reliable")
+func net_set_cooldowns(slot: Variant, cools: Variant) -> void:
+	if net_mode != "client" or not (slot is int and cools is Dictionary) or slot < 0 or slot >= MAX_PLAYERS or players[slot] == null:
+		return
+	var clean := {}
+	for a: Variant in cools:
+		if a is String and ABILITIES.has(a) and (cools[a] is float or cools[a] is int):
+			clean[a] = clampf(float(cools[a]), 0.0, ABILITIES[a]["cooldown"])
+	players[slot].cooldowns = clean
 
 
 # A chat line for everyone (slot -1: from the game itself). Its name sorts after
@@ -1210,6 +1700,12 @@ func net_ask_closed(id: int) -> void:
 func net_reset() -> void:
 	clear_world()
 	reset_stats()
+	endless = false
+	held = false
+	held_note = ""
+	for p in players:
+		if p != null:
+			p.cooldowns = {}
 
 
 # The stats at the end of the game (see make_end_stats()), sent once by the host
@@ -1221,8 +1717,10 @@ func net_stats(stats: Variant) -> void:
 	# Only what the stats screen can show
 	var rows := []
 	for r: Variant in stats.get("players", []):
-		if r is Array and r.size() == 6 and r[0] is int and r[0] >= 0 and r[0] < MAX_PLAYERS:
-			rows.append([r[0], clean_text(str(r[1]), NAME_MAX), int(r[2]), float(r[3]), int(r[4]), int(r[5])])
+		# [slot, name, kills, damage, earned, spent, gifted] (gifted: received minus given)
+		if r is Array and (r.size() == 6 or r.size() == 7) and r[0] is int and r[0] >= 0 and r[0] < MAX_PLAYERS:
+			rows.append([r[0], clean_text(str(r[1]), NAME_MAX), int(r[2]), float(r[3]), int(r[4]), int(r[5]),
+					int(r[6]) if r.size() == 7 else 0])
 	var best := []
 	for r: Variant in stats.get("towers", []):
 		if r is Array and r.size() == 7 and TOWERS.has(r[0]) and r[1] is int and r[2] is int and r[3] is int \
@@ -1269,6 +1767,21 @@ func net_shot(cell: Vector2i, target_id: int) -> void:
 	var target: Enemy = enemy_by_id.get(target_id)
 	if t == null or target == null:
 		return
+	t.aim = (target.pos - t.pos).normalized()
+	launch_shot(t, target, true)
+
+
+# A shot at a monster that no snapshot has had yet: the monster comes with it
+# (its 7 bytes, see send_shot()). The next snapshot moves it, or takes it away
+# if it's already dead. Its name sorts after net_refused (see net_say).
+@rpc("authority", "call_remote", "unreliable_ordered")
+func net_shot_new(cell: Vector2i, target_id: int, rec: PackedByteArray) -> void:
+	if net_mode != "client" or rec.size() != 7 or target_id < 0:
+		return
+	var t: Tower = towers.get(cell)
+	if t == null:
+		return
+	var target := decode_monster(target_id, rec, 0)
 	t.aim = (target.pos - t.pos).normalized()
 	launch_shot(t, target, true)
 
@@ -1325,22 +1838,10 @@ func net_snapshot(info: Array, data: PackedByteArray) -> void:
 	# The first message also covers every id before its first monster
 	var from := 0 if not info.is_empty() else base
 	var seen := {}
-	for at in range(8, data.size(), 9):
+	for at in range(8, data.size() - 8, 9):
 		var id := base + data.decode_u16(at)
 		seen[id] = true
-		var p := Vector2(data.decode_u16(at + 2), data.decode_u16(at + 4)) / 32.0
-		var e: Enemy = enemy_by_id.get(id)
-		if e == null:
-			e = make_enemy(ENEMY_KINDS[data[at + 8] & 63])
-			e.id = id
-			e.pos = p
-			enemies.append(e)
-			enemy_by_id[id] = e
-		e.net_pos = p
-		e.max_hp = 1.0
-		e.hp = data.decode_u16(at + 6) / 65535.0
-		e.slow_time = 1.0 if data[at + 8] & 128 else 0.0
-		e.freeze_time = 1.0 if data[at + 8] & 64 else 0.0
+		decode_monster(id, data, at + 2)
 	# Monsters in this message's id range that the host no longer has were killed
 	for i in range(enemies.size() - 1, -1, -1):
 		var e := enemies[i]

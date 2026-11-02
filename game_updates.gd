@@ -156,19 +156,27 @@ func check_for_update() -> void:
 				restart_game(game_exe_path().get_base_dir().path_join(wanted), game_exe_path())
 				return
 			remove_other_versions()
-	request_releases()
-	# Look again from time to time while the game runs: the released game only,
-	# unless a test asks for it with --update-check-every=SECONDS
+	# Only the exported game with a window asks GitHub (at start and from time to
+	# time), so test runs, headless runs and runs from the project folder don't
+	# use up GitHub's request limit. --update-check turns it on anyway (for tests
+	# of the update feature), and so does --update-check-every=SECONDS.
 	var every := UPDATE_CHECK_EVERY
+	var asked := false
 	for arg in OS.get_cmdline_user_args():
-		if arg.begins_with("--update-check-every="):
+		if arg == "--update-check":
+			asked = true
+		elif arg.begins_with("--update-check-every="):
+			asked = true
 			every = maxf(arg.trim_prefix("--update-check-every=").to_float(), 1.0)
-	if every != UPDATE_CHECK_EVERY or (OS.has_feature("template") and DisplayServer.get_name() != "headless"):
-		var timer := Timer.new()
-		timer.wait_time = every
-		timer.timeout.connect(recheck_for_update)
-		add_child(timer)
-		timer.start()
+	if not asked and not (OS.has_feature("template") and DisplayServer.get_name() != "headless"):
+		return
+	request_releases()
+	# Look again from time to time while the game runs
+	var timer := Timer.new()
+	timer.wait_time = every
+	timer.timeout.connect(recheck_for_update)
+	add_child(timer)
+	timer.start()
 
 
 # Asks GitHub for the last releases. The answer comes later, in _on_update_checked.
