@@ -670,15 +670,64 @@ func update_camera(delta: float) -> void:
 		# Move slower when zoomed in, so it doesn't feel too fast up close
 		camera_pan += dir.normalized() * CAMERA_SPEED * zoom * delta
 		camera_pan = camera_pan.clamp(-camera_limit(), camera_limit())
+	# Zooming glides toward target_zoom (the tilt follows, see camera_offset()). After a
+	# scroll (zoom_camera()), the ground under the mouse stays under the mouse.
+	var anchored := zoom_anchored and absf(zoom - target_zoom) > 0.0005
+	var before := Vector3.ZERO
+	if anchored:
+		place_camera()
+		before = ground_at(zoom_anchor)
 	zoom = lerpf(zoom, target_zoom, 1.0 - exp(-12.0 * delta))
-	# Zooming slides the camera along the line it looks down, so the angle stays the same
-	var pan := Vector3(camera_pan.x, 0.0, camera_pan.y)
-	camera.position = camera_focus + pan + (camera_home - camera_focus) * zoom
-	camera.h_offset = CAMERA_H_OFFSET * zoom
+	place_camera()
+	if anchored:
+		var moved := before - ground_at(zoom_anchor)
+		camera_pan = (camera_pan + Vector2(moved.x, moved.z)).clamp(-camera_limit(), camera_limit())
+		place_camera()
+	else:
+		zoom_anchored = false
+		camera_pan = camera_pan.clamp(-camera_limit(), camera_limit())  # zooming out shrinks the limit
 
 
-func zoom_camera(steps: float) -> void:
-	target_zoom = clampf(target_zoom + steps * ZOOM_STEP, ZOOM_MIN, ZOOM_MAX)
+# Middle-mouse drag: the ground grabbed stays under the mouse. Minimap drag: the
+# camera looks where the mouse is on the small map.
+var view_drag := Vector3.ZERO  # the ground spot grabbed with the middle button
+var view_dragging := false
+var minimap_dragging := false
+
+
+# Mouse buttons and motion that move the camera (the game and the replay).
+# Returns true when the event was used.
+func camera_input(event: InputEvent) -> bool:
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_MIDDLE:
+		view_dragging = event.pressed
+		if event.pressed:
+			view_drag = ground_at(event.position)
+			zoom_anchored = false
+		return true
+	if event is InputEventMouseButton and event.button_index == MOUSE_BUTTON_LEFT and not event.pressed:
+		minimap_dragging = false
+		return false
+	if event is InputEventMouseMotion:
+		if view_dragging:
+			var moved := view_drag - ground_at(event.position)
+			camera_pan = (camera_pan + Vector2(moved.x, moved.z)).clamp(-camera_limit(), camera_limit())
+			place_camera()
+			return true
+		if minimap_dragging:
+			minimap_look(ui_mouse())
+			return true
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_H \
+			and not chatting() and not (get_viewport().gui_get_focus_owner() is LineEdit):
+		reset_camera(1.0)  # H: the whole map
+		return true
+	return false
+
+
+# A point on the minimap: the camera looks at that spot of the board.
+func minimap_look(p: Vector2) -> void:
+	var m := minimap_map()
+	var at := ((p - m.position) / m.size).clamp(Vector2.ZERO, Vector2.ONE) * Vector2(map_cols, map_rows)
+	look_at_ground(at)
 
 
 func update_spawning(dt: float) -> void:
@@ -1386,6 +1435,8 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo and (event.keycode == KEY_ENTER or event.keycode == KEY_KP_ENTER):
 		open_chat()
 		return
+	if camera_input(event):
+		return
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_RIGHT:
 			build_type = ""
@@ -1482,6 +1533,11 @@ func on_click(p: Vector2) -> void:
 		if ASK_NO_RECT.has_point(p):
 			answer_ask(false)
 			return
+	# The minimap: the camera looks there (drag to keep moving it; Alt + click pings)
+	if minimap_map().has_point(p):
+		minimap_dragging = true
+		minimap_look(p)
+		return
 	if over_panel(p):
 		# A level 4 tower of yours: the build row shows its 2 paths instead
 		if picking_path():
@@ -3004,8 +3060,15 @@ func play_events(list: Array) -> void:
 
 # The replay's keys: Space pause, Left / Right 5 seconds, F speed, click or
 # drag the timeline, V or Esc back to the stats, R play again, Enter chat.
-# WASD and the scroll wheel still move the camera.
+# WASD, the scroll wheel, middle drag, the minimap and H still move the camera.
 func replay_input(event: InputEvent) -> void:
+	if camera_input(event):
+		return
+	if event is InputEventMouseButton and event.pressed and event.button_index == MOUSE_BUTTON_LEFT \
+			and minimap_map().has_point(ui_mouse()):
+		minimap_dragging = true
+		minimap_look(ui_mouse())
+		return
 	if event is InputEventKey and event.pressed and not event.echo:
 		match event.keycode:
 			KEY_ESCAPE, KEY_V:

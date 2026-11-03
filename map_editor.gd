@@ -489,11 +489,15 @@ func ed_show() -> void:
 			routes.append([cell_center(gc), cell_center(to)])
 		loop_starts = [0, 0, 0, 0]
 		area_of = {}
+	var z := zoom
+	var tz := target_zoom
 	build_map()
+	# build_map() put the camera back at its start: put it where the player has it
+	zoom = z
+	target_zoom = tz
 	if same_size:
 		camera_pan = pan
-	# build_map() put the camera back at its start (no zoom, no pan): put it where the player has it
-	camera.position = camera_focus + Vector3(camera_pan.x, 0.0, camera_pan.y) + (camera_home - camera_focus) * zoom
+	place_camera()
 
 
 func update_visuals(delta: float) -> void:
@@ -660,7 +664,7 @@ func editor_input(event: InputEvent) -> void:
 				if ed_list_open:
 					ed_list_top = clampi(ed_list_top + step, 0, maxi(ed_list.size() - ED_LIST_ROWS, 0))
 				elif not ed_over_console(p):
-					target_zoom = clampf(target_zoom + step * ZOOM_STEP, ZOOM_MIN, ZOOM_MAX)
+					zoom_camera(step)
 	elif event is InputEventMouseMotion and ed_painting != 0:
 		if ed_over_console(p):
 			ed_drag_cell = NO_CELL

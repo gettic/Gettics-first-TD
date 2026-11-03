@@ -59,8 +59,10 @@ godot --path path/to/this/folder
 | **X** / **Delete** | Sell the selected tower (70% refund) |
 | **T** or the **Target** button | Change which monster the selected tower shoots (see [Towers](#towers)); not for the Barracks |
 | **Shift+T** or **Shift+click** Target | The same, for all your towers of that type |
-| **W A S D** | Move the camera |
-| **Scroll wheel** | Zoom in and out |
+| **W A S D** or **middle-mouse drag** | Move the camera |
+| **Scroll wheel** | Zoom in and out, toward the mouse. The closer you zoom, the lower the camera tilts |
+| **H** | Show the whole map |
+| **Click** or **drag** the small map | Move the camera there |
 | **Space** | Start the game / send the next wave early for bonus gold (see [Waves](#waves)) |
 | **F** | Game speed: 1×, 2×, 3×, 5× (in multiplayer only the host) |
 | **Z**, then **left-click** on the map | **Meteor** (see Abilities). **Z** again, **right-click** or **Esc** stops aiming |
@@ -93,6 +95,7 @@ godot --path path/to/this/folder
 | **Story cards** | On or Off (see [Story cards](#story-cards-and-the-chronicle)) |
 | **Weather** | Random or Always day (from the next game; see [Weather](#weather-and-festivals)) |
 | **Festivals** | On or Off (from the next game) |
+| **Camera start** | Overview (the whole map) or Close (zoomed in). A click also moves the camera there |
 
 ## Sound and music
 
@@ -211,7 +214,7 @@ The timeline shows how many monsters were alive (red near the limit), where each
 | **←** / **→** | Jump 5 seconds back / forward |
 | **F** | Speed: 0.5×, 1×, 2×, 4× |
 | **Click** or **drag** the timeline | Jump anywhere |
-| **W A S D**, scroll wheel | Move the camera |
+| **W A S D**, middle-mouse drag, scroll wheel, **H** | Move the camera, zoom, show the whole map |
 | **V** or **Esc** | Back to the stats |
 | **R** | Play again |
 
@@ -428,7 +431,8 @@ Good places to start:
 - `BUILTIN_MAPS` in `game_base.gd` lists the built-in maps by name (same letters as `DEFAULT_MAP`); `builtin_map_rows()` and `builtin_map_name()` look them up, and `map_list()`, `list_name()`, `list_rows()`, `is_builtin_name()` and `load_map_rows()` in `map_editor.gd` put them in the map lists.
 - Map sharing: `open_share()` and `import_code()` in `map_editor.gd` open the share box and read a pasted code; the code itself is in `map_share.gd`.
 - `PLAYER_COLORS` and `PLAYER_NAMES` list the 8 player colours and their names (the name is also used when a player has no name). `color_of()`, `color_name()` and `my_color()` in `game_base.gd` give a player's colour, `settle_colors()` and `pick_color()` in `game_net.gd` make sure no two players share one, and `draw_color_picker()` in `game_ui.gd` is the picker in the Profile box. `SILLY_NAMES` is the list of random names for players who leave the name box empty.
-- `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.
+- `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms. `CAMERA_TILT_FAR` and `CAMERA_TILT_NEAR` are the camera angles (degrees) at the normal view and the closest zoom; `camera_tilt()` blends them by zoom. `CAMERA_STARTS` holds the zoom for each **Camera start** choice (saved as `camera_start` under `[display]` in `settings.cfg`).
+- Camera helpers in `game_base.gd`: `camera_offset()` gives the camera's spot for a zoom, `place_camera()` puts the camera there, `reset_camera()` goes back to the start (or to a given zoom), `zoom_camera()` zooms toward the mouse, `look_at_ground()` moves the camera to a spot (the small map uses it) and `camera_limit()` is how far it may pan (less when zoomed in). Mouse drag and `H` are in `camera_input()` in `main.gd`.
 - `start_wave()` and `spawn_enemy()` in `main.gd` start each wave and give each monster kind its health, armor and gold.
 - `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting, haze and effects; `build_map()` the ground (painted grass and dirt, see `assets/shaders/ground.gdshader`) and the land around the board. Models get the painted look of `assets/shaders/painted.gdshader` (see `painted()`). `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Which model a tower level shows: `arrow_look()` and `ARROW_FROM` (Arrow), `kit_look()` and `KIT_FILES` (Cannon, Poison, Frost and Spark). Model files are in `assets/`, with their sources in `assets/CREDITS.md`.
 - Sound: `SOUNDS` (sound effects, files in `assets/sounds`), `MUSIC_LAYERS` and `MUSIC_MOODS` (music, 4 layers in `assets/music`) in `game_audio.gd`. `play_sound()` plays one. The volumes are saved in `settings.cfg` under `[audio]`.

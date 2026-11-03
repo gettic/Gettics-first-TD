@@ -22,9 +22,13 @@ const CAMERA_SPEED := 12.0  # tiles per second
 const CAMERA_LIMIT := Vector2(9.0, 7.0)  # how far the camera can move from its start
 const CAMERA_H_OFFSET := 0.0  # the map uses the full width now
 const CAMERA_V_OFFSET := -3.5  # shifts the view so the map sits above the bottom console
-const ZOOM_MIN := 0.35  # closest zoom (fraction of the starting distance)
+const ZOOM_MIN := 0.45  # closest zoom (fraction of the starting distance)
 const ZOOM_MAX := 1.3   # furthest zoom
 const ZOOM_STEP := 0.1  # how much one scroll-wheel notch zooms
+const CAMERA_DIST := 32.67  # the camera's distance at zoom 1 on the Default map (tiles)
+const CAMERA_TILT_FAR := 54.2   # degrees down from level at zoom 1 and further
+const CAMERA_TILT_NEAR := 47.0  # degrees at the closest zoom: lower, so towers show their sides
+const CAMERA_STARTS := {"overview": 1.0, "close": 0.6}  # the Settings choice: zoom when a map starts
 const MAX_WAVE := 300
 const MAX_LEVEL := 60  # endless in practice: level 30 already costs millions, level 60 about a trillion
 const WIN_TEXT := "GZ you have no life, go touch grass"  # shown when all waves are beaten
@@ -642,6 +646,9 @@ var camera_focus: Vector3       # the ground point the camera looks at when not 
 var camera_pan := Vector2.ZERO  # how far WASD has moved the camera
 var zoom := 1.0
 var target_zoom := 1.0
+var camera_start := "overview"  # a CAMERA_STARTS key (Settings, saved in settings.cfg)
+var zoom_anchor := Vector2.ZERO  # zooming: the screen point whose ground spot stays put
+var zoom_anchored := false
 var hud: Node2D
 var gate_parts: Array = []  # per gate: the portal pieces that only show while a player uses that gate
 var area_planes: Array = []  # per player slot: covers that player's area while building
@@ -845,9 +852,79 @@ func can_build(c: Vector2i) -> bool:
 	return in_map(c) and not path_cells.has(c) and not blocked.has(c) and not towers.has(c)
 
 
-# How far WASD can move the camera from its start: more on bigger maps.
+# How far the camera can move from its start: more on bigger maps, and up close
+# far enough to look at every edge of the board.
 func camera_limit() -> Vector2:
-	return CAMERA_LIMIT * Vector2(maxf(map_cols / float(DEFAULT_SIZE.x), 1.0), maxf(map_rows / float(DEFAULT_SIZE.y), 1.0))
+	var far := CAMERA_LIMIT * Vector2(maxf(map_cols / float(DEFAULT_SIZE.x), 1.0), maxf(map_rows / float(DEFAULT_SIZE.y), 1.0))
+	var near := Vector2(map_cols, map_rows) / 2.0
+	return near.lerp(far, clampf((zoom - ZOOM_MIN) / (1.0 - ZOOM_MIN), 0.0, 1.0))
+
+
+# ---------------------------------------------------------------- camera
+# The camera looks at camera_focus + camera_pan. Its tilt follows the zoom (like
+# RTS games): CAMERA_TILT_FAR at zoom 1 and further, CAMERA_TILT_NEAR closest.
+# Purely local: nothing about the camera is sent to the other players or saved.
+
+func camera_tilt(z: float) -> float:
+	return lerpf(CAMERA_TILT_NEAR, CAMERA_TILT_FAR, smoothstep(ZOOM_MIN, 1.0, z))
+
+
+# The camera's spot compared to the ground point it looks at, at zoom z. Its
+# distance at zoom 1 is the one build_map() picked for this map's size.
+func camera_offset(z: float) -> Vector3:
+	var a := deg_to_rad(camera_tilt(z))
+	return Vector3(0.0, sin(a), cos(a)) * (camera_home - camera_focus).length() * z
+
+
+# Puts the camera where zoom and camera_pan say, looking at its ground point.
+func place_camera() -> void:
+	var dist := (camera_home - camera_focus).length()
+	if camera == null or not camera.is_inside_tree() or dist < 0.01:
+		return  # no map built yet
+	var look := camera_focus + Vector3(camera_pan.x, 0.0, camera_pan.y)
+	camera.position = look + camera_offset(zoom)
+	camera.look_at(look)
+	camera.h_offset = CAMERA_H_OFFSET * zoom
+	# Keeps the map above the bottom console (zoom * view_scale); only set here (the Meteor shake in game_world.gd adds to this value)
+	camera.v_offset = CAMERA_V_OFFSET * zoom * dist / CAMERA_DIST
+
+
+# The zoom a map starts at (the "Camera start" setting).
+func start_zoom() -> float:
+	return CAMERA_STARTS.get(camera_start, 1.0)
+
+
+# Back to the start: no pan, zoom z (-1: the "Camera start" setting's zoom).
+func reset_camera(z := -1.0) -> void:
+	zoom = start_zoom() if z < 0.0 else z
+	target_zoom = zoom
+	camera_pan = Vector2.ZERO
+	zoom_anchored = false
+	place_camera()
+
+
+# The ground spot (y = 0) under a screen point (viewport pixels); far away above the horizon.
+func ground_at(p: Vector2) -> Vector3:
+	var from := camera.project_ray_origin(p)
+	var dir := camera.project_ray_normal(p)
+	dir.y = minf(dir.y, -0.02)
+	return from + dir * (-from.y / dir.y)
+
+
+# Scroll-wheel zoom toward the mouse: the ground under it stays under it
+# (update_camera() in main.gd keeps it there while the zoom glides).
+func zoom_camera(steps: float) -> void:
+	target_zoom = clampf(target_zoom + steps * ZOOM_STEP, ZOOM_MIN, ZOOM_MAX)
+	zoom_anchor = get_viewport().get_mouse_position()
+	zoom_anchored = true
+
+
+# Moves the camera so it looks at a ground point (in tiles), e.g. from the minimap.
+func look_at_ground(at: Vector2) -> void:
+	var lim := camera_limit()
+	camera_pan = (at - Vector2(camera_focus.x, camera_focus.z)).clamp(-lim, lim)
+	zoom_anchored = false
+	place_camera()
 
 
 # ---------------------------------------------------------------- maps

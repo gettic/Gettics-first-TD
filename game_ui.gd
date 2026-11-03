@@ -874,7 +874,11 @@ func next_wave_text() -> String:
 
 # Hints on the left, the update button in the middle, resources on the right.
 func draw_top_bar() -> void:
-	text(Vector2(14, 20), "WASD: move camera    Scroll: zoom    Right-click: cancel    Enter: chat    Esc: menu & multiplayer", 13, UI_DIM)
+	# The long hint runs to x ~725, so a short one while the update button (x 560) shows
+	if update_version == "":
+		text(Vector2(14, 20), "WASD / middle drag: move   Scroll: zoom   H: whole map   Right-click: cancel   Enter: chat   Esc: menu & multiplayer", 13, UI_DIM)
+	else:
+		text(Vector2(14, 20), "WASD / middle drag: move   Scroll: zoom   H: whole map   Esc: menu", 13, UI_DIM)
 	if update_version != "":
 		button(UPDATE_RECT, "New version %s - Update" % update_version, true, true)
 	var x := SCREEN_W - 14.0
@@ -1941,15 +1945,16 @@ func settings_rows() -> Array:
 		["Sound effects", "%d%%" % roundi(effects_volume * 100.0), "effects", false],
 		["Tutorial tips", "On" if tutorial_on() else "Off", "tips", false],
 		["Story cards", "On" if story_cards_on() else "Off", "story", false],
+		["Camera start", "Close" if camera_start == "close" else "Overview", "camera", false],
 		["Weather", "Always day" if weather_setting == "day" else "Random", "weather", true],
 		["Festivals", "On" if festivals_on else "Off", "festivals", true],
 	]
 
 
-# The box is taller than SETTINGS_BOX (game_base.gd) so 10 rows fit
+# The box is taller than SETTINGS_BOX (game_base.gd) so 11 rows fit
 const SETTINGS_TALL := Rect2(430, 58, 420, 600)
 const SETTINGS_TOP := 134  # the first row's button
-const SETTINGS_ROW_STEP := 42
+const SETTINGS_ROW_STEP := 40
 const SETTINGS_BACK := Rect2(560, 600, 160, 40)
 
 
@@ -2012,6 +2017,10 @@ func settings_click(p: Vector2) -> void:
 					set_tutorial(not tutorial_on())  # saves itself
 				"story":
 					set_story_cards(not story_cards_on())  # saves itself
+				"camera":
+					# The zoom a map starts at; the camera jumps there now too
+					camera_start = "overview" if camera_start == "close" else "close"
+					reset_camera()
 				"weather":
 					# The next game's weather (pick_mood() in main.gd reads it)
 					weather_setting = WEATHER_SETTINGS[(WEATHER_SETTINGS.find(weather_setting) + 1) % WEATHER_SETTINGS.size()]

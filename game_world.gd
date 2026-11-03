@@ -239,9 +239,7 @@ func build_map() -> void:
 	view_scale = s
 	camera_focus = Vector3(map_cols / 2.0, 0.0, map_rows / 2.0 + 0.3)
 	camera_home = camera_focus + Vector3(0, 26.5, 19.1) * s
-	camera_pan = Vector2.ZERO
-	camera.position = camera_home
-	camera.look_at(camera_focus)
+	reset_camera()  # the "Camera start" setting's zoom, no pan
 	sun.directional_shadow_max_distance = 60.0 * maxf(s, 1.0)
 	# The haze starts beyond the board, also on big maps (set in mood_light(), called by apply_graphics())
 
@@ -376,6 +374,9 @@ func load_settings() -> void:
 		weather_setting = "random"
 	story_on = bool(cfg.get_value("story", "cards", true))
 	festivals_on = bool(cfg.get_value("graphics", "festivals", true))
+	camera_start = str(cfg.get_value("display", "camera_start", "overview"))
+	if not camera_start in CAMERA_STARTS:
+		camera_start = "overview"
 	if not found or not cfg.has_section_key("graphics", "high") or not cfg.has_section_key("display", "aa"):
 		save_settings()
 	apply_display()
@@ -440,6 +441,7 @@ func save_settings() -> void:
 		cfg.set_value("display", "fullscreen", fullscreen)
 	cfg.set_value("display", "render_scale", render_scale)
 	cfg.set_value("display", "aa", aa_mode)
+	cfg.set_value("display", "camera_start", camera_start)
 	cfg.set_value("graphics", "weather", weather_setting)
 	cfg.set_value("graphics", "festivals", festivals_on)
 	cfg.set_value("story", "cards", story_on)
@@ -2755,9 +2757,6 @@ const AREA_TINT_COMPAT := 0.42  # other players' area tint on Compatibility (0.2
 func update_visuals(delta: float) -> void:
 	time += delta
 	update_audio(delta)
-	# Keeps the map above the bottom console at every zoom and map size:
-	# the shift grows with the camera's distance
-	camera.v_offset = CAMERA_V_OFFSET * zoom * view_scale
 	update_ability_fx(delta)
 	# The night's torches flicker
 	for i in torches.size():
@@ -3872,10 +3871,11 @@ func update_ability_fx(delta: float) -> void:
 	if not freeze_rig.is_empty() and freeze_rig["t"] >= 0.0:
 		update_freeze(delta)
 	freeze_flash = maxf(freeze_flash - delta, 0.0)
-	# A short shake when a Meteor hits
+	# A short shake when a Meteor hits: on top of place_camera()'s shift (set here,
+	# not added, so it never builds up while paused)
 	if shake > 0.0:
 		shake = maxf(shake - delta, 0.0)
-		camera.v_offset += sin(time * 75.0) * 0.18 * shake * zoom * view_scale
+		camera.v_offset = (CAMERA_V_OFFSET + sin(time * 75.0) * 0.18 * shake) * zoom * view_scale
 
 
 # ---------------------------------------------------------------- poison clouds
