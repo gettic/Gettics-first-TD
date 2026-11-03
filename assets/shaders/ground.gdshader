@@ -1,9 +1,12 @@
-// Ground: grass and dirt textures laid out by world position, so they run across
-// the tiles without seams. A tiny image with one pixel per cell marks the path,
-// and its smooth filtering gives the ragged dirt edge next to the path.
-// Painted look on top: big warm and cool color patches, soft brush strokes, a
-// trampled darker band beside the path, a lighter worn middle on the path, and
-// the land outside the board (outer = 1) fading darker.
+// Ground: photo-scanned CC0 grass and path (Poly Haven, see assets/CREDITS.md) laid
+// out by world position, so they run across the tiles without seams. The scans are
+// graded to the game's colours: grass keeps the scan's light and dark with only a
+// little of its own hue, the path keeps more of its stones and tufts. Their AO is
+// baked into the colour maps. A tiny image with one pixel per cell marks the path,
+// and its smooth filtering gives the soft, ragged path edge.
+// Painted look on top: big warm and cool patches, a trampled band beside the path,
+// a lighter worn middle on the path. The land around the board (outer = 1) turns to
+// forest floor further out, with a sandy, rocky bank round the lake.
 shader_type spatial;
 render_mode diffuse_lambert_wrap;
 
@@ -11,26 +14,37 @@ uniform sampler2D grass_tex : source_color, filter_linear_mipmap_anisotropic, re
 uniform sampler2D dirt_tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D grass_nrm : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D dirt_nrm : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2D bank_tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2D bank_nrm : hint_normal, filter_linear_mipmap_anisotropic, repeat_enable;
+uniform sampler2D far_tex : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
 uniform sampler2D path_mask : filter_linear, repeat_disable;
 uniform vec2 map_size = vec2(24.0, 18.0);
 uniform float tex_scale = 0.4;  // texture repeats per tile (0.4 = once every 2.5 tiles)
-// The textures' average colors (linear), so they can be tinted to the game's own green and brown
-uniform vec3 grass_avg = vec3(0.1619, 0.2498, 0.08);
-uniform vec3 dirt_avg = vec3(0.1362, 0.0958, 0.0494);
-uniform vec3 grass_color : source_color = vec3(0.195, 0.34, 0.085);  // a little olive
-uniform vec3 dirt_color : source_color = vec3(0.45, 0.29, 0.14);
-uniform float detail = 0.6;  // 0 = flat color, 1 = the texture's full contrast
+// The textures' average colors (linear, from build_ground_tex.py), for the grading
+uniform vec3 grass_avg = vec3(0.1173, 0.0850, 0.0200);
+uniform vec3 dirt_avg = vec3(0.2482, 0.2033, 0.1203);
+uniform vec3 bank_avg = vec3(0.0690, 0.0566, 0.0279);
+uniform vec3 far_avg = vec3(0.1379, 0.0986, 0.0584);
+uniform vec3 grass_color : source_color = vec3(0.22, 0.38, 0.09);
+uniform vec3 dirt_color : source_color = vec3(0.37, 0.27, 0.17);
+uniform vec3 bank_color : source_color = vec3(0.26, 0.24, 0.16);
+uniform vec3 far_color : source_color = vec3(0.16, 0.2, 0.08);
+uniform float detail = 0.75;     // 0 = flat color, 1 = the scan's full contrast
+uniform float grass_hue = 0.2;   // how much of the scan's own hue the grass keeps
+uniform float dirt_hue = 0.35;
 uniform float is_path = 0.0;
 uniform float grid = 0.0;  // grid lines, faded in while placing a tower
 uniform bool use_normals = false;  // Graphics High
 // Painted look
-uniform float paint = 1.0;
+uniform float paint = 0.8;
 uniform vec3 warm : source_color = vec3(1.34, 1.11, 0.6);
 uniform vec3 cool : source_color = vec3(0.6, 0.8, 0.98);
-uniform float worn = 0.3;      // lighter middle of the path
-uniform float trample = 0.25;  // darker grass beside the path
+uniform float worn = 0.25;     // lighter middle of the path
+uniform float trample = 0.2;   // darker grass beside the path
 uniform float outer = 0.0;     // 1: the land around the board
 uniform float outer_dark = 0.6;
+uniform vec2 lake_center = vec2(-1000.0);
+uniform vec2 lake_radius = vec2(1.0);
 
 varying vec3 wpos;
 varying float up;
@@ -56,28 +70,27 @@ float noise(vec2 p) {
 	return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), f.x), mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), f.x), f.y);
 }
 
+// The scan graded to a colour: its light and dark, and some of its own hue
+vec3 grade(vec3 tex, vec3 avg, vec3 col, float hue) {
+#if CURRENT_RENDERER == RENDERER_COMPATIBILITY
+	// Compatibility works with colors as stored (sRGB, not linear), so the average
+	// has to be sRGB too, or the ground comes out 2-3x too bright. max(): no NaN.
+	avg = pow(max(avg, vec3(0.0)), vec3(1.0 / 2.2));
+#endif
+	const vec3 W = vec3(0.2126, 0.7152, 0.0722);
+	float l = dot(tex, W) / max(dot(avg, W), 1e-4);
+	vec3 rel = mix(vec3(l), tex / max(avg, vec3(1e-4)), hue);
+	return col * mix(vec3(1.0), rel, detail);
+}
+
 void fragment() {
 	// Tops use X/Z; the sides (path edges, board edge) use the height instead
 	vec2 uv = (up > 0.5 ? wpos.xz : vec2(wpos.x + wpos.z, wpos.y)) * tex_scale;
-#if CURRENT_RENDERER == RENDERER_COMPATIBILITY
-	// The Compatibility renderer works with colors as stored (sRGB, not linear),
-	// so the averages have to be in sRGB too, or the ground comes out 2-3x too bright.
-	// max(): pow of a negative number is NaN (white specks)
-	vec3 g_avg = pow(max(grass_avg, vec3(0.0)), vec3(1.0 / 2.2));
-	vec3 d_avg = pow(max(dirt_avg, vec3(0.0)), vec3(1.0 / 2.2));
-#else
-	vec3 g_avg = grass_avg;
-	vec3 d_avg = dirt_avg;
-#endif
-	vec3 g = grass_color * mix(vec3(1.0), texture(grass_tex, uv).rgb / g_avg, detail);
-	vec3 d = dirt_color * mix(vec3(1.0), texture(dirt_tex, uv).rgb / d_avg, detail);
-
-	// Big warm and cool patches, and soft brush strokes running one way
+	vec3 g = grade(texture(grass_tex, uv).rgb, grass_avg, grass_color, grass_hue);
+	vec3 d = grade(texture(dirt_tex, uv).rgb, dirt_avg, dirt_color, dirt_hue);
+	// Big warm and cool patches
 	float big = noise(wpos.xz * 0.16) * 0.6 + noise(wpos.xz * 0.4 + 7.0) * 0.4;
 	g *= mix(vec3(1.0), mix(cool, warm, smoothstep(0.2, 0.8, big)), paint);
-	float stroke = noise(vec2(wpos.x * 1.1 + wpos.z * 0.5, wpos.z * 4.5 - wpos.x * 0.8));
-	g *= 1.0 + (stroke - 0.5) * 0.25 * paint;
-	d *= 1.0 + (noise(wpos.xz * 2.3) - 0.5) * 0.2 * paint;
 
 	// How much dirt: sides are soil; on top, the path mask with a little noise
 	float raw = outer > 0.5 ? 0.0 : texture(path_mask, wpos.xz / map_size).r;
@@ -87,19 +100,26 @@ void fragment() {
 	// so no soil peeks out where neighbor tiles overlap
 	float dirt = is_path < 0.5 && wpos.y > -0.02 ? 0.0 : 1.0;
 	if (up > 0.5) {
-		// Grass tiles get a ragged dirt fringe; path tiles keep a few grass tufts at their edges
-		dirt = is_path > 0.5 ? smoothstep(0.5, 0.6, m) : smoothstep(0.5, 0.62, m);
+		// A wide, soft edge: the path's tufts and stones fade into the grass
+		dirt = is_path > 0.5 ? smoothstep(0.42, 0.66, m) : smoothstep(0.45, 0.7, m);
 	}
 	// Path: a lighter, dusty middle and a darker rim where it meets the grass
-	d *= mix(1.0 - 0.25 * paint, 1.0 + worn * paint, smoothstep(0.6, 0.95, raw + n * 0.2));
+	d *= mix(1.0 - 0.2 * paint, 1.0 + worn * paint, smoothstep(0.6, 0.95, raw + n * 0.2));
 	// Grass beside the path: trampled, a bit darker and yellower
 	float near = smoothstep(0.15, 0.5, m) * paint;
 	g *= mix(vec3(1.0), vec3(0.95, 0.9, 0.7) * (1.0 - trample), near);
 	vec3 col = mix(g, d, dirt);
+	vec3 nm = mix(texture(grass_nrm, uv).rgb, texture(dirt_nrm, uv).rgb, dirt);
 
-	// The land around the board gets darker further out
 	if (outer > 0.5) {
+		// Forest floor further out, the lake's bank, and darker toward the edge
 		vec2 out_d = max(max(-wpos.xz, wpos.xz - map_size), vec2(0.0));
+		float far = smoothstep(2.0, 7.0, length(out_d));
+		col = mix(col, grade(texture(far_tex, uv * 0.8).rgb, far_avg, far_color, 0.5), far);
+		float r = length((wpos.xz - lake_center) / lake_radius);
+		float bank = 1.0 - smoothstep(0.95, 1.45, r);
+		col = mix(col, grade(texture(bank_tex, uv * 1.4).rgb, bank_avg, bank_color, 0.7), bank);
+		nm = mix(nm, texture(bank_nrm, uv * 1.4).rgb, bank);
 		col *= mix(1.0, outer_dark, smoothstep(0.0, 7.0, length(out_d)));
 	}
 
@@ -112,10 +132,10 @@ void fragment() {
 	}
 
 	ALBEDO = col;
-	ROUGHNESS = 0.92;
-	SPECULAR = 0.2;
+	ROUGHNESS = 0.9;
+	SPECULAR = 0.25;
 	if (use_normals) {
-		NORMAL_MAP = mix(texture(grass_nrm, uv).rgb, texture(dirt_nrm, uv).rgb, dirt);
-		NORMAL_MAP_DEPTH = 0.6;
+		NORMAL_MAP = nm;
+		NORMAL_MAP_DEPTH = 1.0;
 	}
 }

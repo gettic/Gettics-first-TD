@@ -6,19 +6,21 @@ Every art file in this folder that wasn't made for this game, where it comes fro
 |---|---|---|---|---|
 | `monsters/Skeleton_Mage.glb`, `monsters/Skeleton_Staff.*`, `monsters/skeleton_texture.png` | KayKit - Character Pack: Skeletons 1.1 | Kay Lousberg (www.kaylousberg.com) | https://kaylousberg.itch.io/kaykit-skeletons | CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
 | `monsters/monster_walks.res` (the Walking_A, Walking_B and Walking_C animations of Rig_Medium_MovementBasic, saved on their own; the game uses Walking_C) | KayKit - Character Animations 1.1 | Kay Lousberg (www.kaylousberg.com) | https://kaylousberg.itch.io/kaykit-character-animations | CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
-| `nature/Rock_1_E_Color1.*`, `nature/Rock_2_C_Color1.*`, `nature/Rock_3_C_Color1.*`, `nature/Rock_3_F_Color1.*`, `nature/Grass_1_B_Color1.*`, `nature/Grass_2_B_Color1.*`, `nature/forest_texture.png` | KayKit - Forest Nature Pack 1.0 | Kay Lousberg (www.kaylousberg.com) | https://kaylousberg.itch.io/kaykit-forest | CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
-| `terrain/grass.png`, `terrain/grass_normal.png` (Grass_03 and Grass_03_Nrm) | Tileable Grass Textures - Set 1 | Cethiel | https://opengameart.org/content/tileable-grass-textures-set-1 | CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
-| `terrain/dirt.png`, `terrain/dirt_normal.png` (Dirt_01 and Dirt_01_Nrm) | Tileable Dirt Textures | Cethiel | https://opengameart.org/content/tileable-dirt-textures | CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
+| `nature/Rock_1_E_Color1.*`, `nature/Rock_2_C_Color1.*`, `nature/Rock_3_C_Color1.*`, `nature/Rock_3_F_Color1.*`, `nature/forest_texture.png` | KayKit - Forest Nature Pack 1.0 | Kay Lousberg (www.kaylousberg.com) | https://kaylousberg.itch.io/kaykit-forest | CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
+| `terrain/ground_grass.jpg`, `terrain/ground_grass_n.jpg` (Aerial Grass Rock), `terrain/ground_path.jpg`, `terrain/ground_path_n.jpg` (Grass Path 2), `terrain/ground_bank.jpg`, `terrain/ground_bank_n.jpg` (Coast Sand Rocks 02), `terrain/wall_stone.jpg`, `terrain/wall_stone_n.jpg` (Castle Wall Slates), `terrain/wall_cap.jpg`, `terrain/wall_cap_n.jpg` (Medieval Blocks 02) | Poly Haven textures | Rob Tuytel | https://polyhaven.com/a/aerial_grass_rock, https://polyhaven.com/a/grass_path_2, https://polyhaven.com/a/coast_sand_rocks_02, https://polyhaven.com/a/castle_wall_slates, https://polyhaven.com/a/medieval_blocks_02 | CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
+| `terrain/ground_far.jpg` (Forest Ground 04) | Poly Haven textures | Rob Tuytel (photography, processing), Rico Cilliers (adjustment) | https://polyhaven.com/a/forest_ground_04 | CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
+| `nature/quaternius/*.glb` (CommonTree_1-5, Pine_1-3, Bush_Common, Bush_Common_Flowers, Fern_1, Plant_1_Big, Rock_Medium_1-3, Pebble_Round_1, Pebble_Round_3, Pebble_Square_2, Flower_3_Group, Flower_4_Group, Mushroom_Common) and `nature/quaternius/tex/*` | Stylized Nature MegaKit (Standard) | Quaternius | https://quaternius.itch.io/stylized-nature-megakit | CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
 
 The game turns the Arrow tower's roof, cape and flags into each player's color in code (see `arrow_mat()` in `game_world.gd`).
 
-The terrain textures are re-saved (losslessly, smaller PNGs) and renamed; the game tints them with `shaders/ground.gdshader`.
+The Poly Haven sets are cut to 1024 or 512 px with their ambient-occlusion map baked into the colour map (`graphics plan/ground life/blender/build_ground_tex.py`); the ground, the wall (`shaders/stone_wall.gdshader`) and the grading are made for this game.
 
 The monsters' walks are posed once when the game starts (see `build_monsters()` in `game_world.gd`). The unicorns and bone spiders are built from simple shapes in code.
 
 Made for this game: `shaders/pack_model.gdshader`, `shaders/ground.gdshader`, `shaders/water.gdshader`, `shaders/painted.gdshader`, `shaders/lake.gdshader`, `shaders/brew.gdshader`, `shaders/cloud.gdshader`, `shaders/shield.gdshader`, `shaders/heal_ring.gdshader`.
 
-Made for this game: `shaders/painted_leaves.gdshader` (for the trees and bushes, which are built in code).
+
+The Quaternius models are repainted with a script (crown shading and ambient occlusion in the vertex colours, a lighter far version and a solid stand-in crown of each tree and bush, textures cut to 512 px, see `graphics plan/ground life/blender/build_nature.py`) and coloured in the game by `shaders/leaves.gdshader`, `shaders/crown.gdshader` and `shaders/leaves.gdshaderinc`, made for this game; so are `shaders/grass_tuft.gdshader` and the grass tufts, hills, flowers' and stones' placement built in code.
 
 Made for this game (built with a script, no outside sources): the gate `gates/gate.glb` (it uses the cannon tower's atlas and team strip, no textures of its own) and its portal `shaders/gate_portal.gdshader`.
 
@@ -40,4 +42,4 @@ Made for this game (original music, rendered with a script): the 4 music layers 
 
 Made for this game (synthesized with the same script): the story event sounds `sounds/grim_entrance.wav`, `crescendo.wav`, `grim_fall.wav`, `story_page.wav` and `festival_frostfall.wav`, `festival_lantern.wav`, `festival_paint.wav`.
 
-Crediting isn't required by CC0, but thank you, Kay Lousberg and Cethiel.
+Crediting isn't required by CC0, but thank you, Kay Lousberg, Rob Tuytel and Rico Cilliers of Poly Haven, and Quaternius.

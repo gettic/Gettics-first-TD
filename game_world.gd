@@ -221,7 +221,8 @@ func clear_map() -> void:
 	area_planes = []
 	area_centers = []
 	ground_mats = []
-	tree_near = []
+	land_root = null
+	outer_ground = null
 	pollen = null
 	weather_root = null
 	torches = []
@@ -261,10 +262,9 @@ func build_map() -> void:
 			mask.set_pixel(c.x, c.y, Color.WHITE)
 	var grass := ShaderMaterial.new()
 	grass.shader = load("res://assets/shaders/ground.gdshader")
-	grass.set_shader_parameter("grass_tex", load("res://assets/terrain/grass.png"))
-	grass.set_shader_parameter("dirt_tex", load("res://assets/terrain/dirt.png"))
-	grass.set_shader_parameter("grass_nrm", load("res://assets/terrain/grass_normal.png"))
-	grass.set_shader_parameter("dirt_nrm", load("res://assets/terrain/dirt_normal.png"))
+	for p: Array in [["grass_tex", "ground_grass"], ["grass_nrm", "ground_grass_n"], ["dirt_tex", "ground_path"], ["dirt_nrm", "ground_path_n"],
+			["bank_tex", "ground_bank"], ["bank_nrm", "ground_bank_n"], ["far_tex", "ground_far"]]:
+		grass.set_shader_parameter(p[0], load("res://assets/terrain/%s.jpg" % p[1]))
 	grass.set_shader_parameter("path_mask", ImageTexture.create_from_image(mask))
 	grass.set_shader_parameter("map_size", Vector2(map_cols, map_rows))
 	var dirt: ShaderMaterial = grass.duplicate()
@@ -325,9 +325,12 @@ func apply_graphics() -> void:
 	# The ground's normal maps (light catching the painted bumps) only on High
 	for m in ground_mats:
 		m.set_shader_parameter("use_normals", high and not compat)
-	# The trees near the board: detailed only on High
-	for t: Array in tree_near:
-		t[0].mesh = t[1] if high else t[2]
+	for m in wall_mats:
+		m.set_shader_parameter("use_normals", high and not compat)
+	# The land again when the setting changed: hills, leaf-card trees and all the grass
+	# on High; flat land, solid stand-in trees and a third of the grass on Low
+	if land_root != null and is_instance_valid(land_root) and land_high != high:
+		build_outer()
 	# Monsters cast shadows only on High (hundreds of them can be walking)
 	for e in enemies:
 		e.node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON if high else GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
@@ -652,8 +655,8 @@ func build_areas() -> void:
 			area_centers.append(null)
 
 
-# Rocks (KayKit Forest Nature Pack, scaled to fit one tile), trees (built in code,
-# see add_trees()) and water.
+# Rocks (KayKit Forest Nature Pack, scaled to fit one tile), trees (Quaternius, see
+# add_trees()) and water.
 const ROCK_MODELS := [["Rock_1_E", 0.55], ["Rock_3_F", 0.6], ["Rock_3_C", 0.8], ["Rock_2_C", 0.45]]
 var nature_mats := {}  # "r" -> the rocks' material
 
@@ -684,7 +687,7 @@ func tile_hash(c: Vector2i) -> int:
 func build_decor() -> void:
 	var by_model := {}  # model file -> [Transform3D, ...]
 	var water: Array[Vector2i] = []
-	land_trees = []
+	board_trees = []
 	for c: Vector2i in blocked:
 		var kind: String = blocked[c]
 		if kind == "w":
@@ -692,8 +695,8 @@ func build_decor() -> void:
 			continue
 		var h := tile_hash(c)
 		if kind == "t":
-			# Painted trees (see add_trees()), always the detailed mesh on the board
-			land_trees.append([Vector3(c.x + 0.5, 0.0, c.y + 0.5), deg_to_rad((h >> 9) % 360), 0.8 + (h >> 4) % 16 * 0.01, h, false, false])
+			# Trees (see add_trees()), the full model on the board (the stand-in on Low)
+			board_trees.append([Vector3(c.x + 0.5, 0.0, c.y + 0.5), deg_to_rad((h >> 9) % 360), 0.8 + (h >> 4) % 16 * 0.01, h, false])
 			continue
 		var pick: Array = ROCK_MODELS[h % ROCK_MODELS.size()]
 		var s: float = pick[1] * (0.9 + (h >> 4) % 21 / 100.0)
@@ -743,89 +746,113 @@ func build_decor() -> void:
 	map_root.add_child(mmi)
 
 
-# A low curb of chunky stones along the board's edge, so the buildable area is clear.
-# One MultiMesh; each stone's tilt and height come from tile_hash(). Where a gate
-# stands on the edge the curb stops at its pillars (stones there are cut short).
+# A low stone wall round the board, so the buildable area is clear: two courses of
+# blocks under cap stones, with a post every few blocks and at the corners, in grey
+# CC0 stone (stone_wall.gdshader). One MultiMesh per piece; each block's small turn
+# comes from tile_hash(). The wall stops at the gates' pillars.
+var wall_mats: Array[ShaderMaterial] = []
+
+
+func wall_mat(file: String, avg: Vector3, stone: Color, scale: float) -> ShaderMaterial:
+	var m := ShaderMaterial.new()
+	m.shader = load("res://assets/shaders/stone_wall.gdshader")
+	m.set_shader_parameter("albedo_tex", load("res://assets/terrain/%s.jpg" % file))
+	m.set_shader_parameter("normal_tex", load("res://assets/terrain/%s_n.jpg" % file))
+	m.set_shader_parameter("avg", avg)
+	m.set_shader_parameter("stone", stone)
+	m.set_shader_parameter("scale", scale)
+	m.set_shader_parameter("use_normals", graphics_high and not compat)
+	return m
+
+
 func build_border() -> void:
-	var stone := BoxMesh.new()
-	stone.size = Vector3(0.42, 0.2, 0.16)
-	var xf: Array[Transform3D] = []
-	var k := 0
-	var gates: Array[Vector3] = []
+	if wall_mats.is_empty():
+		wall_mats = [wall_mat("wall_stone", Vector3(0.0862, 0.0721, 0.0498), Color(0.41, 0.4, 0.38), 1.3),
+				wall_mat("wall_cap", Vector3(0.2009, 0.125, 0.0799), Color(0.45, 0.44, 0.42), 2.2)]
+	var block := BoxMesh.new()
+	block.size = Vector3(0.46, 0.17, 0.26)
+	var cap := BoxMesh.new()
+	cap.size = Vector3(0.5, 0.07, 0.32)
+	var post := BoxMesh.new()
+	post.size = Vector3(0.34, 0.5, 0.34)
+	var lists := {block: [], cap: [], post: []}
+	var gates: Array[Vector2] = []
 	for g in gate_cells.size():
 		if gate_cells[g] != null:
-			gates.append(to3d(routes[g][0]))
+			var gp := to3d(routes[g][0])
+			gates.append(Vector2(gp.x, gp.z))
 	var half := 0.5 * GATE_W + 0.12  # the gate's half width, to the pillars' outsides
+	var k := 0
 	for side in 4:
 		var along_x := side < 2
 		var length := map_cols if along_x else map_rows
-		var count := int(ceil(length / 0.45))
-		var line := (-0.08 if side % 2 == 0 else (map_rows if along_x else map_cols) + 0.08)
+		var line := (-0.2 if side % 2 == 0 else (map_rows if along_x else map_cols) + 0.2)
+		var count := int(ceil(length / 0.46))
+		var turn := 0.0 if along_x else PI / 2
 		for i in count:
-			var t := (i + 0.5) * length / count
-			var h := tile_hash(Vector2i(k, side * 1000))
-			k += 1
-			# The stone's ends along the edge, cut back from any gate on this edge
-			var a0 := t - 0.21
-			var a1 := t + 0.21
-			for gp: Vector3 in gates:
-				var c := gp.x if along_x else gp.z
-				if absf((gp.z if along_x else gp.x) - line) > 0.6 or a1 <= c - half or a0 >= c + half:
-					continue
-				if a0 < c - half:
-					a1 = c - half
-				elif a1 > c + half:
-					a0 = c + half
-				else:
-					a1 = a0
-			if a1 - a0 < 0.1:
+			var s := (i + 0.5) * length / count
+			var p := Vector3(s, 0, line) if along_x else Vector3(line, 0, s)
+			var cut := false
+			for g in gates:
+				if g.distance_to(Vector2(p.x, p.z)) < half + 0.35:
+					cut = true
+			if cut:
 				continue
-			t = (a0 + a1) / 2.0
-			var pos: Vector3
-			if along_x:
-				pos = Vector3(t, -0.04, line)
-			else:
-				pos = Vector3(line, -0.04, t)
-			pos.y += (h % 7) * 0.006
-			var turn := (0.0 if along_x else PI / 2) + ((h >> 3) % 9 - 4) * 0.03
-			xf.append(Transform3D(Basis(Vector3.UP, turn) * Basis.from_scale(Vector3((a1 - a0) / 0.42, 1, 1)), pos))
-	var mm := MultiMesh.new()
-	mm.transform_format = MultiMesh.TRANSFORM_3D
-	mm.mesh = stone
-	mm.instance_count = xf.size()
-	for i in xf.size():
-		mm.set_instance_transform(i, xf[i])
-	var mmi := MultiMeshInstance3D.new()
-	mmi.multimesh = mm
-	# Dark mossy stone with little rim light, so no pale line runs round the board
-	mmi.material_override = painted(mat(Color(0.34, 0.33, 0.3)))
-	mmi.material_override.set_shader_parameter("rim_strength", 0.08)
-	mmi.material_override.set_shader_parameter("snow_cap", 1.0)  # Frostfall Fair (see apply_festival())
-	map_root.add_child(mmi)
+			var h := tile_hash(Vector2i(k, side * 777))
+			k += 1
+			for row in 2:
+				# The upper course is offset by half a block, like laid stone
+				var q := p + (Vector3(0.2 * row, 0, 0) if along_x else Vector3(0, 0, 0.2 * row))
+				q.y = -0.035 + row * 0.17
+				lists[block].append(Transform3D(Basis(Vector3.UP, turn + ((h >> (row * 4)) % 9 - 4) * 0.012), q))
+			lists[cap].append(Transform3D(Basis(Vector3.UP, turn + ((h >> 9) % 5 - 2) * 0.01), p + Vector3(0, 0.255, 0)))
+			if i % 6 == 0:
+				lists[post].append(Transform3D(Basis(Vector3.UP, turn), p + Vector3(0, 0.13, 0)))
+	for corner in [Vector3(-0.2, 0.13, -0.2), Vector3(map_cols + 0.2, 0.13, -0.2), Vector3(-0.2, 0.13, map_rows + 0.2), Vector3(map_cols + 0.2, 0.13, map_rows + 0.2)]:
+		lists[post].append(Transform3D(Basis.IDENTITY, corner))
+	for mesh: BoxMesh in lists:
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_3D
+		mm.mesh = mesh
+		mm.instance_count = lists[mesh].size()
+		for i in mm.instance_count:
+			mm.set_instance_transform(i, lists[mesh][i])
+		var mmi := MultiMeshInstance3D.new()
+		mmi.multimesh = mm
+		mmi.material_override = wall_mats[1] if mesh == cap else wall_mats[0]
+		map_root.add_child(mmi)
 
 
-# The land around the board: painted grass fading darker further out, a lake
-# beside the board, and forest, bushes, rocks and grass tufts, denser further
-# out. All from the map's size, gates and tile_hash(), so every player sees the
-# same, on every map size.
-const OUTER_ROCKS := ["Rock_1_E", "Rock_3_C", "Rock_2_C"]
-const OUTER_TUFTS := ["Grass_1_B", "Grass_2_B"]
+# The land around the board: CC0 forest floor (see ground.gdshader) on gentle hills
+# (Graphics High), a lake beside the board, the Quaternius forest (see add_trees())
+# and the grass, flowers and stones of build_life(). All of it under land_root, from
+# the map's size, gates and tile_hash(), so every player sees the same, on every map
+# size. Switching Graphics Low/High builds it again (see apply_graphics()).
+var land_root: Node3D
+var land_high := true  # the Graphics setting the land was built for
+var outer_ground: ShaderMaterial  # the land's ground material (one of ground_mats)
+var land_lake_c := Vector2(-1000, -1000)
+var land_lake_r := Vector2.ONE
+var land_gates: Array[Vector2] = []
+var hill_noise: FastNoiseLite
 
 
 func build_outer() -> void:
+	if land_root != null and is_instance_valid(land_root):
+		land_root.free()
+	land_root = Node3D.new()
+	map_root.add_child(land_root)
+	land_high = graphics_high
 	var s := view_scale
-	var ground: ShaderMaterial = ground_mats[0].duplicate()
-	ground.set_shader_parameter("outer", 1.0)
-	ground.set_shader_parameter("grid", 0.0)
-	ground_mats.append(ground)
-	var plane := PlaneMesh.new()
-	plane.size = Vector2(map_cols, map_rows) + Vector2(60, 50) * s
-	add_mesh(map_root, plane, ground, Vector3(map_cols / 2.0, -0.12, map_rows / 2.0))
+	land_gates = []
+	for g in gate_cells:
+		if g != null:
+			land_gates.append(Vector2(g) + Vector2(0.5, 0.5))
 
 	# The lake: beside the board's left or right edge (the one with fewer gates),
 	# sized by the map. Its square is big enough that the shore is never cut.
 	var k := clampf(map_rows / VIEW_TILES.y, 0.75, 2.0)
-	var radius := Vector2(2.4, 4.2) * k
+	land_lake_r = Vector2(2.4, 4.2) * k
 	var left := 0
 	var right := 0
 	for g in gate_cells:
@@ -834,440 +861,462 @@ func build_outer() -> void:
 				left += 1
 			elif g.x >= map_cols - 2:
 				right += 1
-	var lake_x := -(radius.x + 1.6 * k) if left <= right else map_cols + radius.x + 1.6 * k
-	var lake_c := Vector2(lake_x, map_rows * 0.53)
+	var lake_x := -(land_lake_r.x + 1.6 * k) if left <= right else map_cols + land_lake_r.x + 1.6 * k
+	land_lake_c = Vector2(lake_x, map_rows * 0.53)
 	var lake := ShaderMaterial.new()
 	lake.shader = load("res://assets/shaders/lake.gdshader")
-	lake.set_shader_parameter("center", lake_c)
-	lake.set_shader_parameter("radius", radius)
+	lake.set_shader_parameter("center", land_lake_c)
+	lake.set_shader_parameter("radius", land_lake_r)
 	var lp := PlaneMesh.new()
-	lp.size = radius * 2.6
-	var lmi := add_mesh(map_root, lp, lake, Vector3(lake_c.x, -0.1, lake_c.y))
+	lp.size = land_lake_r * 2.6
+	var lmi := add_mesh(land_root, lp, lake, Vector3(land_lake_c.x, -0.1, land_lake_c.y))
 	lmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 
-	# Trees, bushes, rocks and grass tufts; none in the lake or in front of a gate
-	var gates: Array[Vector2] = []
-	for g in gate_cells:
-		if g != null:
-			gates.append(Vector2(g) + Vector2(0.5, 0.5))
-	var by_model := {}
+	# The land's ground: hills on High, flat on Low
+	if outer_ground == null:
+		outer_ground = ground_mats[0].duplicate()
+		outer_ground.set_shader_parameter("outer", 1.0)
+		outer_ground.set_shader_parameter("grid", 0.0)
+		ground_mats.append(outer_ground)
+	outer_ground.set_shader_parameter("lake_center", land_lake_c)
+	outer_ground.set_shader_parameter("lake_radius", land_lake_r)
+	var size := Vector2(map_cols, map_rows) + Vector2(60, 50) * s
+	add_mesh(land_root, hill_mesh(size) if land_high else plane_mesh(size), outer_ground, Vector3(map_cols / 2.0, -0.12, map_rows / 2.0))
+
+	# Trees and bushes: none in the lake or in front of a gate, denser further out
+	land_trees = board_trees.duplicate()
 	var mx := int(ceil(10 * s))
 	for x in range(-mx, map_cols + mx):
 		for y in range(-int(ceil(11 * s)), map_rows + int(ceil(4 * s))):
 			var c := Vector2i(x, y)
+			if in_map(c):
+				continue
 			var h := tile_hash(c + Vector2i(500, 500))
 			var r := (h % 1000) / 1000.0
 			var pos := Vector3(x + 0.5 + ((h >> 10) % 7 - 3) * 0.08, 0.0, y + 0.5 + ((h >> 14) % 7 - 3) * 0.08)
 			var turn := deg_to_rad((h >> 4) % 360)
-			if in_map(c):
-				# Grass tufts on the board's grass (not on the path, water, rocks or trees)
-				if r < 0.3 and not path_cells.has(c) and not blocked.has(c):
-					put_model(by_model, OUTER_TUFTS[h % 2], pos, turn, 0.18 + (h >> 8) % 10 * 0.01)
-				continue
-			# Round the lake, with a little room for its shore
-			if ((Vector2(x + 0.5, y + 0.5) - lake_c) / (radius + Vector2(0.9, 0.9))).length() < 1.0:
-				continue
-			var near_gate := false
-			for g in gates:
-				if g.distance_to(Vector2(x + 0.5, y + 0.5)) < 2.2:
-					near_gate = true
-			# Nothing on the land round a gate (its crypt stands there)
-			if near_gate:
+			# Round the lake, with a little room for its shore, and the land round a gate (its crypt stands there)
+			if ((Vector2(x + 0.5, y + 0.5) - land_lake_c) / (land_lake_r + Vector2(0.9, 0.9))).length() < 1.0 \
+					or near_land_gate(Vector2(x + 0.5, y + 0.5), 2.2):
 				continue
 			var dist := maxf(maxf(maxf(-x, x - map_cols + 1), maxf(-y, y - map_rows + 1)), 0)
 			var tree_chance := clampf((dist - 1.5) / 3.0, 0.0, 0.7)
-			pos.y = -0.12
-			# Trees and bushes further out than TREE_FAR use the simpler mesh
 			if r < tree_chance:
-				land_trees.append([pos, turn, 1.15 + (h >> 7) % 10 * 0.05, h, false, dist > TREE_FAR])
+				land_trees.append([pos, turn, 1.15 + (h >> 7) % 10 * 0.05, h, false])
 			elif r < tree_chance + 0.12:
-				land_trees.append([pos, turn, 1.0 + (h >> 7) % 10 * 0.05, h, true, dist > TREE_FAR])
-			elif r < tree_chance + 0.17:
-				put_model(by_model, OUTER_ROCKS[h % OUTER_ROCKS.size()], pos, turn, 0.35 + (h >> 7) % 10 * 0.02)
-			elif r < tree_chance + 0.5:
-				put_model(by_model, OUTER_TUFTS[h % 2], pos, turn, 0.45)
-	for file: String in by_model:
-		for part: Array in pack_parts("nature/%s_Color1" % file):
-			var mm := MultiMesh.new()
-			mm.transform_format = MultiMesh.TRANSFORM_3D
-			mm.mesh = part[0]
-			mm.instance_count = by_model[file].size()
-			for i in mm.instance_count:
-				mm.set_instance_transform(i, by_model[file][i] * part[1])
-			var mmi := MultiMeshInstance3D.new()
-			mmi.multimesh = mm
-			var kind := "g" if file.begins_with("Grass") else "r"
-			mmi.material_override = outer_mat(part[0], kind)
-			if kind == "g":
-				mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-			map_root.add_child(mmi)
+				land_trees.append([pos, turn, 1.0 + (h >> 7) % 10 * 0.05, h, true])
 	add_trees()
+	build_life()
 
 
-func put_model(by_model: Dictionary, file: String, pos: Vector3, turn: float, size: float) -> void:
-	if not by_model.has(file):
-		by_model[file] = []
-	by_model[file].append(Transform3D(Basis(Vector3.UP, turn).scaled(Vector3.ONE * size), pos))
+func near_land_gate(p: Vector2, r: float) -> bool:
+	for g in land_gates:
+		if g.distance_to(p) < r:
+			return true
+	return false
 
 
-# The painted material of the land's rocks ("r") and grass tufts ("g"), made once
-var outer_mats := {}
+# How far a ground point is outside the board (0 on it)
+func board_dist(x: float, z: float) -> float:
+	return Vector2(maxf(maxf(-x, x - map_cols), 0.0), maxf(maxf(-z, z - map_rows), 0.0)).length()
 
 
-func outer_mat(mesh: Mesh, kind: String) -> ShaderMaterial:
-	if not outer_mats.has(kind):
-		load_painted()
-		var p := ShaderMaterial.new()
-		p.shader = painted_shader
-		p.set_shader_parameter("albedo_tex", (mesh.surface_get_material(0) as BaseMaterial3D).albedo_texture)
-		p.set_shader_parameter("rim_strength", 0.35)
-		p.set_shader_parameter("rim_color", Color(1.0, 0.85, 0.6))
-		p.set_shader_parameter("grad_low", 0.62)
-		p.set_shader_parameter("grad_high", 1.15)
-		p.set_shader_parameter("top_light", 0.2)
-		p.set_shader_parameter("grad_top", 0.3)
-		p.set_shader_parameter("saturation", 0.92)
-		p.set_shader_parameter("tint", Color(0.66, 0.66, 0.64) if kind == "r" else Color(0.6, 0.66, 0.48))
-		if kind == "r":
-			p.set_shader_parameter("snow_cap", 1.0)  # Frostfall Fair (see apply_festival())
-		outer_mats[kind] = p
-	return outer_mats[kind]
+# How high the land is at a ground point (Graphics High): flat on and near the
+# board, round the lake and in front of the gates; gentle hills further out, lower
+# in front (south), where they would hide the board.
+func hill(x: float, z: float) -> float:
+	if not land_high:
+		return 0.0
+	var ramp := smoothstep(1.8, 9.0, board_dist(x, z))
+	if ramp <= 0.0:
+		return 0.0
+	ramp *= smoothstep(1.0, 1.7, ((Vector2(x, z) - land_lake_c) / (land_lake_r + Vector2(1.6, 1.6))).length())
+	for g in land_gates:
+		ramp *= smoothstep(2.6, 5.5, g.distance_to(Vector2(x, z)))
+	var amp := 1.0 if z > map_rows else 3.2
+	return ramp * amp * (0.6 + 0.4 * hill_noise.get_noise_2d(x, z))
 
 
-# ---------------------------------------------------------------- painted trees
-
-# The land's trees and bushes, built in code: lumpy leaf clumps on a bent trunk,
-# one mesh each, with painted colors (dark in the crevices, light at the top and
-# edges) and a painted leaf texture (assets/shaders/painted_leaves.gdshader).
-# One MultiMesh per variant, so hundreds of trees are a few draw calls. Each
-# variant has a detailed mesh (near the board, on High) and a simple one (far
-# away, shadows, and everything on Low). Picked with tile_hash(), so every
-# player sees the same forest.
-const TREE_FAR := 2.0  # outer trees further than this from the board use the simple mesh
-const LEAF_GREENS := [
-	[Color(0.06, 0.14, 0.08), Color(0.18, 0.34, 0.12), Color(0.52, 0.62, 0.22)],
-	[Color(0.05, 0.13, 0.10), Color(0.15, 0.31, 0.15), Color(0.42, 0.56, 0.24)],
-]
-const BARK := [Color(0.16, 0.11, 0.08), Color(0.34, 0.23, 0.15), Color(0.50, 0.38, 0.26)]
-const TREE_WEIGHTS := [3.0, 2.0, 2.0, 1.0, 1.0]  # how common each shape is (see tree_mesh())
-var land_trees: Array = []  # [pos, turn, size, hash, bush, far], from build_decor() and build_outer()
-var tree_kinds: Array = []  # [detailed mesh, simple mesh, weight]; the last two are bushes
-var tree_near: Array = []  # [MultiMesh, detailed, simple]: switch with Graphics High/Low
-var tree_mat: ShaderMaterial
-var tree_noise: FastNoiseLite
-var ico_spheres := {}
+# The ground's height at a point: the board's grass top (0) or the land
+func ground_y(x: float, z: float) -> float:
+	if x >= 0.0 and z >= 0.0 and x <= map_cols and z <= map_rows:
+		return 0.0
+	return -0.12 + hill(x, z)
 
 
-# A mesh being built: points with normals and colors, and triangles
-class TreeMesh:
-	var v := PackedVector3Array()
-	var n := PackedVector3Array()
-	var c := PackedColorArray()
-	var idx := PackedInt32Array()
+func plane_mesh(size: Vector2) -> PlaneMesh:
+	var plane := PlaneMesh.new()
+	plane.size = size
+	return plane
 
-	func add(p: Vector3, nn: Vector3, col: Color) -> int:
-		v.append(p)
-		n.append(nn)
-		c.append(col)
-		return v.size() - 1
 
-	# Godot's front faces are clockwise: order the corners so the face looks along out
-	func tri(a: int, b: int, d: int, out: Vector3) -> void:
-		if (v[b] - v[a]).cross(v[d] - v[a]).dot(out) > 0.0:
-			idx.append_array([a, d, b])
-		else:
-			idx.append_array([a, b, d])
+# The land's ground as a grid (half a tile per square) lifted by hill()
+func hill_mesh(size: Vector2) -> ArrayMesh:
+	if hill_noise == null:
+		hill_noise = FastNoiseLite.new()
+		hill_noise.seed = 7
+		hill_noise.frequency = 0.07
+		hill_noise.fractal_octaves = 3
+	var c := Vector3(map_cols / 2.0, -0.12, map_rows / 2.0)
+	var step := 0.5
+	var nx := int(size.x / step)
+	var nz := int(size.y / step)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for j in nz + 1:
+		for i in nx + 1:
+			var x := c.x - size.x / 2 + i * step
+			var z := c.z - size.y / 2 + j * step
+			st.set_uv(Vector2(i, j) / Vector2(nx, nz))
+			st.add_vertex(Vector3(x - c.x, hill(x, z), z - c.z))
+	for j in nz:
+		for i in nx:
+			var a := j * (nx + 1) + i
+			for v in [a, a + 1, a + nx + 1, a + 1, a + nx + 2, a + nx + 1]:
+				st.add_index(v)
+	st.generate_normals()
+	return st.commit()
 
-	func mesh() -> ArrayMesh:
-		var arr := []
-		arr.resize(Mesh.ARRAY_MAX)
-		arr[Mesh.ARRAY_VERTEX] = v
-		arr[Mesh.ARRAY_NORMAL] = n
-		arr[Mesh.ARRAY_COLOR] = c
-		arr[Mesh.ARRAY_INDEX] = idx
-		var m := ArrayMesh.new()
-		m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+
+# ---------------------------------------------------------------- trees (Quaternius)
+
+# The forest: Quaternius CC0 trees and bushes (Stylized Nature MegaKit, see
+# assets/CREDITS.md), repainted to the game's greens (see build_nature.py and
+# leaves.gdshader). Each comes in three looks: the full model near the board, a
+# lighter one (fewer leaf cards) from TREE_NEAR out, and from TREE_SOLID out a solid
+# stand-in crown (no see-through cards, crown.gdshader), which Graphics Low uses
+# everywhere. One MultiMesh per model and look, so the whole forest is a few dozen
+# draw calls. Picked with tile_hash(), so every player sees the same forest.
+const NATURE_DIR := "res://assets/nature/quaternius/"
+const TREE_MODELS := ["CommonTree_1", "CommonTree_2", "CommonTree_3", "CommonTree_4", "CommonTree_5", "Pine_1", "Pine_2", "Pine_3"]
+const TREE_WEIGHTS := [3.0, 3.0, 2.0, 2.0, 2.0, 1.0, 1.0, 1.0]  # how common each one is
+const TREE_NEAR := 2.0   # tiles from the board: the full model up to here
+const TREE_SOLID := 5.0  # and the solid stand-in from here
+const TREE_H := 1.6      # a tree's height at size 1 (tiles); pines are 12% taller
+const BUSH_H := 0.95
+var land_trees: Array = []  # [pos, turn, size, hash, bush], from build_decor() and build_outer()
+var board_trees: Array = []  # the map's own trees (build_decor()), kept for rebuilding the land
+var nature_meshes := {}  # model name -> mesh with our materials (loaded once)
+var nature_shaded := {}  # material name (+ "solid") -> our material
+
+
+# A model with our materials: leaf cards (leaves.gdshader), solid crowns
+# (crown.gdshader), and the painted look on bark, rocks and mushrooms. The models
+# have no textures of their own: they share one per material name in tex/.
+func nature_mesh(name: String) -> Mesh:
+	if nature_meshes.has(name):
+		return nature_meshes[name]
+	var scene: Node = load(NATURE_DIR + name + ".glb").instantiate()
+	var mesh: ArrayMesh = (scene.find_children("*", "MeshInstance3D", true, false)[0] as MeshInstance3D).mesh.duplicate()
+	scene.free()
+	var pine := name.begins_with("Pine")
+	for i in mesh.get_surface_count():
+		var src := mesh.surface_get_material(i)
+		var mname := src.resource_name if src != null else ""
+		var key := mname + (" solid" if name.ends_with("_solid") else "") + (" pine" if pine else "")
+		if not nature_shaded.has(key):
+			nature_shaded[key] = nature_material(mname, name.ends_with("_solid"), pine)
+		mesh.surface_set_material(i, nature_shaded[key])
+	nature_meshes[name] = mesh
+	return mesh
+
+
+func nature_material(mname: String, solid: bool, pine: bool) -> Material:
+	var leaf := mname.begins_with("Lea")
+	var file := NATURE_DIR + "tex/" + mname.to_lower() + (".png" if leaf or mname == "Flowers" else ".jpg")
+	var tex: Texture2D = load(file) if ResourceLoader.exists(file) else null
+	if leaf:
+		var m := ShaderMaterial.new()
+		m.shader = load("res://assets/shaders/crown.gdshader" if solid else "res://assets/shaders/leaves.gdshader")
+		m.set_shader_parameter("leaf_tex", tex)
+		if solid:
+			# The shell is all crown surface (light): spread its AO over the greens again
+			m.set_shader_parameter("lo", 0.75)
+			m.set_shader_parameter("hi", 1.1)
+		if pine:
+			m.set_shader_parameter("dark", Color(0.04, 0.11, 0.09))
+			m.set_shader_parameter("mid", Color(0.12, 0.27, 0.15))
+			m.set_shader_parameter("top_col", Color(0.38, 0.52, 0.24))
 		return m
+	var s := StandardMaterial3D.new()
+	s.albedo_texture = tex
+	s.vertex_color_use_as_albedo = true
+	s.albedo_color = Color(0.9, 0.72, 0.6) if mname.begins_with("Bark") else Color(0.82, 0.84, 0.86)
+	if mname == "Flowers":
+		s.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+		s.cull_mode = BaseMaterial3D.CULL_DISABLED
+		return s
+	var p: ShaderMaterial = painted(s)
+	p.set_shader_parameter("snow_cap", 1.0)  # Frostfall Fair (see apply_festival())
+	return p
 
 
 # Places the trees and bushes build_decor() and build_outer() collected
 func add_trees() -> void:
-	if tree_kinds.is_empty():
-		make_tree_kinds()
-	var n := tree_kinds.size() - 2
 	var total := 0.0
-	for i in n:
-		total += tree_kinds[i][2]
-	var groups := {}  # variant (+100 when far) -> [tree, ...]
+	for w: float in TREE_WEIGHTS:
+		total += w
+	var groups := {}  # model name -> [Transform3D, ...]
 	for t: Array in land_trees:
 		var h: int = t[3]
-		var pick := 0
+		var pos: Vector3 = t[0]
+		var name := ""
+		var height: float = t[2]
 		if t[4]:
-			pick = n + h % 2
+			name = "Bush_Common" if h % 3 != 0 else "Bush_Common_Flowers"
+			height *= BUSH_H
 		else:
 			var r := ((h >> 3) % 1000) / 1000.0 * total
-			while pick < n - 1 and r >= tree_kinds[pick][2]:
-				r -= tree_kinds[pick][2]
+			var pick := 0
+			while pick < TREE_MODELS.size() - 1 and r >= TREE_WEIGHTS[pick]:
+				r -= TREE_WEIGHTS[pick]
 				pick += 1
-		if t[5]:
-			pick += 100
-		if not groups.has(pick):
-			groups[pick] = []
-		groups[pick].append(t)
-	for pick: int in groups:
-		var kind: Array = tree_kinds[pick % 100]
+			name = TREE_MODELS[pick]
+			height *= TREE_H * (1.12 if name.begins_with("Pine") else 1.0)
+		var d := board_dist(pos.x, pos.z)
+		if not land_high or d > TREE_SOLID:
+			name += "_solid"
+		elif d > TREE_NEAR:
+			name += "_far"
+		pos.y = ground_y(pos.x, pos.z) - 0.03
+		if not groups.has(name):
+			groups[name] = []
+		groups[name].append([Transform3D(Basis(Vector3.UP, t[1]), pos), height])
+	for name: String in groups:
+		var mesh := nature_mesh(name)
+		var k := 1.0 / mesh.get_aabb().size.y
 		var mm := MultiMesh.new()
 		mm.transform_format = MultiMesh.TRANSFORM_3D
-		mm.use_colors = true
-		mm.mesh = kind[0] if pick < 100 and graphics_high else kind[1]
-		mm.instance_count = groups[pick].size()
+		mm.mesh = mesh
+		mm.instance_count = groups[name].size()
 		for i in mm.instance_count:
-			var t: Array = groups[pick][i]
-			var h: int = t[3]
-			mm.set_instance_transform(i, Transform3D(Basis(Vector3.UP, t[1]).scaled(Vector3.ONE * t[2]), t[0]))
-			# A little lighter or darker per tree
-			var k := 0.88 + ((h >> 13) % 100) / 100.0 * 0.22
-			mm.set_instance_color(i, Color(k, k * (0.97 + ((h >> 17) % 7) * 0.01), k * 0.97))
-		if pick < 100:
-			tree_near.append([mm, kind[0], kind[1]])
+			var g: Array = groups[name][i]
+			# A little wider than the models: chunkier crowns that read from above
+			mm.set_instance_transform(i, (g[0] as Transform3D).scaled_local(Vector3(1.2, 1.0, 1.2) * k * g[1]))
 		var mmi := MultiMeshInstance3D.new()
 		mmi.multimesh = mm
-		mmi.material_override = tree_mat
-		map_root.add_child(mmi)
+		land_root.add_child(mmi)
 	land_trees = []
 
 
-# The tree variants (5 shapes in 2 greens) and 2 bushes, and their material, made once
-func make_tree_kinds() -> void:
-	tree_noise = FastNoiseLite.new()
-	tree_noise.noise_type = FastNoiseLite.TYPE_SIMPLEX
-	tree_noise.frequency = 1.0
-	tree_noise.seed = 7
-	for shape in 5:
-		for g in 2:
-			tree_kinds.append([tree_mesh(shape, LEAF_GREENS[g], g + 1, 2), tree_mesh(shape, LEAF_GREENS[g], g + 1, 1),
-				TREE_WEIGHTS[shape] * (1.0 if g == 0 else 0.7)])
-	for b in 2:
-		tree_kinds.append([tree_mesh(5, LEAF_GREENS[0], 40 + b, 2), tree_mesh(5, LEAF_GREENS[0], 40 + b, 1), 0.0])
-	# Shadows always come from the simple mesh
-	for kind: Array in tree_kinds:
-		(kind[0] as ArrayMesh).shadow_mesh = kind[1]
-	tree_mat = ShaderMaterial.new()
-	tree_mat.shader = load("res://assets/shaders/painted_leaves.gdshader")
-	tree_mat.set_shader_parameter("leaf_tex", leaf_texture())
-	# A faint green rim: just enough to keep the clumps apart (a stronger warm one glowed)
-	tree_mat.set_shader_parameter("rim_strength", 0.08)
-	tree_mat.set_shader_parameter("rim_color", Color(0.7, 0.85, 0.5))
-	tree_mat.set_shader_parameter("grad_low", 0.75)
-	tree_mat.set_shader_parameter("grad_high", 1.1)
-	tree_mat.set_shader_parameter("grad_top", 1.3)
-	tree_mat.set_shader_parameter("top_light", 0.25)
+# A MultiMesh of a Quaternius model in land_root. size: the height it's scaled to
+# (or its width when by_width) at instance scale 1.
+func nature_mm(name: String, xfs: Array, size: float, by_width: bool, shadows: bool) -> void:
+	if xfs.is_empty():
+		return
+	var mesh := nature_mesh(name)
+	var bb := mesh.get_aabb()
+	var fit := Basis.IDENTITY.scaled(Vector3.ONE * size / (maxf(bb.size.x, bb.size.z) if by_width else bb.size.y))
+	add_mm(mesh, xfs, null, shadows, fit)
 
 
-# A tree (shapes 0-4) or a bush (5), one tile tall, in the greens pal.
-# sub: the clumps' detail (2: detailed, 1: simple).
-func tree_mesh(shape: int, pal: Array, sd: int, sub: int) -> ArrayMesh:
+func add_mm(mesh: Mesh, xfs: Array, material: Material, shadows: bool, fit := Basis.IDENTITY) -> void:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.mesh = mesh
+	mm.instance_count = xfs.size()
+	for i in xfs.size():
+		mm.set_instance_transform(i, (xfs[i] as Transform3D) * Transform3D(fit, Vector3.ZERO))
+	var mmi := MultiMeshInstance3D.new()
+	mmi.multimesh = mm
+	mmi.material_override = material
+	if not shadows:
+		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	land_root.add_child(mmi)
+
+
+# ---------------------------------------------------------------- grass, flowers, stones
+
+# Thick grass along the path's edges, inside the wall and over the land (a third of
+# it on Graphics Low), flower patches, pebbles along the path and round boulders,
+# ferns and mushrooms at the forest's edge. The tufts are built in code
+# (grass_tuft.gdshader); the rest are Quaternius models.
+var tuft_meshes: Array = []  # 3 green tufts and a dry one (made once)
+var grass_mat: ShaderMaterial
+var tower_mask: ImageTexture  # one pixel per tile: white under a tower (see update_grass_mask())
+var tower_mask_key := -1
+
+
+# A grass tuft: thin bent blades, dark at the root, sunlit at the tip (alpha: height up the blade)
+func tuft_mesh(blades: int, height: float, seed: int, root: Color, top: Color) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var rng := RandomNumberGenerator.new()
-	rng.seed = sd * 1013 + shape
-	var b := TreeMesh.new()
-	var h := 0.5  # trunk height
-	var cc := Vector3(0, 0.88, 0)  # the crown's middle
-	var cr := 0.5  # and its size
-	var blobs: Array = []  # [middle, size]
-	var bend := Vector3(rng.randf_range(-0.04, 0.04), 0, rng.randf_range(-0.04, 0.04))
-	match shape:
-		0:  # big round crown
-			blobs.append([cc, Vector3(0.40, 0.34, 0.40)])
-			for i in 4:
-				var a := TAU * i / 4 + rng.randf() * 0.8
-				blobs.append([cc + Vector3(cos(a) * 0.24, rng.randf_range(-0.08, 0.06), sin(a) * 0.24), Vector3.ONE * rng.randf_range(0.24, 0.29)])
-			blobs.append([cc + Vector3(0.02, 0.2, -0.03), Vector3.ONE * 0.24])
-		1:  # tall oval crown
-			h = 0.55
-			cc = Vector3(0, 1.0, 0)
-			cr = 0.55
-			blobs.append([Vector3(0, 0.78, 0), Vector3(0.33, 0.27, 0.33)])
-			blobs.append([Vector3(0.03, 1.05, -0.02), Vector3(0.29, 0.26, 0.29)])
-			blobs.append([Vector3(-0.02, 1.3, 0.02), Vector3(0.2, 0.2, 0.2)])
-			for i in 3:
-				var a := TAU * i / 3 + rng.randf()
-				blobs.append([Vector3(cos(a) * 0.2, rng.randf_range(0.8, 1.1), sin(a) * 0.2), Vector3.ONE * 0.2])
-		2:  # wide crown on a forked trunk
-			h = 0.42
-			cc = Vector3(0, 0.78, 0)
-			cr = 0.6
-			for s: float in [-1.0, 1.0]:
-				var side := Vector3(0.24 * s, 0, rng.randf_range(-0.06, 0.06))
-				tree_trunk(b, Vector3(0, 0.3, 0), cc + side + Vector3(0, -0.12, 0), 0.04, 0.025, Vector3.ZERO, 5, 3)
-				blobs.append([cc + side, Vector3(0.3, 0.26, 0.3)])
-				blobs.append([cc + side * 1.5 + Vector3(0, -0.06, 0.12 * s), Vector3.ONE * 0.2])
-			blobs.append([cc + Vector3(0, 0.12, 0), Vector3(0.28, 0.24, 0.28)])
-			blobs.append([cc + Vector3(0, -0.02, 0.2), Vector3.ONE * 0.21])
-			blobs.append([cc + Vector3(0, -0.02, -0.2), Vector3.ONE * 0.21])
-		3:  # young tree
-			h = 0.36
-			cc = Vector3(0, 0.6, 0)
-			cr = 0.32
-			blobs.append([cc, Vector3(0.25, 0.23, 0.25)])
-			blobs.append([cc + Vector3(0.1, 0.13, 0.05), Vector3.ONE * 0.16])
-			blobs.append([cc + Vector3(-0.12, -0.02, -0.06), Vector3.ONE * 0.16])
-		4:  # leaning tree with an uneven crown
-			bend = Vector3(0.1, 0, 0.04)
-			cc = Vector3(0.14, 0.86, 0.05)
-			blobs.append([cc, Vector3(0.36, 0.3, 0.33)])
-			blobs.append([cc + Vector3(0.22, -0.07, 0.04), Vector3.ONE * 0.24])
-			blobs.append([cc + Vector3(-0.2, 0.05, -0.08), Vector3.ONE * 0.22])
-			blobs.append([cc + Vector3(0.0, 0.18, 0.1), Vector3.ONE * 0.22])
-		5:  # bush: low clumps, no trunk
-			h = 0.0
-			cc = Vector3(0, 0.12, 0)
-			cr = 0.36
-			blobs.append([cc, Vector3(0.3, 0.22, 0.3)])
-			for i in 3:
-				var a := TAU * i / 3 + rng.randf()
-				blobs.append([cc + Vector3(cos(a) * 0.2, rng.randf_range(-0.04, 0.04), sin(a) * 0.2), Vector3(0.19, 0.16, 0.19)])
-	if h > 0.0:
-		tree_trunk(b, Vector3.ZERO, Vector3(cc.x, h + 0.15, cc.z), 0.065, 0.04, bend)
-	var i := 0
-	for bl: Array in blobs:
-		i += 1
-		leaf_clump(b, bl[0], bl[1], cc, cr, pal, sd * 31 + i, sub)
-	return b.mesh()
+	rng.seed = seed
+	for b in blades:
+		var a := rng.randf() * TAU
+		var p0 := Vector3(cos(a), 0.0, sin(a)) * rng.randf() * 0.06
+		var lean := Vector3(cos(a), 0, sin(a)) * rng.randf_range(0.04, 0.1)
+		var h := height * rng.randf_range(0.6, 1.0)
+		var face := rng.randf() * TAU
+		var side := Vector3(cos(face), 0, sin(face)) * 0.018
+		var nrm := Vector3(cos(face + PI / 2), 0.6, sin(face + PI / 2)).normalized()
+		var pts := []
+		for s in 4:
+			var f := s / 3.0
+			var mid := p0 + lean * f * f + Vector3(0, h * f, 0)
+			pts.append([mid - side * (1.0 - f), mid + side * (1.0 - f), f])
+		for s in 3:
+			var lo: Array = pts[s]
+			var hi: Array = pts[s + 1]
+			for q in [[lo[0], lo[1], hi[0], lo[2], lo[2], hi[2]], [lo[1], hi[1], hi[0], lo[2], hi[2], hi[2]]]:
+				for e in 3:
+					var col := root.lerp(top, q[3 + e])
+					col.a = q[3 + e]
+					st.set_color(col)
+					st.set_normal(nrm)
+					st.add_vertex(q[e])
+	return st.commit()
 
 
-# A unit ball made of triangles (an icosphere split sub times): [points, corner indices]
-func ico_sphere(sub: int) -> Array:
-	if ico_spheres.has(sub):
-		return ico_spheres[sub]
-	var t := (1.0 + sqrt(5.0)) / 2.0
-	var verts: Array[Vector3] = [Vector3(-1, t, 0), Vector3(1, t, 0), Vector3(-1, -t, 0), Vector3(1, -t, 0),
-		Vector3(0, -1, t), Vector3(0, 1, t), Vector3(0, -1, -t), Vector3(0, 1, -t),
-		Vector3(t, 0, -1), Vector3(t, 0, 1), Vector3(-t, 0, -1), Vector3(-t, 0, 1)]
-	for i in verts.size():
-		verts[i] = verts[i].normalized()
-	var faces: Array = [0, 11, 5, 0, 5, 1, 0, 1, 7, 0, 7, 10, 0, 10, 11, 1, 5, 9, 5, 11, 4, 11, 10, 2, 10, 7, 6, 7, 1, 8,
-		3, 9, 4, 3, 4, 2, 3, 2, 6, 3, 6, 8, 3, 8, 9, 4, 9, 5, 2, 4, 11, 6, 2, 10, 8, 6, 7, 9, 8, 1]
-	for s in sub:
-		var mids := {}
-		var split: Array = []
-		for f in range(0, faces.size(), 3):
-			var m: Array[int] = []
-			for e in 3:
-				var a: int = faces[f + e]
-				var b: int = faces[f + (e + 1) % 3]
-				var key := Vector2i(mini(a, b), maxi(a, b))
-				if not mids.has(key):
-					verts.append(((verts[a] + verts[b]) * 0.5).normalized())
-					mids[key] = verts.size() - 1
-				m.append(mids[key])
-			split.append_array([faces[f], m[0], m[2], faces[f + 1], m[1], m[0], faces[f + 2], m[2], m[1], m[0], m[1], m[2]])
-		faces = split
-	ico_spheres[sub] = [verts, faces]
-	return ico_spheres[sub]
+func xf_at(x: float, z: float, turn: float, size: Vector3, sink := 0.0) -> Transform3D:
+	return Transform3D(Basis(Vector3.UP, turn).scaled(size), Vector3(x, ground_y(x, z) - sink, z))
 
 
-# A lumpy leaf clump. Its normals lean out from the crown's middle (cc), so the whole
-# crown shades like one soft ball; it's darker in the crevices and underneath.
-func leaf_clump(b: TreeMesh, center: Vector3, rad: Vector3, cc: Vector3, cr: float, pal: Array, sd: int, sub: int) -> void:
-	var ball: Array = ico_sphere(sub)
-	var verts: Array = ball[0]
-	var faces: Array = ball[1]
-	var pos: Array[Vector3] = []
-	var fine: Array[float] = []
-	var off := Vector3(sd * 7.31, sd * 3.17, sd * 5.53)
-	for d: Vector3 in verts:
-		var dd := d
-		if dd.y < 0.0:
-			dd.y *= 0.75  # flatter underneath
-		var f := tree_noise.get_noise_3dv(d * 4.5 + off * 1.3)
-		fine.append(f)
-		pos.append(center + dd * rad * (1.0 + 0.28 * tree_noise.get_noise_3dv(d * 1.7 + off) + 0.07 * f))
-	var sn: Array[Vector3] = []
-	sn.resize(pos.size())
-	sn.fill(Vector3.ZERO)
-	for i in range(0, faces.size(), 3):
-		var a: int = faces[i]
-		var p: int = faces[i + 1]
-		var q: int = faces[i + 2]
-		var fn := (pos[p] - pos[a]).cross(pos[q] - pos[a])
-		if fn.dot(pos[a] - center) < 0.0:
-			fn = -fn
-		sn[a] += fn
-		sn[p] += fn
-		sn[q] += fn
-	var base := b.v.size()
-	for i in pos.size():
-		var cn := (pos[i] - cc).normalized()
-		var occ := clampf((pos[i] - cc).length() / cr, 0.0, 1.2)
-		var k := occ * 0.75 + (0.5 + 0.5 * cn.y) * 0.4 - 0.3 + fine[i] * 0.2
-		b.add(pos[i], (sn[i].normalized() * 0.32 + cn * 0.68 + Vector3.UP * 0.1).normalized(), tree_color(pal, k))
-	for i in range(0, faces.size(), 3):
-		var a: int = base + faces[i]
-		b.tri(a, base + faces[i + 1], base + faces[i + 2], b.v[a] - center)
-
-
-# A tapered, slightly bent trunk with a root flare. Its color's alpha is 0, so it gets no leaf texture.
-func tree_trunk(b: TreeMesh, foot: Vector3, top: Vector3, r0: float, r1: float, bend: Vector3, sides := 7, rings := 5) -> void:
-	var base := b.v.size()
-	for k in rings + 1:
-		var t := float(k) / rings
-		var mid := foot.lerp(top, t) + bend * sin(t * PI * 0.8)
-		var r := lerpf(r0, r1, t) * (1.0 + 0.9 * pow(1.0 - t, 5.0))
-		for s in sides:
-			var ang := TAU * s / sides + t * 0.6
-			var dir := Vector3(cos(ang), 0.0, sin(ang))
-			var stripe := tree_noise.get_noise_2d(s * 3.0, t * 2.0)
-			b.add(mid + dir * r * (1.0 + 0.1 * stripe), (dir + Vector3.UP * 0.15).normalized(),
-				Color(tree_color(BARK, 0.25 + t * 0.55 + stripe * 0.2), 0.0))
-	for k in rings:
-		for s in sides:
-			var a := base + k * sides + s
-			var b2 := base + k * sides + (s + 1) % sides
-			var out := (b.v[a] + b.v[b2]) * 0.5 - foot.lerp(top, float(k) / rings)
-			out.y = 0.0
-			b.tri(a, b2, a + sides, out)
-			b.tri(b2, b2 + sides, a + sides, out)
-
-
-# Dark, middle and light color of pal, k from 0 to 1
-func tree_color(pal: Array, k: float) -> Color:
-	k = clampf(k, 0.0, 1.0)
-	if k < 0.5:
-		return (pal[0] as Color).lerp(pal[1], k * 2.0)
-	return (pal[1] as Color).lerp(pal[2], k * 2.0 - 1.0)
-
-
-# A grey, tileable texture of painted leaves (the trees' colors give its green)
-func leaf_texture() -> ImageTexture:
-	var n := 256
-	var img := Image.create(n, n, false, Image.FORMAT_RGB8)
-	img.fill(Color(0.36, 0.36, 0.36))
-	var rng := RandomNumberGenerator.new()
-	rng.seed = 11
-	for i in 750:
-		var at := Vector2i(rng.randi() % n, rng.randi() % n)
-		var ang := rng.randf_range(0.6, 2.5)
-		var ln := rng.randf_range(8.0, 14.0)
-		var wd := ln * rng.randf_range(0.38, 0.5)
-		var light := rng.randf_range(0.45, 0.95)
-		var dir := Vector2(cos(ang), sin(ang))
-		var side := dir.orthogonal()
-		var r := int(ln) + 1
-		for y in range(-r, r + 1):
-			for x in range(-r, r + 1):
-				var q := Vector2(x, y)
-				var a := q.dot(dir) / ln
-				var b := q.dot(side) / wd
-				var prof := 1.0 - a * a
-				if prof <= 0.0 or absf(b) > prof * (1.0 + 0.3 * a):
+func build_life() -> void:
+	if tuft_meshes.is_empty():
+		var root := Color(0.07, 0.13, 0.03)
+		tuft_meshes = [tuft_mesh(9, 0.2, 1, root, Color(0.36, 0.5, 0.12)), tuft_mesh(7, 0.15, 2, root, Color(0.42, 0.52, 0.14)),
+				tuft_mesh(11, 0.26, 3, root, Color(0.3, 0.44, 0.1)), tuft_mesh(8, 0.22, 4, Color(0.12, 0.12, 0.04), Color(0.58, 0.5, 0.22))]
+		grass_mat = ShaderMaterial.new()
+		grass_mat.shader = load("res://assets/shaders/grass_tuft.gdshader")
+	tower_mask_key = -1
+	update_grass_mask()
+	grass_mat.set_shader_parameter("map_size", Vector2(map_cols, map_rows))
+	var keep := 1.0 if land_high else 0.34  # Low: a third of the grass
+	var tufts := [[], [], [], []]
+	var flowers := [[], []]
+	var pebbles := [[], [], []]
+	var boulders := [[], [], []]
+	var under := [[], [], []]  # ferns, big-leaf plants, mushrooms
+	var dirs := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]
+	var mx := 13
+	for x in range(-mx, map_cols + mx):
+		for y in range(-mx, map_rows + 6):
+			var c := Vector2i(x, y)
+			var rng := RandomNumberGenerator.new()
+			rng.seed = tile_hash(c + Vector2i(321, 654))
+			if in_map(c):
+				if path_cells.has(c):
+					# Pebbles along the path's edges
+					for d: Vector2i in dirs:
+						if not path_cells.has(c + d) and in_map(c + d) and blocked.get(c + d, "") != "w" and rng.randf() < 0.7:
+							var s := rng.randf_range(-0.4, 0.4)
+							var sz := rng.randf_range(0.035, 0.07)
+							var px := x + 0.5 + d.x * 0.36 + (s if d.x == 0 else 0.0)
+							var pz := y + 0.5 + d.y * 0.36 + (s if d.y == 0 else 0.0)
+							pebbles[rng.randi() % 3].append(Transform3D(Basis(Vector3.UP, rng.randf() * TAU).scaled(Vector3(sz * 1.3, sz, sz)), Vector3(px, -0.08 - sz * 0.3, pz)))
 					continue
-				# Lighter toward the tip, a darker middle vein
-				var shade := light * (0.7 + 0.4 * (0.5 - a * 0.5)) * (1.0 - 0.2 * absf(b))
-				if absf(b) < 0.1 and a > -0.8:
-					shade *= 0.82
-				img.set_pixel(posmod(at.x + x, n), posmod(at.y + y, n), Color(shade, shade, shade))
-	img.generate_mipmaps()
-	return ImageTexture.create_from_image(img)
+				if blocked.has(c):
+					continue
+				# Thick grass where the board's grass meets the path
+				for d: Vector2i in dirs:
+					if path_cells.has(c + d):
+						for k in 4:
+							var s := (k + 0.5) / 4.0 - 0.5 + rng.randf_range(-0.08, 0.08)
+							var px := x + 0.5 + d.x * rng.randf_range(0.4, 0.48) + (s if d.x == 0 else 0.0)
+							var pz := y + 0.5 + d.y * rng.randf_range(0.4, 0.48) + (s if d.y == 0 else 0.0)
+							var t := rng.randi() % 3
+							var sc := rng.randf_range(0.8, 1.25)
+							if rng.randf() < keep:
+								tufts[t].append(xf_at(px, pz, rng.randf() * TAU, Vector3.ONE * sc))
+				# Along the inside of the wall
+				if x == 0 or y == 0 or x == map_cols - 1 or y == map_rows - 1:
+					for k in 3:
+						var px := x + rng.randf()
+						var pz := y + rng.randf()
+						if x == 0:
+							px = x + rng.randf_range(0.05, 0.18)
+						elif x == map_cols - 1:
+							px = x + 1 - rng.randf_range(0.05, 0.18)
+						if y == 0:
+							pz = y + rng.randf_range(0.05, 0.18)
+						elif y == map_rows - 1:
+							pz = y + 1 - rng.randf_range(0.05, 0.18)
+						var t := rng.randi() % 3
+						var turn := rng.randf() * TAU
+						var sc := rng.randf_range(0.9, 1.3)
+						if rng.randf() < keep:
+							tufts[t].append(xf_at(px, pz, turn, Vector3.ONE * sc))
+				# A tuft in one corner, sometimes with flowers
+				if rng.randf() < 0.5:
+					var cx := x + (0.12 if rng.randf() < 0.5 else 0.88)
+					var cz := y + (0.12 if rng.randf() < 0.5 else 0.88)
+					var t := rng.randi() % 3
+					var turn := rng.randf() * TAU
+					if rng.randf() < keep:
+						tufts[t].append(xf_at(cx, cz, turn, Vector3.ONE))
+					if rng.randf() < 0.12:
+						flowers[rng.randi() % 2].append(xf_at(cx + 0.08, cz, rng.randf() * TAU, Vector3.ONE))
+				continue
+			# The land: dense grass with dry patches, flowers, stones and boulders
+			var p := Vector2(x + 0.5, y + 0.5)
+			if ((p - land_lake_c) / (land_lake_r + Vector2(0.7, 0.7))).length() < 1.0 or near_land_gate(p, 1.6):
+				continue
+			var dist := maxf(maxf(maxf(-x - 1, x - map_cols), 0), maxf(maxf(-y - 1, y - map_rows), 0))
+			var patch := sin(x * 0.61 + sin(y * 0.37) * 2.0) * cos(y * 0.53 - x * 0.21)
+			var n := (4 if dist < 3 else (3 if dist < 8 else 2)) + (3 if patch > 0.15 else 0)
+			for k in n:
+				var px := x + rng.randf()
+				var pz := y + rng.randf()
+				var t := 3 if patch < -0.35 else rng.randi() % 3
+				var turn := rng.randf() * TAU
+				var sc := rng.randf_range(0.9, 1.5)
+				if rng.randf() < keep:
+					tufts[t].append(xf_at(px, pz, turn, Vector3.ONE * sc))
+			if patch > 0.25 and dist < 9 and rng.randf() < 0.7:
+				var fi := int(floor((x + y) / 3.0)) & 1
+				for k in 2:
+					flowers[fi].append(xf_at(x + rng.randf(), y + rng.randf(), rng.randf() * TAU, Vector3.ONE * 1.2))
+			var r := rng.randf()
+			if dist >= 1 and r < (0.05 if dist < 3 else 0.035):
+				var sz := rng.randf_range(0.25, 0.4) if dist < 3 else rng.randf_range(0.4, 0.95)
+				boulders[rng.randi() % 3].append(xf_at(x + rng.randf(), y + rng.randf(), rng.randf() * TAU, Vector3(sz * 1.2, sz, sz), sz * 0.25))
+				# A few small stones round a big one
+				for k in 3:
+					var a := rng.randf() * TAU
+					var s2 := sz * rng.randf_range(0.15, 0.3)
+					pebbles[k].append(xf_at(x + 0.5 + cos(a) * sz * 1.4, y + 0.5 + sin(a) * sz * 1.4, a, Vector3(s2 * 1.3, s2, s2), s2 * 0.2))
+			elif r < 0.12:
+				var s2 := rng.randf_range(0.05, 0.1)
+				pebbles[rng.randi() % 3].append(xf_at(x + rng.randf(), y + rng.randf(), rng.randf() * TAU, Vector3(s2 * 1.3, s2, s2), s2 * 0.2))
+			elif r < 0.24:
+				under[rng.randi() % 2].append(xf_at(x + rng.randf(), y + rng.randf(), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.8, 1.2)))
+			elif r < 0.28:
+				under[2].append(xf_at(x + rng.randf(), y + rng.randf(), rng.randf() * TAU, Vector3.ONE * rng.randf_range(0.8, 1.3)))
+	for i in 4:
+		add_mm(tuft_meshes[i], tufts[i], grass_mat, false)
+	nature_mm("Flower_3_Group", flowers[0], 0.17, false, false)
+	nature_mm("Flower_4_Group", flowers[1], 0.17, false, false)
+	var pb := ["Pebble_Round_1", "Pebble_Round_3", "Pebble_Square_2"]
+	for i in 3:
+		nature_mm(pb[i], pebbles[i], 2.0, true, land_high)
+		nature_mm("Rock_Medium_%d" % (i + 1), boulders[i], 2.0, true, true)
+	nature_mm("Fern_1", under[0], 0.32, false, false)
+	nature_mm("Plant_1_Big", under[1], 0.3, false, false)
+	nature_mm("Mushroom_Common", under[2], 0.12, false, false)
+
+
+# Every computer, every frame (cheap: only when the towers change): white pixels
+# under the towers, so the grass tufts there shrink away (grass_tuft.gdshader)
+func update_grass_mask() -> void:
+	if grass_mat == null or map_cols <= 0:
+		return
+	var key := towers.size()
+	for c: Vector2i in towers:
+		key = key * 31 + c.x * 1000 + c.y
+	if key == tower_mask_key:
+		return
+	tower_mask_key = key
+	var img := Image.create(map_cols, map_rows, false, Image.FORMAT_L8)
+	for c: Vector2i in towers:
+		if in_map(c):
+			img.set_pixel(c.x, c.y, Color.WHITE)
+	if tower_mask == null or tower_mask.get_size() != Vector2(map_cols, map_rows):
+		tower_mask = ImageTexture.create_from_image(img)
+	else:
+		tower_mask.update(img)
+	grass_mat.set_shader_parameter("tower_mask", tower_mask)
 
 
 # ---------------------------------------------------------------- particles and effects
@@ -1550,6 +1599,14 @@ func mood_light() -> void:
 		gm.set_shader_parameter("grass_color", Color(0.62, 0.66, 0.72) if snow else null)
 		gm.set_shader_parameter("detail", 0.3 if snow else null)
 		gm.set_shader_parameter("dirt_color", Color(0.4, 0.33, 0.28) if snow else null)
+		gm.set_shader_parameter("far_color", Color(0.55, 0.58, 0.64) if snow else null)
+		gm.set_shader_parameter("bank_color", Color(0.5, 0.52, 0.56) if snow else null)
+	# The snow weather frosts the grass tips and dusts the crowns
+	if grass_mat != null:
+		grass_mat.set_shader_parameter("frost", 1.0 if snow else 0.0)
+	for m: Material in nature_shaded.values():
+		if m is ShaderMaterial and not (m as ShaderMaterial).shader.resource_path.ends_with("painted.gdshader"):
+			(m as ShaderMaterial).set_shader_parameter("frost", 1.0 if snow else 0.0)
 	RenderingServer.global_shader_parameter_set(&"mood_rim", rim)
 	RenderingServer.global_shader_parameter_set(&"mood_rough", rough)
 	if pollen != null:
@@ -2758,6 +2815,7 @@ func update_visuals(delta: float) -> void:
 	time += delta
 	update_audio(delta)
 	update_ability_fx(delta)
+	update_grass_mask()
 	# The night's torches flicker
 	for i in torches.size():
 		torches[i].light_energy = 2.2 + sin(time * 13.0 + i) * 0.15 + sin(time * 7.3 + i * 2.0) * 0.15

@@ -14,14 +14,14 @@ Monsters come out of a glowing portal in a crypt gate at a corner of the map, wa
 
 Play alone or with up to 4 players: each player gets their own gate at a corner of the square (see [Multiplayer](#multiplayer)). Or draw your own maps in the [Map editor](#map-editor) and share them.
 
-**The art.** The 3D world has a hand-painted look (painted shaders, a golden sun with cool violet shade and a warm rim light on every model, a forest and a lake around the board).
+**The art.** The 3D world has a hand-painted look (painted shaders, a golden sun with cool violet shade and a warm rim light on every model). The board sits inside a grey stone wall, on gentle hills with a lake, thick swaying grass, flowers, pebbles, boulders and a forest.
 
-- Free CC0 models from the KayKit packs by Kay Lousberg: rocks and the skeleton mage boss with its walk (repainted in the Bone Choir colours). Painted CC0 grass and dirt textures by Cethiel.
+- Free CC0 models from the KayKit packs by Kay Lousberg: rocks and the skeleton mage boss with its walk (repainted in the Bone Choir colours).
+- Free CC0 ground and wall textures from Poly Haven (grass, path, forest floor, stone), and CC0 trees, bushes, flowers, ferns, mushrooms, boulders and pebbles from the Quaternius Stylized Nature MegaKit (repainted for the game).
 - Made for the game with a model kit: the Cannon, Poison, Frost and Spark towers (a new look at levels 1-5, 10, 15, 20, 30 and 40 for each path) and the skeleton warrior (with its walk and death).
 - Made for the game: the Barracks (a guard hall, a stone keep and a wooden camp) and its soldiers (footmen, knights and militia).
 - By Gettic: the Arrow tower models, the logo and the game icon.
 - Made for the game: the Bone Choir's crypt gate (a skull over iron doors that swing open, with a swirling portal).
-- The trees and bushes are built in code with a painted leaf look (5 shapes in 2 greens).
 - The music and sound effects were made for the game too (see [Sound and music](#sound-and-music)). Some smaller things are still simple shapes built in code.
 
 All sources are in [assets/CREDITS.md](assets/CREDITS.md).
@@ -85,7 +85,7 @@ godot --path path/to/this/folder
 
 | Setting | Choices |
 |---|---|
-| **Graphics** | High or Low. Low turns off some effects and is faster on older PCs (PCs with built-in graphics start on Low) |
+| **Graphics** | High or Low. Low turns off some effects, flattens the hills, uses solid trees and a third of the grass, and is faster on older PCs (PCs with built-in graphics start on Low) |
 | **Window** | Fullscreen or Windowed (also **F11** / **Alt+Enter**). The game starts in fullscreen the first time |
 | **3D resolution** | 100, 85, 75 or 50%: lower is faster |
 | **Anti-aliasing** | MSAA 2x, MSAA 4x, FXAA or Off |
@@ -254,7 +254,7 @@ A "WEEKLY" banner shows while you play it. A player who joins late counts for th
 
 ## Weather and festivals
 
-**Weather.** Every new game gets a time of day or weather: day, evening, night, rain, fog or snow. It changes the light, the sky and the ground, and adds rain, snow, falling leaves, mist or gate torches. It is picked at random. In the daily and weekly challenges it is the same for everyone that day or week. In multiplayer everyone sees the host's weather. Set **Weather** to *Always day* in [Settings](#settings) to turn it off (the map editor is always day).
+**Weather.** Every new game gets a time of day or weather: day, evening, night, rain, fog or snow. It changes the light, the sky and the ground, and adds rain, snow, falling leaves, mist or gate torches. In snow, the grass tips are frosted and the trees dusted white. It is picked at random. In the daily and weekly challenges it is the same for everyone that day or week. In multiplayer everyone sees the host's weather. Set **Weather** to *Always day* in [Settings](#settings) to turn it off (the map editor is always day).
 
 **Festivals.** On some dates the world dresses up. It is looks only, and each computer uses its own date:
 
@@ -434,12 +434,12 @@ Good places to start:
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms. `CAMERA_TILT_FAR` and `CAMERA_TILT_NEAR` are the camera angles (degrees) at the normal view and the closest zoom; `camera_tilt()` blends them by zoom. `CAMERA_STARTS` holds the zoom for each **Camera start** choice (saved as `camera_start` under `[display]` in `settings.cfg`).
 - Camera helpers in `game_base.gd`: `camera_offset()` gives the camera's spot for a zoom, `place_camera()` puts the camera there, `reset_camera()` goes back to the start (or to a given zoom), `zoom_camera()` zooms toward the mouse, `look_at_ground()` moves the camera to a spot (the small map uses it) and `camera_limit()` is how far it may pan (less when zoomed in). Mouse drag and `H` are in `camera_input()` in `main.gd`.
 - `start_wave()` and `spawn_enemy()` in `main.gd` start each wave and give each monster kind its health, armor and gold.
-- `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting, haze and effects; `build_map()` the ground (painted grass and dirt, see `assets/shaders/ground.gdshader`) and the land around the board. Models get the painted look of `assets/shaders/painted.gdshader` (see `painted()`). `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Which model a tower level shows: `arrow_look()` and `ARROW_FROM` (Arrow), `kit_look()` and `KIT_FILES` (Cannon, Poison, Frost and Spark). Model files are in `assets/`, with their sources in `assets/CREDITS.md`.
+- `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting, haze and effects; `build_map()` the ground (photo textures in `assets/terrain/`, see `assets/shaders/ground.gdshader`). `build_border()` builds the stone wall round the board (`assets/shaders/stone_wall.gdshader`), and `build_outer()` the land around it under `land_root`: the lake, hills (`hill()`, High only) and the forest. `build_life()` adds the grass tufts (`assets/shaders/grass_tuft.gdshader`), flowers, pebbles, boulders, ferns and mushrooms, and `update_grass_mask()` shrinks the grass under towers. Models get the painted look of `assets/shaders/painted.gdshader` (see `painted()`). `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Which model a tower level shows: `arrow_look()` and `ARROW_FROM` (Arrow), `kit_look()` and `KIT_FILES` (Cannon, Poison, Frost and Spark). Model files are in `assets/`, with their sources in `assets/CREDITS.md`.
 - Sound: `SOUNDS` (sound effects, files in `assets/sounds`), `MUSIC_LAYERS` and `MUSIC_MOODS` (music, 4 layers in `assets/music`) in `game_audio.gd`. `play_sound()` plays one. The volumes are saved in `settings.cfg` under `[audio]`.
 - Tutorial tips: the tips are `TIPS` in `game_base.gd`; when each one shows is in `tip_ready()` and `tip_done()` in `main.gd`; the card is `draw_tip_card()` in `game_ui.gd`. Saved in `settings.cfg` under `[tutorial]`.
 - Tower info cards: `tower_card()` and `draw_tower_card()` in `game_ui.gd` (every number comes from `TOWERS` and `PATHS`).
 - Achievements: `ACHIEVEMENTS` and `ACHIEVEMENT_GROUPS` in `game_base.gd`; stats are saved in `PROFILE_FILE` (`profile.cfg`). `JOIN_BY` and `JOIN_BY_DAILY` are the last waves you can join for a win to count.
-- Trees: `add_trees()` and `make_tree_kinds()` in `game_world.gd`, with the look in `assets/shaders/painted_leaves.gdshader`.
+- Trees: `add_trees()` in `game_world.gd` places the Quaternius models in `assets/nature/quaternius/` (`TREE_MODELS`, `TREE_WEIGHTS`); `TREE_NEAR` and `TREE_SOLID` set where the lighter and the solid versions start. Their look is in `assets/shaders/leaves.gdshader` and `assets/shaders/crown.gdshader`. Snow and frost are set in `mood_light()`.
 - `RELAY_URL` in `game_base.gd` is the game server's address, and `NET_PORT` and `SEARCH_PORT` are the network ports used for games on your own network.
 - `GAME_FOLDER` and `GAME_NAME` in `game_base.gd` set the names of the folder and files the downloaded `.exe` unpacks into.
 - The game server is a small Cloudflare Worker, kept outside this repository.
