@@ -11,8 +11,6 @@ Every art file in this folder that wasn't made for this game, where it comes fro
 | `terrain/ground_far.jpg` (Forest Ground 04) | Poly Haven textures | Rob Tuytel (photography, processing), Rico Cilliers (adjustment) | https://polyhaven.com/a/forest_ground_04 | CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
 | `nature/quaternius/*.glb` (CommonTree_1-5, Pine_1-3, Bush_Common, Bush_Common_Flowers, Fern_1, Plant_1_Big, Rock_Medium_1-3, Pebble_Round_1, Pebble_Round_3, Pebble_Square_2, Flower_3_Group, Flower_4_Group, Mushroom_Common) and `nature/quaternius/tex/*` | Stylized Nature MegaKit (Standard) | Quaternius | https://quaternius.itch.io/stylized-nature-megakit | CC0 1.0 (https://creativecommons.org/publicdomain/zero/1.0/) |
 
-The game turns the Arrow tower's roof, cape and flags into each player's color in code (see `arrow_mat()` in `game_world.gd`).
-
 The Poly Haven sets are cut to 1024 or 512 px with their ambient-occlusion map baked into the colour map (`graphics plan/ground life/blender/build_ground_tex.py`); the ground, the wall (`shaders/stone_wall.gdshader`) and the grading are made for this game.
 
 The monsters' walks are posed once when the game starts (see `build_monsters()` in `game_world.gd`). The unicorns and bone spiders are built from simple shapes in code.
@@ -28,13 +26,13 @@ Made for this game (by Claude, with a Python model kit of code-built shapes and 
 
 Made for this game (by Claude, with the same Python model kit): the Barracks, `towers/barracks/barracks_<path>_<look>.glb` (path 0: levels 1-4; path 1 Knights and 2 Militia: looks 5-10, the same levels as the cannon's) with `towers/barracks/barracks_team.jpg` and `barracks_roof.jpg` (it shares the cannon's `cannon_atlas.jpg` and `cannon_glow.jpg`); its soldiers `units/soldier_footman.glb`, `soldier_knight.glb` and `soldier_militia.glb` with their idle, fight, walk and fall animations and their texture `units/soldier.jpg`; and `shaders/soldier.gdshader`.
 
-Made for this game (by Claude, with the same Python model kit): the Frost tower, `towers/frost/frost_<path>_<look>.glb` (path 0: levels 1-4; path 1 and 2: looks 5-10, the same levels as the cannon's) with `towers/frost/frost_team.jpg` and `frost_glow.jpg`; and the Spark tower, `towers/spark/spark_<path>_<look>.glb` (the same looks) with `towers/spark/spark_team.jpg` and `spark_glow.jpg` (both share the cannon's `cannon_atlas.jpg`).
+Made for this game (by Claude, with the same Python model kit): the Frost tower's `towers/frost/frost_team.jpg` and `frost_glow.jpg`, and the Spark tower's `towers/spark/spark_team.jpg` and `spark_glow.jpg`.
+
+Made for this game (by Claude, in Blender by script, the new detailed style): the Frost tower v2, `towers/frost/v2/frost_<path>_<look>.glb` (the same 16 looks; it still uses `frost_team.jpg` and `frost_glow.jpg`), the Spark tower v2, `towers/spark/v2/spark_<path>_<look>.glb` (with `spark_team.jpg` and `spark_glow.jpg`), the Arrow tower v2, `towers/arrow/v2/arrow_<path>_<look>.glb` (the same 16 looks) with `towers/arrow/arrow_team.jpg` and `arrow_glow.jpg`, and the shared texture atlas of the new-style towers, `towers/stylized/stylized_base.jpg` and `stylized_normal.jpg`.
 
 Made for this game (by Claude, repainted with a script): the Bone Choir's skeleton colours, `monsters/bone_choir_warrior.jpg` (from the skeleton warrior's own texture) and `monsters/bone_choir_mage.png` (from KayKit's CC0 `skeleton_texture.png`, credited above), with their glow masks `bone_choir_warrior_glow.jpg` and `bone_choir_mage_glow.png`.
 
 Made by Gettic: `logo/logo.png` and the game icon `logo/icon.png`, `logo/icon.ico` (cut from his logo).
-
-Made by Gettic with an AI tool: the Arrow tower 0.02, `towers/arrow/archer_tower_L1.glb` to `archer_tower_L10.glb` (one per look), and their textures `towers/arrow/archer_tower_L1_*.jpg` (taken out of `archer_tower_L1.glb` at full size; the other models use the same textures, so they're imported without their own copy).
 
 Made for this game (synthesized with a script, no outside sources): all the sound effects in `sounds/`.
 

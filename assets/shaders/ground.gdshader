@@ -20,6 +20,15 @@ uniform sampler2D far_tex : source_color, filter_linear_mipmap_anisotropic, repe
 uniform sampler2D path_mask : filter_linear, repeat_disable;
 uniform vec2 map_size = vec2(24.0, 18.0);
 uniform float tex_scale = 0.4;  // texture repeats per tile (0.4 = once every 2.5 tiles)
+// No visible repeat: on the tops the textures are laid in soft-edged hexagons, each
+// turned and shifted at random; the scans' own big light and dark patches (which made
+// a square grid) are evened out, and come back as big, unrepeated patches (macro)
+uniform float hex_size = 0.55;  // hexagon spacing, in texture repeats
+uniform float hex_sharp = 6.0;  // higher = narrower blend between hexagons
+uniform float flatten = 0.65;   // how much of the grass scan's big patches is evened out
+uniform float dirt_flatten = 0.35;  // ...and the path's (its stains are part of its look)
+uniform float macro = 0.8;      // the big, unrepeated patches on the grass
+uniform float macro_scale = 0.14;
 // The textures' average colors (linear, from build_ground_tex.py), for the grading
 uniform vec3 grass_avg = vec3(0.1173, 0.0850, 0.0200);
 uniform vec3 dirt_avg = vec3(0.2482, 0.2033, 0.1203);
@@ -83,14 +92,54 @@ vec3 grade(vec3 tex, vec3 avg, vec3 col, float hue) {
 	return col * mix(vec3(1.0), rel, detail);
 }
 
+// The hexagon grid (Heitz and Neyret's triangle grid): the 3 hexagon centres around
+// p and how much each one counts here
+void hex_grid(vec2 p, out vec3 w, out vec2 v1, out vec2 v2, out vec2 v3) {
+	vec2 sk = vec2(p.x - 0.57735 * p.y, 1.1547 * p.y) * 3.4641;
+	vec2 base = floor(sk);
+	vec3 t = vec3(fract(sk), 0.0);
+	t.z = 1.0 - t.x - t.y;
+	if (t.z > 0.0) {
+		w = vec3(t.z, t.y, t.x);
+		v1 = base;
+		v2 = base + vec2(0.0, 1.0);
+		v3 = base + vec2(1.0, 0.0);
+	} else {
+		w = vec3(-t.z, 1.0 - t.y, 1.0 - t.x);
+		v1 = base + vec2(1.0);
+		v2 = base + vec2(1.0, 0.0);
+		v3 = base + vec2(0.0, 1.0);
+	}
+	w = pow(w, vec3(hex_sharp));
+	w /= w.x + w.y + w.z;
+}
+
+// A hexagon's random turn
+mat2 hex_turn(vec2 v) {
+	float a = hash(v) * 6.2832;
+	return mat2(vec2(cos(a), sin(a)), vec2(-sin(a), cos(a)));
+}
+
+// One hexagon's look of a texture: turned, shifted, its big patches evened out
+vec3 hex_color(sampler2D tex, vec2 uv, vec2 dx, vec2 dy, vec2 v, mat2 r, float even) {
+	vec2 p = r * uv + vec2(hash(v + 17.3), hash(v + 41.7));
+	vec3 c = textureGrad(tex, p, r * dx, r * dy).rgb;
+	vec3 all_avg = textureLod(tex, p, 12.0).rgb;  // the whole texture's average (works in both renderers)
+	vec3 low = textureLod(tex, p, 5.0).rgb;       // its big patches
+	return c * all_avg / max(mix(all_avg, low, even), vec3(1e-4));
+}
+
+// One hexagon's normal, turned back to the world's X/Z (GL normal map: +Y is up the image)
+vec2 hex_normal(sampler2D tex, vec2 uv, vec2 dx, vec2 dy, vec2 v, mat2 r) {
+	vec2 p = r * uv + vec2(hash(v + 17.3), hash(v + 41.7));
+	vec2 n = textureGrad(tex, p, r * dx, r * dy).rg * 2.0 - 1.0;
+	return transpose(r) * vec2(n.x, -n.y);
+}
+
 void fragment() {
 	// Tops use X/Z; the sides (path edges, board edge) use the height instead
-	vec2 uv = (up > 0.5 ? wpos.xz : vec2(wpos.x + wpos.z, wpos.y)) * tex_scale;
-	vec3 g = grade(texture(grass_tex, uv).rgb, grass_avg, grass_color, grass_hue);
-	vec3 d = grade(texture(dirt_tex, uv).rgb, dirt_avg, dirt_color, dirt_hue);
-	// Big warm and cool patches
-	float big = noise(wpos.xz * 0.16) * 0.6 + noise(wpos.xz * 0.4 + 7.0) * 0.4;
-	g *= mix(vec3(1.0), mix(cool, warm, smoothstep(0.2, 0.8, big)), paint);
+	bool top = up > 0.5;
+	vec2 uv = (top ? wpos.xz : vec2(wpos.x + wpos.z, wpos.y)) * tex_scale;
 
 	// How much dirt: sides are soil; on top, the path mask with a little noise
 	float raw = outer > 0.5 ? 0.0 : texture(path_mask, wpos.xz / map_size).r;
@@ -103,13 +152,58 @@ void fragment() {
 		// A wide, soft edge: the path's tufts and stones fade into the grass
 		dirt = is_path > 0.5 ? smoothstep(0.42, 0.66, m) : smoothstep(0.45, 0.7, m);
 	}
+	// The scans: on the tops through the hexagons (each texture only where it shows),
+	// on the sides plain
+	vec3 g = vec3(0.0);
+	vec3 d = vec3(0.0);
+	vec3 nm = vec3(0.5, 0.5, 1.0);
+	if (top) {
+		vec3 w;
+		vec2 v1, v2, v3;
+		hex_grid(uv / hex_size, w, v1, v2, v3);
+		mat2 r1 = hex_turn(v1);
+		mat2 r2 = hex_turn(v2);
+		mat2 r3 = hex_turn(v3);
+		vec2 dx = dFdx(uv);
+		vec2 dy = dFdy(uv);
+		vec2 pn = vec2(0.0);
+		if (dirt < 0.999) {
+			g = hex_color(grass_tex, uv, dx, dy, v1, r1, flatten) * w.x + hex_color(grass_tex, uv, dx, dy, v2, r2, flatten) * w.y + hex_color(grass_tex, uv, dx, dy, v3, r3, flatten) * w.z;
+			// Big, unrepeated patches: the scan's own patches, much bigger and turned
+			vec2 mp = mat2(vec2(0.8, 0.6), vec2(-0.6, 0.8)) * uv * macro_scale + 0.37;
+			vec3 mc = textureLod(grass_tex, mp, 4.0).rgb / max(textureLod(grass_tex, mp, 12.0).rgb, vec3(1e-4));
+			g *= mix(vec3(1.0), mc, macro);
+			if (use_normals) {
+				pn = (hex_normal(grass_nrm, uv, dx, dy, v1, r1) * w.x + hex_normal(grass_nrm, uv, dx, dy, v2, r2) * w.y + hex_normal(grass_nrm, uv, dx, dy, v3, r3) * w.z) * (1.0 - dirt);
+			}
+		}
+		if (dirt > 0.001) {
+			d = hex_color(dirt_tex, uv, dx, dy, v1, r1, dirt_flatten) * w.x + hex_color(dirt_tex, uv, dx, dy, v2, r2, dirt_flatten) * w.y + hex_color(dirt_tex, uv, dx, dy, v3, r3, dirt_flatten) * w.z;
+			if (use_normals) {
+				pn += (hex_normal(dirt_nrm, uv, dx, dy, v1, r1) * w.x + hex_normal(dirt_nrm, uv, dx, dy, v2, r2) * w.y + hex_normal(dirt_nrm, uv, dx, dy, v3, r3) * w.z) * dirt;
+			}
+		}
+		// World X/Z -> the surface's own tangent frame
+		vec3 tw = (INV_VIEW_MATRIX * vec4(TANGENT, 0.0)).xyz;
+		vec3 bw = (INV_VIEW_MATRIX * vec4(BINORMAL, 0.0)).xyz;
+		nm = vec3(vec2(dot(pn, tw.xz), dot(pn, bw.xz)) * 0.5 + 0.5, 1.0);
+	} else {
+		g = texture(grass_tex, uv).rgb;
+		d = texture(dirt_tex, uv).rgb;
+		nm = mix(texture(grass_nrm, uv).rgb, texture(dirt_nrm, uv).rgb, dirt);
+	}
+	g = grade(g, grass_avg, grass_color, grass_hue);
+	d = grade(d, dirt_avg, dirt_color, dirt_hue);
+	// Big warm and cool patches
+	float big = noise(wpos.xz * 0.16) * 0.6 + noise(wpos.xz * 0.4 + 7.0) * 0.4;
+	g *= mix(vec3(1.0), mix(cool, warm, smoothstep(0.2, 0.8, big)), paint);
+
 	// Path: a lighter, dusty middle and a darker rim where it meets the grass
 	d *= mix(1.0 - 0.2 * paint, 1.0 + worn * paint, smoothstep(0.6, 0.95, raw + n * 0.2));
 	// Grass beside the path: trampled, a bit darker and yellower
 	float near = smoothstep(0.15, 0.5, m) * paint;
 	g *= mix(vec3(1.0), vec3(0.95, 0.9, 0.7) * (1.0 - trample), near);
 	vec3 col = mix(g, d, dirt);
-	vec3 nm = mix(texture(grass_nrm, uv).rgb, texture(dirt_nrm, uv).rgb, dirt);
 
 	if (outer > 0.5) {
 		// Forest floor further out, the lake's bank, and darker toward the edge

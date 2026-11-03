@@ -112,8 +112,7 @@ func build_world() -> void:
 	build_markers_and_hud()
 	build_map()
 	build_monsters()  # at the start, so the first wave doesn't stutter
-	load_arrow_models()  # and upgrades don't either
-	load_kit_models()
+	load_kit_models()  # and upgrades don't either
 	load_barracks_models()
 
 
@@ -1486,6 +1485,7 @@ func mood_light() -> void:
 	env.fog_depth_begin = 30.0 * s
 	env.fog_depth_end = 80.0 * s
 	env.fog_depth_curve = 1.5
+	env.volumetric_fog_enabled = false  # only the evening has the golden haze
 	var warm: Variant = null  # the ground's tints (null: the ground shader's own)
 	var cool: Variant = null
 	var snow := false
@@ -1511,6 +1511,15 @@ func mood_light() -> void:
 			rim = Vector4(1.0, 0.65, 0.35, 1.3)
 			bugs = Color(1.6, 1.0, 0.45, 0.9)
 			bug_size = 1.3
+			# Golden haze in the air on High (Forward+ only: Compatibility has no volumetric fog)
+			if high and not compat:
+				env.volumetric_fog_enabled = true
+				env.volumetric_fog_density = 0.008
+				env.volumetric_fog_albedo = Color(0.9, 0.85, 0.8)
+				env.volumetric_fog_anisotropy = 0.6
+				env.volumetric_fog_length = 48.0
+				env.volumetric_fog_ambient_inject = 0.3
+				env.volumetric_fog_sky_affect = 0.0
 		"rain":
 			# Overcast: soft grey-blue light, faint shadows, wet shine
 			sun.rotation_degrees = Vector3(-55, -30, 0)
@@ -1941,12 +1950,8 @@ func build_tower_node(t: Tower) -> void:
 		paint_tree(root)
 		t.node = root
 		return
-	if t.type == "arrow" or KIT_FILES.has(t.type):
-		var model_head: Node3D
-		if t.type == "arrow":
-			model_head = build_arrow_tower(root, t.level, t.path, t.owner)
-		else:
-			model_head = build_kit_tower(t.type, root, t.level, t.path, t.owner)
+	if KIT_FILES.has(t.type):
+		var model_head := build_kit_tower(t.type, root, t.level, t.path, t.owner)
 		add_pips(root, look, Vector3(0, 0.06, 0.44))
 		paint_tree(root)
 		t.node = root
@@ -1993,54 +1998,15 @@ var model_meshes := {}  # merged tower meshes by name
 var model_mats := {}  # their materials by color
 
 
-# Arrow tower: Gettic's archer tower 0.02 (made by Gettic with an AI tool, see
-# assets/CREDITS.md), one model per look (L1-L10), each loaded once and shared by
-# every arrow tower. The roof tiles, the archer's cape, the banners and the flag
-# show the owner's color. The archer stands on the hoarding under the roof and
-# walks round it to aim (the head turns, its front is -Z). Levels 1-4 use L1-L4,
-# then a new model at levels 5, 10, 15, 20, 30 and 40 (see ARROW_FROM). From level
-# 5 the Volley path has three archers, Sniper one.
-const ARROW_FILE := "res://assets/towers/arrow/archer_tower_L%d.glb"
+# Which look (1-10) a level index shows: levels 1-4 have one each, then a new
+# model at levels 5, 10, 15, 20, 30 and 40 (see ARROW_FROM and kit_look())
 const ARROW_MODELS := 10
-const ARROW_FROM := [9, 14, 19, 29, 39]  # level index where L6, L7, L8, L9 and L10 start
-const ARROW_SCALE := 0.21  # L1 is about 3.5 units wide, a tile is 1
-const ARROW_BOW := 0.87  # the archer's bow above his feet, in model units
-var arrow_parts := {}  # model 1-10 -> {"Tower", "Archer", "Banner": [[mesh, transform], ...], "feet": Vector3}
-var arrow_base := {}  # L1's materials by name (the other models are imported without textures)
-var arrow_mats := {}  # team-colored copies of the materials, by name and owner
+const ARROW_FROM := [9, 14, 19, 29, 39]  # level index where looks 6, 7, 8, 9 and 10 start
 var pack_meshes := {}  # pack model -> [[mesh, transform], ...], loaded once
 var pack_mats := {}  # shared pack materials by texture and owner
 var pack_shader: Shader
 
 
-func build_arrow_tower(root: Node3D, level: int, path: int, slot: int) -> Node3D:
-	var d := arrow_model(arrow_look(level))
-	var model := Node3D.new()
-	model.scale = Vector3.ONE * ARROW_SCALE
-	root.add_child(model)
-	add_arrow_part(model, d["Tower"], slot)
-	add_arrow_part(model, d["Banner"], slot)
-	# The head turns at the archer's bow height (higher from L6)
-	var feet: Vector3 = d["feet"]
-	var head := Node3D.new()
-	head.position = Vector3(0, (feet.y + ARROW_BOW) * ARROW_SCALE, 0)
-	root.add_child(head)
-	var n := 3 if level >= PATH_LEVEL and path == 2 else 1
-	for i in n:
-		# More archers stand side by side round the hoarding
-		var turn := Node3D.new()
-		turn.scale = Vector3.ONE * ARROW_SCALE
-		turn.rotation.y = (i - (n - 1) / 2.0) * 0.75
-		head.add_child(turn)
-		var man := Node3D.new()
-		man.position = Vector3(0, -ARROW_BOW, -feet.z)
-		man.rotation_degrees.y = 180.0  # the model's archer looks at +Z
-		turn.add_child(man)
-		add_arrow_part(man, d["Archer"], slot)
-	return head
-
-
-# Which model (1-10) a level index shows
 func arrow_look(level: int) -> int:
 	if level < 4:
 		return level + 1
@@ -2048,65 +2014,6 @@ func arrow_look(level: int) -> int:
 		if level < ARROW_FROM[i]:
 			return 5 + i
 	return ARROW_MODELS
-
-
-# Loads all the models at the start, so upgrading never stutters
-func load_arrow_models() -> void:
-	for k in range(1, ARROW_MODELS + 1):
-		arrow_model(k)
-
-
-# One model's parts, loaded once. L1 is loaded first: its materials are the shared ones.
-func arrow_model(k: int) -> Dictionary:
-	if k != 1 and arrow_base.is_empty():
-		arrow_model(1)
-	if not arrow_parts.has(k):
-		var scene: Node = load(ARROW_FILE % k).instantiate()
-		var d := {}
-		for n in ["Tower", "Archer", "Banner"]:
-			var parts := []
-			var found: Node3D = scene.find_child(n, true, false)
-			# The archer is placed by the code, the others keep their place
-			var tr: Transform3D = found.transform.affine_inverse() if n == "Archer" else Transform3D.IDENTITY
-			collect_meshes(found, tr, parts)
-			d[n] = parts
-			if n == "Archer":
-				d["feet"] = found.position
-		if k == 1:
-			for p: Array in d["Tower"] + d["Archer"] + d["Banner"]:
-				for s in p[0].get_surface_count():
-					var m: Material = p[0].surface_get_material(s)
-					arrow_base[m.resource_name] = m
-		scene.free()
-		arrow_parts[k] = d
-	return arrow_parts[k]
-
-
-# Adds one part of an arrow tower model under parent, with the owner's colors.
-func add_arrow_part(parent: Node3D, parts: Array, slot: int) -> void:
-	for p: Array in parts:
-		var mesh: Mesh = p[0]
-		var mi := MeshInstance3D.new()
-		mi.mesh = mesh
-		mi.transform = p[1]
-		parent.add_child(mi)
-		for s in mesh.get_surface_count():
-			mi.set_surface_override_material(s, arrow_mat(mesh.surface_get_material(s).resource_name, slot))
-
-
-# L1's material of that name, shared by every model; the roof, cape and flags
-# as a shared copy in the owner's color.
-func arrow_mat(name: String, slot: int) -> Material:
-	var team := name == "TeamColor" or name == "RoofTiles"
-	if not team:
-		return arrow_base[name]
-	var key := "%s %d" % [name, slot]
-	if not arrow_mats.has(key):
-		var c: StandardMaterial3D = arrow_base[name].duplicate()
-		painted(c)
-		paint_team(c, name, slot)
-		arrow_mats[key] = c
-	return arrow_mats[key]
 
 
 # A pack model's meshes (rocks and trees), [[mesh, transform], ...], loaded once.
@@ -2162,22 +2069,31 @@ func pack_mat(mesh: Mesh, slot: int) -> ShaderMaterial:
 # grows a crown of fangs and brews bright acid; Miasma gets smokestacks, more
 # vats and a murky brew. Green motes rise from the cauldron on High.
 #
-# Frost: a rune spire. A slate plinth with ice growing round its foot, a pale
-# spire with glowing ice runes, and a brass cradle holding a floating crystal
-# that turns to aim. Deep Freeze: a huge crystal in an iron cage. Blizzard:
-# shards on a brass ring round the crystal.
+# Frost (new style, Blender): a grey stone rune tower on a round base, with
+# buttresses, a studded door, brass pipes and banners, and a crystal in a brass
+# claw that turns to aim. Deep Freeze: a huge crystal in an iron cage, ice
+# bursting from the base. Blizzard: rings of ice shards round the crystal.
 #
-# Spark: an arcane conductor. A sandstone plinth, a violet column in copper
-# coils and a crown of prongs round a glowing orb (the lightning starts in the
-# orb, see fire_lightning()). Storm: a taller column, three rune rings, more
-# prongs and arcs; Overload: one huge pink orb, the prongs bent wide. The crown
-# slowly spins (clients don't know who it aims at).
-const KIT_FILES := {"cannon": "res://assets/towers/cannon/cannon_%d_%d.glb",
+# Spark (new style): an arcane conductor. A violet stone plinth with four
+# pylons, an amethyst column in a copper coil and a crown of prongs round a
+# glowing orb (the lightning starts in the orb, see fire_lightning()). Storm:
+# tall lightning rods wired to the column and rune rings; Overload: one huge
+# pink orb in a wide star of prongs, and capacitor jars. The crown slowly spins
+# (clients don't know who it aims at).
+#
+# Arrow (new style): a ranger watchtower. A stone keep with a studded door on a
+# round base, a timber storey with iron brackets, and a plank platform with a
+# railing, braziers and the owner's banners; a repeater crossbow on a turning
+# mount aims (the arrows start at its bolt). Sniper: a taller, slimmer tower with
+# one very long crossbow and a beacon pole; Volley: a wide platform with a fan of
+# three crossbows and quivers.
+const KIT_FILES := {"arrow": "res://assets/towers/arrow/v2/arrow_%d_%d.glb",
+		"cannon": "res://assets/towers/cannon/cannon_%d_%d.glb",
 		"poison": "res://assets/towers/poison/poison_%d_%d.glb",
-		"frost": "res://assets/towers/frost/frost_%d_%d.glb",
-		"spark": "res://assets/towers/spark/spark_%d_%d.glb"}
-const KIT_WIDTH := {"cannon": 0.8, "poison": 0.86, "frost": 0.9, "spark": 0.84}  # L1's width on a 1-unit tile
-const KIT_GLOW := {"poison": 1.1, "frost": 0.9, "spark": 1.3}  # brew.gdshader's glow strength
+		"frost": "res://assets/towers/frost/v2/frost_%d_%d.glb",
+		"spark": "res://assets/towers/spark/v2/spark_%d_%d.glb"}
+const KIT_WIDTH := {"arrow": 0.9, "cannon": 0.8, "poison": 0.86, "frost": 0.9, "spark": 0.84}  # L1's width on a 1-unit tile
+const KIT_GLOW := {"arrow": 1.2, "poison": 1.1, "frost": 0.9, "spark": 1.3}  # brew.gdshader's glow strength
 var kit_parts := {}  # tower type -> Vector2i(path, look) -> {"body", "head": [[mesh, transform], ...], "pivot", "pot"}
 var kit_mats := {}  # shared materials by type and name (the team cloth also by owner)
 var kit_scale := {}  # tower type -> the scale of all its looks (from L1)
@@ -2281,11 +2197,14 @@ func add_kit_part(type: String, parent: Node3D, parts: Array, slot: int) -> void
 # The models' three materials: "Atlas" (stone, iron, brass, wood; the same for
 # every kind), "TeamColor" (cloth in the owner's color, seen from both sides) and
 # "Glow" (the cannon's furnaces; the poison brew, frost ice and spark orb pulse
-# with brew.gdshader).
+# with brew.gdshader). The new-style models (Blender, see graphics plan) use
+# "Stylized" instead of "Atlas": a shared tileable atlas with a normal map.
 # The baked shading is in the models' vertex colors.
 func kit_mat(type: String, name: String, slot: int) -> Material:
 	var key := "Atlas"
-	if name == "TeamColor":
+	if name == "Stylized":
+		key = name
+	elif name == "TeamColor":
 		key = "%s %s %d" % [type, name, slot]
 	elif name == "Glow":
 		key = "%s %s" % [type, name]
@@ -2308,6 +2227,10 @@ func kit_mat(type: String, name: String, slot: int) -> Material:
 				m.albedo_texture = load(folder + "glow.jpg")
 				m.emission_enabled = true
 				m.emission = Color(1.0, 0.75, 0.45)
+			"Stylized":
+				m.albedo_texture = load("res://assets/towers/stylized/stylized_base.jpg")
+				m.normal_enabled = true
+				m.normal_texture = load("res://assets/towers/stylized/stylized_normal.jpg")
 			_:
 				m.albedo_texture = load("res://assets/towers/cannon/cannon_atlas.jpg")
 		kit_mats[key] = painted(m)
@@ -2496,7 +2419,7 @@ func colors_changed() -> void:
 	for key: String in gate_mats:
 		if key.begins_with("TeamColor "):
 			paint_team(gate_mats[key], "gem", int(key.get_slice(" ", 1)))
-	for list: Dictionary in [arrow_mats, barracks_mats, team_mats]:
+	for list: Dictionary in [barracks_mats, team_mats]:
 		for key: String in list:
 			paint_team(list[key], key.get_slice(" ", 0), int(key.get_slice(" ", 1)))
 	for key: String in kit_mats:
@@ -2911,7 +2834,7 @@ func update_visuals(delta: float) -> void:
 			pass  # nothing turns
 		elif t.type == "spark":
 			t.head.rotation.y += delta * 0.5  # the crown slowly spins
-		elif t.type == "arrow" or KIT_FILES.has(t.type):
+		elif KIT_FILES.has(t.type):
 			t.head.rotation.y = atan2(-t.aim.x, -t.aim.y)
 		else:
 			t.head.rotation.y += delta * 2.0
