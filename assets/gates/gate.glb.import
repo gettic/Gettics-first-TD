@@ -3,13 +3,13 @@
 importer="scene"
 importer_version=1
 type="PackedScene"
-uid="uid://cq3tjyljl15qp"
-path="res://.godot/imported/Tree_2_A_Color1.gltf-01e7a13de8e437a0f52fb8bc1eed7e1d.scn"
+uid="uid://dvur2ksr681l5"
+path="res://.godot/imported/gate.glb-2d494e8c8e7a6dbd0e90672bd8e02277.scn"
 
 [deps]
 
-source_file="res://assets/nature/Tree_2_A_Color1.gltf"
-dest_files=["res://.godot/imported/Tree_2_A_Color1.gltf-01e7a13de8e437a0f52fb8bc1eed7e1d.scn"]
+source_file="res://assets/gates/gate.glb"
+dest_files=["res://.godot/imported/gate.glb-2d494e8c8e7a6dbd0e90672bd8e02277.scn"]
 
 [params]
 

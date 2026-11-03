@@ -59,8 +59,38 @@ func new_game() -> void:
 	game_speed = 1
 	state = "playing"
 	menu_open = false
+	story_queue.clear()  # a story card waiting from the last game isn't for this one
+	story_end = ""
 	send_all("net_reset", [])
+	if net_mode != "client":
+		apply_mood(pick_mood())
+		send_mood(mood)
 	flash("Build towers, then press SPACE to start")
+
+
+# ---------------------------------------------------------------- weather and time of day
+# The host (or a player alone) picks the mood (see MOODS and apply_mood() in
+# game_world.gd) for every new game: always day with the Settings row
+# "Weather: Day" (the host's setting counts) and in the map editor; in the daily
+# and weekly challenges from the day / week, so everyone gets the same; otherwise
+# random. The other players get it with send_mood() -> set_mood_from_host().
+
+func pick_mood() -> String:
+	if weather_setting == "day" or editing:
+		return "day"
+	if daily_date != "":
+		daily_seed("gtd-daily-mood-%d-%s" % [DAILY_VERSION, daily_date])
+		return MOODS[daily_roll(0, MOODS.size() - 1)]
+	if weekly_id != "":
+		daily_seed("gtd-weekly-mood-%d-%s" % [WEEKLY_VERSION, weekly_id])
+		return MOODS[daily_roll(0, MOODS.size() - 1)]
+	return MOODS[randi() % MOODS.size()]
+
+
+# Another player: the host's mood (from the network: anything but one of MOODS is ignored).
+func set_mood_from_host(m: Variant) -> void:
+	if net_mode == "client" and m is String and m in MOODS and m != mood:
+		apply_mood(m)
 
 
 # A fresh single-player game (at startup, or after leaving a multiplayer game).
@@ -97,6 +127,8 @@ func start_wave() -> void:
 	var text := "Wave %d! +%s gold" % [wave, short(income)]
 	if early_bonus > 0:
 		text = "Wave %d! +%s gold (+%s for calling early)" % [wave, short(income), short(early_bonus)]
+	if grimwhistle_wave(wave):
+		text = "Wave %d! Grimwhistle the Bone Conductor comes up himself!" % wave
 	flash(text)
 	send_all("net_message", [text])
 	next_wave_timer = WAVE_INTERVAL
@@ -150,7 +182,7 @@ func spawn_enemy(kind: String, g: int) -> void:
 	e.route = routes[g]
 	e.loop_wp = loop_starts[g]
 	e.pos = e.route[0]
-	e.max_hp = spawn_hp * DIFFICULTY_HP[difficulty] * daily_rules().get("hp", 1.0)
+	e.max_hp = spawn_hp * DIFFICULTY_HP[difficulty] * challenge_rules().get("hp", 1.0) * weekly_tide(wave)
 	e.bounty = wave_bounty(wave)
 	match kind:
 		"fast":
@@ -165,6 +197,14 @@ func spawn_enemy(kind: String, g: int) -> void:
 			e.speed *= 0.7
 			e.bounty = 40 + e.bounty * 12
 			e.weight = 5
+			# Grimwhistle: the first boss out of each gate in his wave (he leads his singers)
+			if grimwhistle_wave(wave) and spawn_queues[g].size() == wave_count(wave) - 1:
+				e.special = "conductor"
+				e.max_hp *= GRIM_HP
+				e.speed *= GRIM_SPEED / 0.7
+				e.bounty *= GRIM_GOLD
+				e.radius = GRIM_RADIUS
+				e.heal_timer = CRESCENDO_FIRST  # his Crescendo timer (he's never a healer)
 	# The wave's trait (see wave_special()). The gold stays the same: a splitter
 	# gives half, each of its splitlings a quarter.
 	match wave_special(wave):
@@ -211,39 +251,40 @@ func split_enemy(p: Enemy) -> void:
 		new_enemies.append(e)
 
 
-# ---------------------------------------------------------------- daily challenge
-# The day's twist (see daily_rules() in game_base.gd) changes these rules from
+# ---------------------------------------------------------------- daily and weekly challenges
+# The day's twist or the week's two (see daily_rules() and weekly_rules() in
+# game_base.gd, both through challenge_rules()) change these rules from
 # game_base.gd; everything else (the top bar, wave preview, late joiners' gold)
-# uses them too. Monster health is changed in spawn_enemy(), so the gold, which
-# follows wave_hp(), stays as it is.
+# uses them too. Monster health (also the weekly's Rising tide) is changed in
+# spawn_enemy(), so the gold, which follows wave_hp(), stays as it is.
 
 func start_gold() -> int:
-	return int(super() * daily_rules().get("start_gold", 1.0))
+	return int(super() * challenge_rules().get("start_gold", 1.0))
 
 
 # Swarm: more monsters a wave (not more bosses).
 func wave_count(w: int) -> int:
 	var n := super(w)
-	return n if kind_for_wave(w) == "boss" else roundi(n * daily_rules().get("count", 1.0))
+	return n if kind_for_wave(w) == "boss" else roundi(n * challenge_rules().get("count", 1.0))
 
 
 func wave_income(w: int) -> int:
-	return int(super(w) * daily_rules().get("income", 1.0))
+	return int(super(w) * challenge_rules().get("income", 1.0))
 
 
 func wave_bounty(w: int) -> int:
-	return maxi(1, int(super(w) * daily_rules().get("bounty", 1.0)))
+	return maxi(1, int(super(w) * challenge_rules().get("bounty", 1.0)))
 
 
 # Armored day: normal waves are armored.
 func kind_for_wave(w: int) -> String:
 	var kind := super(w)
-	return "armored" if kind == "normal" and daily_rules().get("armored", false) else kind
+	return "armored" if kind == "normal" and challenge_rules().get("armored", false) else kind
 
 
-# Two towers: only the day's tower types can be built.
+# Two towers: only the challenge's tower types can be built.
 func daily_allows(type: String) -> bool:
-	var rules := daily_rules()
+	var rules := challenge_rules()
 	return rules.is_empty() or type in rules.towers
 
 
@@ -259,6 +300,40 @@ func menu_daily() -> void:
 		flash("Only the host can start the daily challenge")
 	else:
 		flash("The daily challenge can only start before wave 1")
+
+
+# Starts the weekly challenge (id "": this week) alone, or as the host before
+# anyone joined, before wave 1 (menu_weekly() checks that, like picking a map).
+# Hard, the week's map and twists. Returns a message for the player.
+func start_weekly(id := "") -> String:
+	if id == "":
+		id = weekly_now()
+	if not weekly_valid(id):
+		return "There's no week %s" % id
+	if net_mode not in ["", "host"] or (net_mode == "host" and player_count() > 1):
+		return "The weekly challenge can only start while nobody has joined"
+	use_map(weekly_map(id), weekly_title(id))
+	build_map()
+	weekly_id = id
+	var rules := weekly_rules(id)
+	difficulty = rules.level
+	new_game()
+	send_difficulty()
+	send_weekly(id)
+	return "Weekly challenge %s (%s, %d waves): %s. %s" % [id, DIFFICULTIES[difficulty], WEEKLY_WAVES, rules.name, rules.desc]
+
+
+# The Esc menu's weekly challenge button (the ui calls this).
+func menu_weekly() -> void:
+	if can_pick_map():
+		flash(start_weekly())
+		play_sound("daily_start")
+	elif net_mode == "host" and player_count() > 1:
+		flash("The weekly challenge can only start while nobody has joined")
+	elif net_mode == "client":
+		flash("Only the host can start the weekly challenge")
+	else:
+		flash("The weekly challenge can only start before wave 1")
 
 
 # ---------------------------------------------------------------- tutorial tips
@@ -378,6 +453,53 @@ func tip_learned(id: String) -> void:
 		save_tutorial()
 
 
+# ----- story cards (see STORY_CARDS in game_base.gd)
+# Every computer watches its own game (the wave number and the end are the same
+# for everyone, so nothing is sent). A wave card comes only when the wave goes up
+# by one while playing: loading a save or joining a game doesn't bring one.
+
+var story_wave := -1  # the wave update_story() saw last (-1: none yet)
+var story_state := ""  # and the game's state
+var story_played := 0.0  # seconds of play (for gates_waking)
+
+
+func update_story(delta: float) -> void:
+	var last_wave := story_wave
+	var last_state := story_state
+	story_wave = wave
+	story_state = state
+	var daily := daily_date != ""
+	if replay_on or editing or weekly_id != "" or net_mode in ["searching", "connecting", "map_offer"]:
+		return
+	# The end of a game: the first win and the first loss (shown on the end screen)
+	if last_state == "playing" and state in ["won", "lost"] and wave > 0 and not daily:
+		story_unlock("first_win" if state == "won" else "first_loss")
+		return
+	if state != "playing" or held:
+		return
+	story_played += delta
+	if daily:
+		story_unlock("daily_omen")
+		return
+	if story_played >= STORY_START:
+		story_unlock("gates_waking")
+	if last_wave < 0 or wave != last_wave + 1:
+		return
+	for id: String in STORY_WAVES:
+		if STORY_WAVES[id] == wave:
+			story_unlock(id)
+	if kind_for_wave(wave) == "boss":
+		story_unlock("first_boss")
+	if grimwhistle_wave(wave):
+		story_unlock("grimwhistle")
+
+
+# The Settings row: also saved (settings.cfg [story] cards, see save_settings()).
+func set_story_cards(on: bool) -> void:
+	super(on)
+	save_settings()
+
+
 # No tips in the map editor or the replay (game_base.gd: only while playing).
 func current_tip() -> Dictionary:
 	if editing or replay_on:
@@ -460,6 +582,7 @@ func _process(delta: float) -> void:
 		return
 	message_time = maxf(message_time - delta, 0.0)
 	update_tips(delta)
+	update_story(delta)
 	# Watching the replay: the game is over, the replay drives the monsters and shots
 	if replay_on:
 		replay_update(delta)
@@ -504,6 +627,7 @@ func _process(delta: float) -> void:
 		update_shots(dt)
 		update_clouds(dt)
 		remove_dead()
+		check_grimwhistle()
 		if alive_count() >= max_alive():
 			state = "lost"
 		elif wave >= last_wave() and monsters_left_to_spawn() == 0 and enemies.is_empty():
@@ -587,6 +711,13 @@ func update_enemies(dt: float) -> void:
 				for o in enemies:
 					if o != e and not o.dead and o.pos.distance_squared_to(e.pos) <= HEAL_RANGE * HEAL_RANGE:
 						o.hp = minf(o.hp + o.max_hp * (HEAL_BOSS if o.kind == "boss" else HEAL_SHARE), o.max_hp)
+		# Grimwhistle's Crescendo (see CRESCENDO_EVERY)
+		if e.special == "conductor" and not e.dead:
+			e.heal_timer -= dt
+			if e.heal_timer <= 0.0:
+				e.heal_timer += CRESCENDO_EVERY
+				crescendo(e)
+		e.haste_time = maxf(e.haste_time - dt, 0.0)
 		if e.slow_time > 0.0:
 			e.slow_time -= dt
 			if e.slow_time <= 0.0:
@@ -602,7 +733,7 @@ func update_enemies(dt: float) -> void:
 		# Held by a Barracks soldier: stands still
 		if e.held:
 			continue
-		var move := e.speed * e.slow_factor * dt
+		var move := e.speed * e.slow_factor * (CRESCENDO_HASTE if e.haste_time > 0.0 else 1.0) * dt
 		while move > 0.0:
 			var target := e.route[e.wp]
 			var d := e.pos.distance_to(target)
@@ -618,6 +749,43 @@ func update_enemies(dt: float) -> void:
 				e.pos += (target - e.pos) / d * move
 				e.traveled += move
 				move = 0.0
+
+
+# Host: Grimwhistle g's Crescendo: the monsters near him (himself too) shake off
+# slows, freezes and soldiers, and walk faster for a moment.
+func crescendo(g: Enemy) -> void:
+	var freed := {}
+	for o in enemies:
+		if o.dead or o.pos.distance_squared_to(g.pos) > CRESCENDO_RANGE * CRESCENDO_RANGE:
+			continue
+		o.slow_factor = 1.0
+		o.slow_time = 0.0
+		o.freeze_time = 0.0
+		o.haste_time = CRESCENDO_TIME
+		if o.held:
+			freed[o] = true
+	if not freed.is_empty():
+		for t: Tower in towers.values():
+			for i in t.soldier_hold.size():
+				if t.soldier_hold[i] != null and freed.has(t.soldier_hold[i]):
+					release(t, i)
+	crescendo_fx(g)
+
+
+# Host: once every Grimwhistle has fallen (his wave fully out), the monsters
+# left crumble: no gold, no kills, and the game is won.
+func check_grimwhistle() -> void:
+	if not grimwhistle_wave(wave) or monsters_left_to_spawn() > 0 or enemies.is_empty():
+		return
+	for e in enemies:
+		if e.special == "conductor" and not e.dead:
+			return
+	for e in enemies:
+		e.dead = true
+	for t: Tower in towers.values():
+		for i in t.soldier_hold.size():
+			release(t, i)
+	remove_dead()
 
 
 func update_towers(dt: float) -> void:
@@ -718,9 +886,10 @@ func update_barracks(t: Tower, dt: float) -> void:
 				continue
 			e.held = true
 			t.soldier_hold[i] = e
-			t.soldier_left[i] = data["hold"][t.level] * (boss_hold if e.kind == "boss" else 1.0)
+			t.soldier_left[i] = data["hold"][t.level] * (boss_hold if e.kind == "boss" else 1.0) * (GRIM_HOLD if e.special == "conductor" else 1.0)
 		t.soldier_left[i] -= dt
-		t.soldier_hp[i] -= SOLDIER_HURT.get(e.kind, 1.0) * (0.5 if e.special == "splitling" else 1.0) * dt
+		var hurt: float = SOLDIER_HURT.get(e.kind, 1.0) * (0.5 if e.special == "splitling" else (GRIM_HURT if e.special == "conductor" else 1.0))
+		t.soldier_hp[i] -= hurt * dt
 		t.soldier_cd[i] -= dt
 		if t.soldier_cd[i] <= 0.0:
 			t.soldier_cd[i] += data["cooldown"][t.level]
@@ -1559,6 +1728,8 @@ func keep_going(slot: int) -> String:
 		return ""
 	if daily_date != "":
 		return "The daily challenge ends at wave %d" % DAILY_WAVES
+	if weekly_id != "":
+		return "The weekly challenge ends at wave %d" % WEEKLY_WAVES
 	endless = true
 	state = "playing"
 	end_stats = {}
@@ -1581,6 +1752,8 @@ func set_difficulty(slot: int, d: int) -> String:
 		return "The level can only change before wave 1"
 	if daily_date != "":
 		return "The daily challenge has its own level"
+	if weekly_id != "":
+		return "The weekly challenge is always %s" % DIFFICULTIES[WEEKLY_LEVEL]
 	if d < 0 or d >= DIFFICULTIES.size() or d == difficulty:
 		return ""
 	var old_gold := start_gold()
@@ -1760,8 +1933,8 @@ func sell_tower(slot: int, c: Vector2i) -> String:
 		return ""
 	if t.owner != slot:
 		return "That's %s's tower" % name_of(t.owner)
-	if daily_rules().get("no_sell", false):
-		return "Towers can't be sold in today's challenge"
+	if challenge_rules().get("no_sell", false):
+		return "Towers can't be sold in this challenge"
 	players[slot].gold += int(t.spent * 0.7)
 	stat_spent[slot] -= int(t.spent * 0.7)
 	sold_towers.append(t)  # its damage and kills still count at the end
@@ -1792,7 +1965,7 @@ const SAVE_TOWER_FIELDS := ["type", "cell", "owner", "level", "path", "mode", "s
 		"soldier_hp", "soldier_wait"]
 const SAVE_ENEMY_FIELDS := ["id", "kind", "pos", "wp", "loop_wp", "hp", "max_hp", "speed", "armor", "bounty", "weight",
 		"radius", "slow_factor", "slow_time", "freeze_time", "freeze_immune", "traveled", "special", "shield",
-		"max_shield", "shield_wait", "heal_timer", "weak", "poisoned", "hold_immune"]
+		"max_shield", "shield_wait", "heal_timer", "weak", "poisoned", "hold_immune", "haste_time"]
 const SAVE_CLOUD_FIELDS := {"pos": TYPE_VECTOR2, "r": TYPE_FLOAT, "time": TYPE_FLOAT, "dps": TYPE_FLOAT,
 		"owner": TYPE_INT, "cell": TYPE_VECTOR2I, "boss": TYPE_FLOAT, "weak": TYPE_FLOAT}
 
@@ -1830,6 +2003,8 @@ func save_path(save_name: String) -> String:
 # The name the Save box suggests: "Wave 37 - Normal - Default".
 func default_save_name() -> String:
 	var title := map_name if daily_date == "" else "Daily %s" % daily_date
+	if weekly_id != "":
+		title = weekly_title(weekly_id)
 	return clean_text("Wave %d - %s - %s" % [wave, DIFFICULTIES[difficulty], title], SAVE_NAME_MAX)
 
 
@@ -1840,7 +2015,8 @@ func save_exists(save_name: String) -> bool:
 
 # Every save's header, for the Load list: Continue first, then newest first.
 # Each: {name, time (unix seconds), version, wave, level (index in DIFFICULTIES),
-# map, daily, endless, players (names), from_save, auto}. Load or delete one by
+# map, daily, weekly (week id or "", missing in older saves), endless, players
+# (names), from_save, auto}. Load or delete one by
 # its name.
 func list_saves() -> Array:
 	var out := []
@@ -1908,7 +2084,7 @@ func save_game(save_name: String) -> String:
 		if p != null:
 			names.append(name_of(p.slot))
 	var head := {"format": SAVE_FORMAT, "version": version, "name": save_name, "time": int(Time.get_unix_time_from_system()),
-			"wave": wave, "level": difficulty, "map": map_name, "daily": daily_date, "endless": endless,
+			"wave": wave, "level": difficulty, "map": map_name, "daily": daily_date, "weekly": weekly_id, "endless": endless,
 			"players": names, "from_save": from_save, "auto": auto}
 	# Written next to it first, so a crash halfway never breaks the old save
 	var tmp := path + ".tmp"
@@ -1977,7 +2153,7 @@ func make_save() -> Dictionary:
 			var d := pack_fields(e, SAVE_ENEMY_FIELDS)
 			d["gate"] = routes.find(e.route)  # the route itself comes from the map
 			monsters.append(d)
-	return {"map_name": map_name, "map": map_rows_text.duplicate(), "daily": daily_date, "difficulty": difficulty,
+	return {"map_name": map_name, "map": map_rows_text.duplicate(), "daily": daily_date, "weekly": weekly_id, "mood": mood, "difficulty": difficulty,
 			"endless": endless, "wave": wave, "timer": next_wave_timer, "run_time": run_time, "spawn_hp": spawn_hp,
 			"spawn_queues": spawn_queues.duplicate(true), "spawn_timers": spawn_timers.duplicate(),
 			"next_enemy_id": next_enemy_id, "host_slot": local_slot, "players": list, "towers": tower_list,
@@ -2050,10 +2226,17 @@ func apply_save(d: Dictionary, m: Dictionary) -> void:
 	lap_lengths.clear()
 	var title := clean_text(d.map_name, MAP_NAME_MAX)
 	use_map(m, title if title != "" else "Saved map")
+	# The saved weather and time of day (older saves: day), built with the map
+	mood = d.mood if d.get("mood") is String and d.mood in MOODS else "day"
 	build_map()
+	send_mood(mood)
 	var date: String = d.daily
 	if date.length() == 10 and date.replace("-", "").is_valid_int() and map_rows_text == daily_map(date).text:
 		daily_date = date
+	# The weekly challenge: only on that week's map (older saves have no "weekly")
+	var week: Variant = d.get("weekly", "")
+	if daily_date == "" and weekly_valid(week) and map_rows_text == weekly_map(week).text:
+		weekly_id = week
 	difficulty = d.difficulty
 	endless = d.get("endless") == true
 	wave = d.wave
@@ -2261,14 +2444,17 @@ func prog_add(slot: int, key: String, n := 1) -> void:
 
 
 # Achievements, best waves and level wins count on the Default map and the daily
-# challenge's map (daily_date is only set on that day's map), not on custom maps.
+# and weekly challenges' maps (daily_date / weekly_id are only set on that day's /
+# week's map), not on custom maps.
 func map_counts() -> bool:
-	return daily_date != "" or map_rows_text == DEFAULT_MAP
+	return daily_date != "" or weekly_id != "" or map_rows_text == DEFAULT_MAP
 
 
 # In the game early enough for a win or an endless wave to count.
 func were_there(rec: Dictionary) -> bool:
-	return rec.join <= (JOIN_BY_DAILY if daily_date != "" else JOIN_BY)
+	if daily_date != "":
+		return rec.join <= JOIN_BY_DAILY
+	return rec.join <= (JOIN_BY_WEEKLY if weekly_id != "" else JOIN_BY)
 
 
 # Host: a player earned an achievement (on a map that counts). The host's own
@@ -2326,9 +2512,10 @@ func profile_wave_start() -> void:
 		if p == null:
 			continue
 		var rec := prog_for(p.slot)
-		if daily_date == "" and wave >= 30:
+		var challenge := daily_date != "" or weekly_id != ""
+		if not challenge and wave >= 30:
 			earn(p.slot, "warming_up")
-		if daily_date == "" and difficulty == DIFFICULTIES.size() - 1 and wave >= 150:
+		if not challenge and difficulty == DIFFICULTIES.size() - 1 and wave >= 150:
 			earn(p.slot, "insane_150")
 		if endless and were_there(rec):
 			for goal: int in [400, 500, 600]:
@@ -2370,6 +2557,8 @@ func profile_game_end() -> void:
 		if result == "won" and were_there(rec):
 			if daily_date != "":
 				earn(slot, "daily_win")
+			elif weekly_id != "":
+				earn(slot, "weekly_win")
 			else:
 				earn(slot, WIN_ACHIEVEMENTS[difficulty])
 				if not rec.used:
@@ -2389,7 +2578,7 @@ func profile_update(slot: int, result: String) -> void:
 	if players[slot] == null:
 		return
 	var rec := prog_for(slot)
-	var data := {"add": rec.add, "earned": rec.earned, "counts": map_counts(), "level": difficulty, "daily": daily_date,
+	var data := {"add": rec.add, "earned": rec.earned, "counts": map_counts(), "level": difficulty, "daily": daily_date, "weekly": weekly_id,
 			"twist": daily_rules().get("twist", ""), "wave": wave, "endless": endless, "there": were_there(rec), "result": result}
 	if not rec.counted and wave > 0:
 		rec.counted = true
@@ -2493,7 +2682,7 @@ const REPLAY_BYTES := 12  # per monster in a frame (see record_frame())
 # of 65535 (u16), its kind + 128 slowed + 64 frozen + 32 got past (has walked a
 # whole lap; known by the host and alone), and its special_bits() + 32 poisoned.
 # events: ["shot", tower cell, monster id], ["bolt", points], ["boom", pos, r],
-# ["frost", pos, r] or ["ability", slot, ability, pos].
+# ["frost", pos, r], ["ability", slot, ability, pos] or ["crescendo", monster id].
 var rec_frames: Array = []
 var rec_time := 0.0  # game seconds recorded
 var rec_since := 0.0  # since the last frame
@@ -2603,6 +2792,11 @@ func add_frost_ring(pos: Vector2, r: float) -> void:
 func show_ability(slot: int, ability: String, at: Vector2) -> void:
 	rec_event(["ability", slot, ability, at])
 	super(slot, ability, at)
+
+
+func crescendo_fx(e: Enemy) -> void:
+	rec_event(["crescendo", e.id])
+	super(e)
 
 
 # A new game (or the host's restart) also ends the replay and forgets the recording.
@@ -2799,6 +2993,11 @@ func play_events(list: Array) -> void:
 				add_frost_ring(ev[1], ev[2])
 			"ability":
 				show_ability(ev[1], ev[2], ev[3])
+			"crescendo":
+				# Only the look and sound (see crescendo_fx())
+				var g: Enemy = replay_ghosts.get(ev[1])
+				if g != null:
+					crescendo_fx(g)
 
 
 # The replay's keys: Space pause, Left / Right 5 seconds, F speed, click or

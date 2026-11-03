@@ -23,6 +23,13 @@ uniform float grad_high = 1.1;   // brightness at grad_top
 uniform float grad_top = 1.2;    // world height
 uniform float top_light = 0.15;  // extra light on surfaces that face up
 uniform float rough = 0.8;
+// The weather and time of day (see apply_mood() in game_world.gd): the rim's color
+// and strength (a: times rim_strength; 0: this material's own), and wet = less rough
+global uniform vec4 mood_rim;
+global uniform float mood_rough;
+// Frostfall Fair: snow on top (0-1, see apply_festival()), on materials with snow_cap
+global uniform float fest_snow;
+uniform float snow_cap = 0.0;
 varying float wy;
 varying vec3 vcol;
 
@@ -44,11 +51,14 @@ void fragment() {
 	vec3 wn = (INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz;
 	col *= mix(grad_low, grad_high, clamp(wy / grad_top, 0.0, 1.0));
 	col *= 1.0 + top_light * max(wn.y, 0.0);
+	col = mix(col, vec3(0.88, 0.92, 0.98), fest_snow * snow_cap * smoothstep(0.55, 0.8, wn.y));
 	ALBEDO = col;
-	ROUGHNESS = rough;
+	ROUGHNESS = min(rough, mood_rough);
 	SPECULAR = 0.3;
 	float rim = pow(clamp(1.0 - dot(NORMAL, VIEW), 0.0, 1.0), rim_power);
-	EMISSION = emission * emission_energy + rim_color * mix(vec3(1.0), col, 0.5) * rim * rim_strength;
+	vec3 rc = mood_rim.a > 0.0 ? mood_rim.rgb : rim_color;
+	float rs = mood_rim.a > 0.0 ? rim_strength * mood_rim.a : rim_strength;
+	EMISSION = emission * emission_energy + rc * mix(vec3(1.0), col, 0.5) * rim * rs;
 	if (use_normal) {
 		NORMAL_MAP = texture(normal_tex, UV).rgb;
 		NORMAL_MAP_DEPTH = normal_depth;

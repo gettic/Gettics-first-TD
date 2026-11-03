@@ -33,6 +33,8 @@ var aa_mode := "msaa2"  # anti-aliasing: one of AA_MODES
 const RENDER_SCALES := [1.0, 0.85, 0.75, 0.5]
 const AA_MODES := ["msaa2", "msaa4", "fxaa", "off"]
 const AA_NAMES := ["MSAA 2x", "MSAA 4x", "FXAA", "Off"]
+const WEATHER_SETTINGS := ["random", "day"]  # Settings row "Weather": a random mood each game, or always day
+var weather_setting := "random"  # one of WEATHER_SETTINGS (this PC's choice; in multiplayer the host's pick wins)
 var compat := false  # running on the Compatibility renderer (older PCs), which needs darker light
 var env: Environment
 var sun: DirectionalLight3D
@@ -43,31 +45,25 @@ var grid_fade := 0.0  # grid lines on the grass, shown while placing a tower
 func build_world() -> void:
 	# Forward+ falls back to Compatibility by itself on PCs that can't run it
 	compat = RenderingServer.get_current_rendering_method() == "gl_compatibility"
+	add_mood_globals()
 	# The painted look: warm late-afternoon light, a soft haze far away, and colors
 	# a little stronger. Compatibility renders brighter and more colorful, so it
-	# gets its own, lower values.
+	# gets its own, lower values. The light's colors and strengths are set by the
+	# weather and time of day (see mood_light()).
 	env = Environment.new()
 	env.background_mode = Environment.BG_COLOR
-	env.background_color = Color(0.62, 0.6, 0.55)
 	# A sky only for the ambient light and reflections: the camera never sees it
 	var sky_mat := ProceduralSkyMaterial.new()
-	sky_mat.sky_top_color = Color(0.35, 0.52, 0.8)
-	sky_mat.sky_horizon_color = Color(0.85, 0.75, 0.6)
 	sky_mat.ground_bottom_color = Color(0.12, 0.1, 0.08)
-	sky_mat.ground_horizon_color = Color(0.85, 0.75, 0.6).darkened(0.3)
 	env.sky = Sky.new()
 	env.sky.sky_material = sky_mat
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_SKY
 	env.reflected_light_source = Environment.REFLECTION_SOURCE_SKY
-	env.ambient_light_energy = 0.48 if compat else 0.6
 	env.tonemap_mode = Environment.TONE_MAPPER_ACES
-	env.tonemap_exposure = 0.72 if compat else 1.0
 	env.glow_enabled = true
 	env.glow_bloom = 0.1
-	env.glow_hdr_threshold = 0.85
 	env.adjustment_enabled = true
 	env.adjustment_contrast = 1.1
-	env.adjustment_saturation = 1.02 if compat else 1.2
 	# Shadows a little cool, highlights a little warm
 	env.adjustment_color_correction = split_tone(0.5)
 	env.ssao_radius = 0.8
@@ -79,9 +75,7 @@ func build_world() -> void:
 	# Haze over the land far around the board (see build_map() for its distance)
 	env.fog_enabled = true
 	env.fog_mode = Environment.FOG_MODE_DEPTH
-	env.fog_light_color = Color(0.75, 0.68, 0.55)
 	env.fog_density = 1.0
-	env.fog_depth_curve = 1.5
 	env.fog_sky_affect = 1.0
 	var world_env := WorldEnvironment.new()
 	world_env.environment = env
@@ -90,18 +84,13 @@ func build_world() -> void:
 	# Warm sun from the side for long soft shadows, and a cool fill light
 	# from the other side so the shadow sides aren't flat
 	sun = DirectionalLight3D.new()
-	sun.rotation_degrees = Vector3(-40, -40, 0)
-	sun.light_color = Color(1.0, 0.8, 0.58)
-	sun.light_energy = 1.3 if compat else 1.75
 	sun.shadow_enabled = true
 	sun.directional_shadow_mode = DirectionalLight3D.SHADOW_PARALLEL_2_SPLITS
 	sun.directional_shadow_max_distance = 60.0
 	add_child(sun)
-	var fill := DirectionalLight3D.new()
-	fill.rotation_degrees = Vector3(-30, 150, 0)
-	fill.light_color = Color(0.5, 0.62, 1.0)
-	fill.light_energy = 0.4 if compat else 0.5
-	add_child(fill)
+	fill_light = DirectionalLight3D.new()
+	fill_light.rotation_degrees = Vector3(-30, 150, 0)
+	add_child(fill_light)
 	load_settings()
 	make_effects()
 	apply_graphics()
@@ -234,6 +223,9 @@ func clear_map() -> void:
 	ground_mats = []
 	tree_near = []
 	pollen = null
+	weather_root = null
+	torches = []
+	fest_root = null
 
 
 # Builds the map being played (see use_map()): ground, path, base, gates and areas.
@@ -251,9 +243,7 @@ func build_map() -> void:
 	camera.position = camera_home
 	camera.look_at(camera_focus)
 	sun.directional_shadow_max_distance = 60.0 * maxf(s, 1.0)
-	# The haze starts beyond the board, also on big maps
-	env.fog_depth_begin = 30.0 * s
-	env.fog_depth_end = 80.0 * s
+	# The haze starts beyond the board, also on big maps (set in mood_light(), called by apply_graphics())
 
 	# Ground: grass tiles, with the path sunk a little lower.
 	# Tiles are slightly bigger than one unit so they overlap and no gaps show between them.
@@ -318,6 +308,7 @@ func build_map() -> void:
 	build_outer()
 	build_areas()
 	add_pollen()
+	apply_mood(mood)
 
 
 # Graphics High: ambient occlusion (dark contact shadows), bounced light, soft
@@ -327,12 +318,10 @@ func apply_graphics() -> void:
 	var high := graphics_high
 	env.ssao_enabled = high and not compat
 	env.ssil_enabled = high and not compat
-	env.glow_intensity = 0.75 if high else 0.45
 	# Half the floating pollen on Low
 	if pollen != null:
 		pollen.amount = POLLEN if high else POLLEN / 2
 	sun.shadow_blur = 1.5 if high else 1.0
-	sun.light_angular_distance = 1.5 if high else 0.0
 	RenderingServer.directional_shadow_atlas_set_size(4096 if high else 2048, true)
 	RenderingServer.directional_soft_shadow_filter_set_quality(RenderingServer.SHADOW_QUALITY_SOFT_HIGH if high else RenderingServer.SHADOW_QUALITY_SOFT_LOW)
 	# The ground's normal maps (light catching the painted bumps) only on High
@@ -352,6 +341,14 @@ func apply_graphics() -> void:
 				motes.visible = high
 	if cloud_puffs != null:
 		cloud_puffs.visible = high
+	# The open gates' purple haze only on High
+	for gp: Variant in gate_parts:
+		if gp != null:
+			gp["mist"].visible = gp["lit"] and high
+	# The weather's glow and soft sun, and fewer raindrops and snowflakes on Low
+	mood_light()
+	if weather_root != null:
+		mood_fx()
 
 
 func load_settings() -> void:
@@ -374,6 +371,11 @@ func load_settings() -> void:
 	aa_mode = str(cfg.get_value("display", "aa", "msaa2"))
 	if not aa_mode in AA_MODES:
 		aa_mode = "msaa2"
+	weather_setting = str(cfg.get_value("graphics", "weather", "random"))
+	if not weather_setting in WEATHER_SETTINGS:
+		weather_setting = "random"
+	story_on = bool(cfg.get_value("story", "cards", true))
+	festivals_on = bool(cfg.get_value("graphics", "festivals", true))
 	if not found or not cfg.has_section_key("graphics", "high") or not cfg.has_section_key("display", "aa"):
 		save_settings()
 	apply_display()
@@ -438,6 +440,9 @@ func save_settings() -> void:
 		cfg.set_value("display", "fullscreen", fullscreen)
 	cfg.set_value("display", "render_scale", render_scale)
 	cfg.set_value("display", "aa", aa_mode)
+	cfg.set_value("graphics", "weather", weather_setting)
+	cfg.set_value("graphics", "festivals", festivals_on)
+	cfg.set_value("story", "cards", story_on)
 	save_audio_settings(cfg)
 	cfg.save(SETTINGS_FILE)
 
@@ -445,55 +450,157 @@ func save_settings() -> void:
 # Stone gate with a green portal where one player's monsters come out. It faces
 # along its stretch of path, so monsters walk straight out of it. A gem on top
 # shows the player's color; the portal only shows while a player uses the gate.
+# It fits inside its own tile, so towers next to it don't cut into it.
+const GATE_W := 0.8  # the gate's width compared to its first size (festival decorations too)
+
+
+#
+# The Bone Choir's crypt gate (assets/gates/gate.glb, made for this game): a cracked
+# stone frame under a horned skull with the owner's gem, iron-bound doors, and
+# behind it a closed crypt, so the portal never shows from behind. Its parts:
+# Front, Back (when the tile behind is off the board, with the doors) or Short (a
+# wall, when the tile behind is on the board), Runes (glows), Portal, DoorL/DoorR.
+# The doors swing open and the portal fades in while a player uses the gate.
+const GATE_SCALE := 0.25  # the model's metres to tiles (it's 0.96 tiles wide, like GATE_W)
+var gate_models := {}  # part name -> {"parts": [[mesh, transform], ...], "at": transform} (loaded once)
+var gate_mats := {}
+var gate_glows: Array = []  # [mesh instance, surface, "Rune"/"Crack"] of the gate being built
+
+
+func gate_model() -> Dictionary:
+	if gate_models.is_empty():
+		var scene: Node3D = load("res://assets/gates/gate.glb").instantiate()
+		var top := scene.find_child("Front", true, false).get_parent()
+		for c in top.get_children():
+			var parts := []
+			collect_meshes(c, Transform3D.IDENTITY, parts)
+			gate_models[String(c.name)] = {"parts": parts, "at": (c as Node3D).transform}
+		scene.free()
+	return gate_models
+
+
+# The gate's materials, made once (the gem's per player slot). "Off" glows are
+# the dim ones while nobody uses the gate.
+func gate_mat(name: String, slot: int) -> Material:
+	var key := name + (" %d" % slot if name == "TeamColor" else "")
+	if not gate_mats.has(key):
+		var m: Material
+		match name:
+			"TeamColor":
+				var s := StandardMaterial3D.new()
+				s.vertex_color_use_as_albedo = true
+				s.albedo_texture = load("res://assets/towers/cannon/cannon_team.jpg")
+				s.albedo_color = PLAYER_COLORS[slot]
+				s.emission_enabled = true
+				s.emission = PLAYER_COLORS[slot]
+				s.emission_energy_multiplier = 0.35
+				m = painted(s)
+			"BoneP":
+				# The sculpted skulls and horns: no texture, their look is painted into the vertex colors
+				var s := StandardMaterial3D.new()
+				s.vertex_color_use_as_albedo = true
+				s.roughness = 0.8
+				m = painted(s)
+			"Crack", "CrackOff", "Seep", "Rune", "RuneOff":
+				var s := StandardMaterial3D.new()
+				s.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+				s.albedo_color = {"Crack": Color(1.3, 0.5, 2.0), "CrackOff": Color(0.32, 0.12, 0.45), "Seep": Color(0.45, 0.2, 0.7),
+					"Rune": Color(0.45, 1.5, 0.65), "RuneOff": Color(0.06, 0.16, 0.1)}[name]
+				m = s
+			"Portal":
+				var p := ShaderMaterial.new()
+				p.shader = load("res://assets/shaders/gate_portal.gdshader")
+				p.set_shader_parameter("center", Vector2(0.5, 0.5))
+				p.set_shader_parameter("stretch", Vector2(1.0, 1.66))
+				p.set_shader_parameter("deep", Color(0.06, 0.0, 0.08))
+				p.set_shader_parameter("mid", Color(0.32, 0.12, 0.45))
+				p.set_shader_parameter("glow", Color(0.6, 1.0, 0.3))
+				p.set_shader_parameter("core", Color(0.85, 1.0, 0.6))
+				p.set_shader_parameter("energy", 1.7)
+				m = p
+			_:
+				m = kit_mat("cannon", "Atlas", 0)
+		gate_mats[key] = m
+	return gate_mats[key]
+
+
+# One part of the gate model under parent (meshes shared by every gate)
+func add_gate_part(parent: Node3D, part: String, slot: int) -> Node3D:
+	var d: Dictionary = gate_model()[part]
+	var n := Node3D.new()
+	n.transform = Transform3D(Basis.IDENTITY.scaled(Vector3.ONE * GATE_SCALE), (d["at"] as Transform3D).origin * GATE_SCALE)
+	parent.add_child(n)
+	for p: Array in d["parts"]:
+		var mesh: Mesh = p[0]
+		var mi := MeshInstance3D.new()
+		mi.mesh = mesh
+		mi.transform = (d["at"] as Transform3D).affine_inverse() * (p[1] as Transform3D)
+		n.add_child(mi)
+		for s in mesh.get_surface_count():
+			var nm := mesh.surface_get_material(s).resource_name
+			mi.set_surface_override_material(s, gate_mat(nm + ("Off" if nm == "Rune" or nm == "Crack" else ""), slot))
+			if nm == "Rune" or nm == "Crack":
+				gate_glows.append([mi, s, nm])
+		if part == "Portal" or part == "Runes":
+			mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	return n
+
+
 func build_gate(g: int) -> void:
 	var gate := Node3D.new()
 	gate.position = to3d(routes[g][0])
 	var out_dir: Vector2 = routes[g][1] - routes[g][0]
 	gate.rotation.y = atan2(out_dir.x, out_dir.y)
 	map_root.add_child(gate)
-	var stone := mat(Color(0.42, 0.42, 0.46))
-	var pillar := BoxMesh.new()
-	pillar.size = Vector3(0.22, 1.3, 0.3)
-	add_mesh(gate, pillar, stone, Vector3(-0.5, 0.57, 0))
-	add_mesh(gate, pillar, stone, Vector3(0.5, 0.57, 0))
-	var lintel := BoxMesh.new()
-	lintel.size = Vector3(1.34, 0.26, 0.38)
-	add_mesh(gate, lintel, stone, Vector3(0, 1.3, 0))
-	var cap := BoxMesh.new()
-	cap.size = Vector3(0.3, 0.1, 0.4)
-	add_mesh(gate, cap, stone, Vector3(-0.5, -0.03, 0))
-	add_mesh(gate, cap, stone, Vector3(0.5, -0.03, 0))
-	var gem := add_mesh(gate, box(0.2, 0.2, 0.2), mat(PLAYER_COLORS[g], 1.2), Vector3(0, 1.55, 0))
-	gem.rotation_degrees = Vector3(45, 0, 45)
-
-	# The portal surface filling the arch, visible from both sides
-	var green := Color(0.25, 1.0, 0.4)
-	var surface := QuadMesh.new()
-	surface.size = Vector2(0.78, 1.12)
-	var surface_mat := mat(green, 1.6, 0.7)
-	surface_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
-	var surface_node := add_mesh(gate, surface, surface_mat, Vector3(0, 0.6, 0))
-	surface_node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-
-	# Glowing sparks that swirl inside the portal
-	var portal := Node3D.new()
-	portal.position = Vector3(0, 0.6, 0.02)
-	gate.add_child(portal)
-	var spark := SphereMesh.new()
-	spark.radius = 0.05
-	spark.height = 0.1
-	var spark_mat := mat(Color(0.75, 1.0, 0.8), 3.0)
-	for i in 6:
-		var a := TAU * i / 6.0
-		add_mesh(portal, spark, spark_mat, Vector3(cos(a), sin(a), 0) * 0.28)
-
-	var portal_light := OmniLight3D.new()
-	portal_light.light_color = green
-	portal_light.omni_range = 3.0
-	portal_light.light_energy = 1.8
-	portal_light.position = Vector3(0, 0.7, 0.4)
+	# The tile behind: on the board a wall closes the back, off it the crypt and the doors
+	var behind: Vector2i = gate_cells[g] - Vector2i(out_dir.normalized().round())
+	gate_glows = []
+	add_gate_part(gate, "Front", g)
+	add_gate_part(gate, "Short" if in_map(behind) else "Back", g)
+	add_gate_part(gate, "Runes", g)
+	var surface := add_gate_part(gate, "Portal", g)
+	surface.visible = false
+	var doors := []
+	if not in_map(behind):
+		for nm in ["DoorL", "DoorR"]:
+			doors.append(add_gate_part(gate, nm, g))
+	# The portal's light shines out of the front only (never onto the tiles behind)
+	var portal_light := SpotLight3D.new()
+	portal_light.light_color = Color(0.65, 1.0, 0.45)
+	portal_light.spot_range = 2.6
+	portal_light.spot_angle = 55.0
+	portal_light.position = Vector3(0, 0.55, 0)
+	portal_light.rotation.y = PI
+	portal_light.visible = false
 	gate.add_child(portal_light)
-	gate_parts.append({"surface": surface_node, "sparks": portal, "light": portal_light, "motes": add_motes(gate)})
+	# Purple motes rising in front of the portal
+	var motes := add_motes(gate)
+	motes.position = Vector3(0, 0.45, 0.08)
+	var mpm := motes.process_material as ParticleProcessMaterial
+	mpm.emission_box_extents = Vector3(0.25, 0.3, 0.05)
+	mpm.color = Color(1.6, 0.8, 2.2)
+	motes.lifetime = 1.1
+	motes.visible = false
+	# Faint purple haze spilling out low over the ground while the doors are open
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	pm.emission_box_extents = Vector3(0.22, 0.03, 0.05)
+	pm.direction = Vector3(0, 0.05, 1)
+	pm.spread = 35.0
+	pm.initial_velocity_min = 0.12
+	pm.initial_velocity_max = 0.25
+	pm.gravity = Vector3.ZERO
+	pm.damping_min = 0.05
+	pm.damping_max = 0.1
+	pm.scale_min = 0.8
+	pm.scale_max = 1.6
+	pm.color = Color(0.5, 0.25, 0.7, 0.35)
+	pm.color_ramp = fade_ramp()
+	var mist := particles(gate, 14, 3.0, 0.4, pm)
+	mist.position = Vector3(0, 0.06, -0.08)
+	mist.visible = false
+	gate_parts.append({"surface": surface, "light": portal_light, "motes": motes, "mist": mist, "doors": doors,
+		"glows": gate_glows.duplicate(), "open": 0.0, "lit": false})
 
 
 func box(x: float, y: float, z: float) -> BoxMesh:
@@ -636,28 +743,51 @@ func build_decor() -> void:
 
 
 # A low curb of chunky stones along the board's edge, so the buildable area is clear.
-# One MultiMesh; each stone's tilt and height come from tile_hash().
+# One MultiMesh; each stone's tilt and height come from tile_hash(). Where a gate
+# stands on the edge the curb stops at its pillars (stones there are cut short).
 func build_border() -> void:
 	var stone := BoxMesh.new()
 	stone.size = Vector3(0.42, 0.2, 0.16)
 	var xf: Array[Transform3D] = []
 	var k := 0
+	var gates: Array[Vector3] = []
+	for g in gate_cells.size():
+		if gate_cells[g] != null:
+			gates.append(to3d(routes[g][0]))
+	var half := 0.5 * GATE_W + 0.12  # the gate's half width, to the pillars' outsides
 	for side in 4:
 		var along_x := side < 2
 		var length := map_cols if along_x else map_rows
 		var count := int(ceil(length / 0.45))
+		var line := (-0.08 if side % 2 == 0 else (map_rows if along_x else map_cols) + 0.08)
 		for i in count:
 			var t := (i + 0.5) * length / count
 			var h := tile_hash(Vector2i(k, side * 1000))
 			k += 1
+			# The stone's ends along the edge, cut back from any gate on this edge
+			var a0 := t - 0.21
+			var a1 := t + 0.21
+			for gp: Vector3 in gates:
+				var c := gp.x if along_x else gp.z
+				if absf((gp.z if along_x else gp.x) - line) > 0.6 or a1 <= c - half or a0 >= c + half:
+					continue
+				if a0 < c - half:
+					a1 = c - half
+				elif a1 > c + half:
+					a0 = c + half
+				else:
+					a1 = a0
+			if a1 - a0 < 0.1:
+				continue
+			t = (a0 + a1) / 2.0
 			var pos: Vector3
 			if along_x:
-				pos = Vector3(t, -0.04, -0.08 if side == 0 else map_rows + 0.08)
+				pos = Vector3(t, -0.04, line)
 			else:
-				pos = Vector3(-0.08 if side == 2 else map_cols + 0.08, -0.04, t)
+				pos = Vector3(line, -0.04, t)
 			pos.y += (h % 7) * 0.006
 			var turn := (0.0 if along_x else PI / 2) + ((h >> 3) % 9 - 4) * 0.03
-			xf.append(Transform3D(Basis(Vector3.UP, turn), pos))
+			xf.append(Transform3D(Basis(Vector3.UP, turn) * Basis.from_scale(Vector3((a1 - a0) / 0.42, 1, 1)), pos))
 	var mm := MultiMesh.new()
 	mm.transform_format = MultiMesh.TRANSFORM_3D
 	mm.mesh = stone
@@ -667,6 +797,7 @@ func build_border() -> void:
 	var mmi := MultiMeshInstance3D.new()
 	mmi.multimesh = mm
 	mmi.material_override = painted(mat(Color(0.62, 0.56, 0.48)))
+	mmi.material_override.set_shader_parameter("snow_cap", 1.0)  # Frostfall Fair (see apply_festival())
 	map_root.add_child(mmi)
 
 
@@ -737,8 +868,11 @@ func build_outer() -> void:
 			for g in gates:
 				if g.distance_to(Vector2(x + 0.5, y + 0.5)) < 2.2:
 					near_gate = true
+			# Nothing on the land round a gate (its crypt stands there)
+			if near_gate:
+				continue
 			var dist := maxf(maxf(maxf(-x, x - map_cols + 1), maxf(-y, y - map_rows + 1)), 0)
-			var tree_chance := 0.0 if near_gate else clampf((dist - 1.5) / 3.0, 0.0, 0.7)
+			var tree_chance := clampf((dist - 1.5) / 3.0, 0.0, 0.7)
 			pos.y = -0.12
 			# Trees and bushes further out than TREE_FAR use the simpler mesh
 			if r < tree_chance:
@@ -791,6 +925,8 @@ func outer_mat(mesh: Mesh, kind: String) -> ShaderMaterial:
 		p.set_shader_parameter("grad_top", 0.3)
 		p.set_shader_parameter("saturation", 0.92)
 		p.set_shader_parameter("tint", Color(0.66, 0.66, 0.64) if kind == "r" else Color(0.6, 0.66, 0.48))
+		if kind == "r":
+			p.set_shader_parameter("snow_cap", 1.0)  # Frostfall Fair (see apply_festival())
 		outer_mats[kind] = p
 	return outer_mats[kind]
 
@@ -804,7 +940,7 @@ func outer_mat(mesh: Mesh, kind: String) -> ShaderMaterial:
 # variant has a detailed mesh (near the board, on High) and a simple one (far
 # away, shadows, and everything on Low). Picked with tile_hash(), so every
 # player sees the same forest.
-const TREE_FAR := 3.5  # outer trees further than this from the board use the simple mesh
+const TREE_FAR := 2.0  # outer trees further than this from the board use the simple mesh
 const LEAF_GREENS := [
 	[Color(0.06, 0.14, 0.08), Color(0.18, 0.34, 0.12), Color(0.52, 0.62, 0.22)],
 	[Color(0.05, 0.13, 0.10), Color(0.15, 0.31, 0.15), Color(0.42, 0.56, 0.24)],
@@ -916,8 +1052,9 @@ func make_tree_kinds() -> void:
 	tree_mat = ShaderMaterial.new()
 	tree_mat.shader = load("res://assets/shaders/painted_leaves.gdshader")
 	tree_mat.set_shader_parameter("leaf_tex", leaf_texture())
-	tree_mat.set_shader_parameter("rim_strength", 0.18)
-	tree_mat.set_shader_parameter("rim_color", Color(1.0, 0.85, 0.6))
+	# A faint green rim: just enough to keep the clumps apart (a stronger warm one glowed)
+	tree_mat.set_shader_parameter("rim_strength", 0.08)
+	tree_mat.set_shader_parameter("rim_color", Color(0.7, 0.85, 0.5))
 	tree_mat.set_shader_parameter("grad_low", 0.75)
 	tree_mat.set_shader_parameter("grad_high", 1.1)
 	tree_mat.set_shader_parameter("grad_top", 1.3)
@@ -1234,6 +1371,410 @@ func add_motes(gate: Node3D) -> GPUParticles3D:
 	return p
 
 
+# ---------------------------------------------------------------- weather and time of day
+
+# The mood: the light, sky, haze and ground colors, and the weather's particles.
+# Only looks, so it can change at any time; every player sees the same when the
+# mood is sent to all (see apply_mood()).
+const MOODS := ["day", "evening", "night", "rain", "fog", "snow"]
+var mood := "day"  # one of MOODS
+var fill_light: DirectionalLight3D  # the cool light from the other side
+var weather_root: Node3D  # the mood's rain, snow, leaves, mist or torches (under map_root)
+var torches: Array[OmniLight3D] = []  # the night's torch lights (they flicker, see update_visuals())
+var weather_mats := {}  # the weather's meshes and materials, made once
+
+
+# Values shared by every painted shader, so a mood changes all models in one go:
+# mood_rim is the rim light's color (rgb) and strength (a, times each material's
+# own; 0: the material's own color and strength), mood_rough caps the roughness (wet).
+func add_mood_globals() -> void:
+	RenderingServer.global_shader_parameter_add(&"mood_rim", RenderingServer.GLOBAL_VAR_TYPE_VEC4, Vector4(1, 1, 1, 0))
+	RenderingServer.global_shader_parameter_add(&"mood_rough", RenderingServer.GLOBAL_VAR_TYPE_FLOAT, 1.0)
+	RenderingServer.global_shader_parameter_add(&"fest_snow", RenderingServer.GLOBAL_VAR_TYPE_FLOAT, 0.0)
+
+
+# Changes the weather and time of day to m (one of MOODS; anything else is "day").
+# The festival (see apply_festival()) is picked here too: again for a new game
+# (wave 0), kept during one.
+func apply_mood(m: String) -> void:
+	mood = m if m in MOODS else "day"
+	mood_light()
+	if wave == 0 or not festival_picked:
+		festival_picked = true
+		apply_festival(festival_today())
+	if map_root != null:
+		mood_fx()
+
+
+# The mood's light, sky, haze, ground colors and rim light. Day is the game's
+# normal look; the others change it from there.
+func mood_light() -> void:
+	var sky: ProceduralSkyMaterial = env.sky.sky_material
+	var high := graphics_high
+	var s := view_scale
+	# Day: warm late-afternoon sun from the side, a cool fill light from the other side
+	sun.rotation_degrees = Vector3(-40, -40, 0)
+	sun.light_color = Color(1.0, 0.8, 0.58)
+	sun.light_energy = 1.3 if compat else 1.75
+	sun.shadow_opacity = 1.0
+	sun.light_angular_distance = 1.5 if high else 0.0
+	fill_light.light_color = Color(0.5, 0.62, 1.0)
+	fill_light.light_energy = 0.4 if compat else 0.5
+	sky.sky_top_color = Color(0.35, 0.52, 0.8)
+	sky.sky_horizon_color = Color(0.85, 0.75, 0.6)
+	sky.ground_horizon_color = Color(0.85, 0.75, 0.6).darkened(0.3)
+	env.background_color = Color(0.62, 0.6, 0.55)
+	env.ambient_light_energy = 0.48 if compat else 0.6
+	env.tonemap_exposure = 0.72 if compat else 1.0
+	env.adjustment_saturation = 1.02 if compat else 1.2
+	env.glow_intensity = 0.75 if high else 0.45
+	env.glow_hdr_threshold = 0.85
+	env.fog_light_color = Color(0.75, 0.68, 0.55)
+	env.fog_depth_begin = 30.0 * s
+	env.fog_depth_end = 80.0 * s
+	env.fog_depth_curve = 1.5
+	var warm: Variant = null  # the ground's tints (null: the ground shader's own)
+	var cool: Variant = null
+	var snow := false
+	var rim := Vector4(1, 1, 1, 0)
+	var rough := 1.0
+	var bugs := Color(1.4, 1.25, 0.9, 0.8)  # the pollen's color (alpha 0: none)
+	var bug_size := 1.0
+	match mood:
+		"evening":
+			# Low golden sun from the left: long shadows, warm haze, cool violet fill
+			sun.rotation_degrees = Vector3(-30, -62, 0)
+			sun.light_color = Color(1.0, 0.7, 0.45)
+			sun.light_energy = 1.45 if compat else 2.1
+			fill_light.light_color = Color(0.45, 0.45, 0.95)
+			fill_light.light_energy = 0.5
+			sky.sky_top_color = Color(0.3, 0.35, 0.65)
+			sky.sky_horizon_color = Color(1.0, 0.72, 0.5)
+			env.ambient_light_energy = 0.55 if compat else 0.72
+			env.fog_light_color = Color(0.9, 0.65, 0.45)
+			env.background_color = Color(0.7, 0.5, 0.38)
+			warm = Color(1.2, 1.05, 0.7)
+			cool = Color(0.8, 0.82, 0.95)
+			rim = Vector4(1.0, 0.65, 0.35, 1.3)
+			bugs = Color(1.6, 1.0, 0.45, 0.9)
+			bug_size = 1.3
+		"rain":
+			# Overcast: soft grey-blue light, faint shadows, wet shine
+			sun.rotation_degrees = Vector3(-55, -30, 0)
+			sun.light_color = Color(0.82, 0.88, 1.0)
+			sun.light_energy = 0.7 if compat else 0.95
+			sun.shadow_opacity = 0.55
+			fill_light.light_color = Color(0.6, 0.68, 0.85)
+			fill_light.light_energy = 0.35
+			sky.sky_top_color = Color(0.5, 0.56, 0.64)
+			sky.sky_horizon_color = Color(0.6, 0.63, 0.67)
+			env.ambient_light_energy = 0.8 if compat else 1.05
+			env.adjustment_saturation = 0.95 if compat else 1.05
+			env.fog_light_color = Color(0.5, 0.55, 0.6)
+			env.fog_depth_begin = 22.0 * s
+			env.fog_depth_end = 60.0 * s
+			env.background_color = Color(0.45, 0.48, 0.52)
+			warm = Color(1.05, 1.05, 0.9)
+			cool = Color(0.75, 0.85, 0.95)
+			rim = Vector4(0.75, 0.85, 1.0, 1.15)
+			rough = 0.45
+			bugs.a = 0.0
+		"fog":
+			# Misty morning: pale low sun, thick haze over the land
+			sun.rotation_degrees = Vector3(-28, -20, 0)
+			sun.light_color = Color(1.0, 0.92, 0.82)
+			sun.light_energy = 1.0 if compat else 1.35
+			sun.shadow_opacity = 0.75
+			fill_light.light_color = Color(0.7, 0.78, 0.9)
+			sky.sky_top_color = Color(0.62, 0.68, 0.75)
+			sky.sky_horizon_color = Color(0.85, 0.85, 0.82)
+			env.ambient_light_energy = 0.7 if compat else 0.9
+			env.adjustment_saturation = 0.95 if compat else 1.05
+			env.fog_light_color = Color(0.78, 0.8, 0.8)
+			env.fog_depth_begin = 27.0 * s
+			env.fog_depth_end = 55.0 * s
+			env.fog_depth_curve = 1.0
+			env.background_color = Color(0.75, 0.77, 0.77)
+			warm = Color(1.15, 1.08, 0.8)
+			cool = Color(0.75, 0.85, 0.9)
+			rim = Vector4(0.9, 0.92, 0.95, 1.15)
+			bugs.a = 0.0
+		"night":
+			# Moonlight: cool and dim but still clear, glowing shots, fireflies, and a
+			# cold rim on everything so monsters stand out
+			sun.rotation_degrees = Vector3(-50, 25, 0)
+			sun.light_color = Color(0.55, 0.68, 1.0)
+			sun.light_energy = 0.8 if compat else 1.1
+			fill_light.light_color = Color(0.35, 0.4, 0.7)
+			fill_light.light_energy = 0.25
+			sky.sky_top_color = Color(0.12, 0.18, 0.35)
+			sky.sky_horizon_color = Color(0.22, 0.28, 0.45)
+			sky.ground_horizon_color = Color(0.1, 0.12, 0.18)
+			env.ambient_light_energy = 0.8 if compat else 1.1
+			env.tonemap_exposure = 0.85 if compat else 1.15
+			env.adjustment_saturation = 0.95 if compat else 1.05
+			env.fog_light_color = Color(0.08, 0.1, 0.18)
+			env.background_color = Color(0.06, 0.07, 0.12)
+			env.glow_intensity = 1.0 if high else 0.65
+			env.glow_hdr_threshold = 0.7
+			warm = Color(1.1, 1.15, 1.1)
+			cool = Color(0.9, 1.0, 1.2)
+			rim = Vector4(0.6, 0.75, 1.0, 2.15)
+			bugs = Color(0.9, 1.4, 0.25, 1.0)
+			bug_size = 1.6
+		"snow":
+			# Winter: white ground, cold bright light
+			sun.rotation_degrees = Vector3(-35, -40, 0)
+			sun.light_color = Color(1.0, 0.93, 0.85)
+			sun.light_energy = 1.1 if compat else 1.4
+			fill_light.light_color = Color(0.55, 0.65, 1.0)
+			sky.sky_top_color = Color(0.55, 0.65, 0.8)
+			sky.sky_horizon_color = Color(0.85, 0.87, 0.9)
+			env.ambient_light_energy = 0.5 if compat else 0.65
+			env.adjustment_saturation = 0.95 if compat else 1.05
+			env.fog_light_color = Color(0.8, 0.83, 0.88)
+			env.background_color = Color(0.8, 0.82, 0.86)
+			warm = Color(1.05, 1.03, 1.0)
+			cool = Color(0.88, 0.94, 1.05)
+			snow = true
+			rim = Vector4(0.8, 0.88, 1.0, 1.15)
+			bugs.a = 0.0
+	for gm in ground_mats:
+		gm.set_shader_parameter("warm", warm)
+		gm.set_shader_parameter("cool", cool)
+		gm.set_shader_parameter("grass_color", Color(0.62, 0.66, 0.72) if snow else null)
+		gm.set_shader_parameter("detail", 0.3 if snow else null)
+		gm.set_shader_parameter("dirt_color", Color(0.4, 0.33, 0.28) if snow else null)
+	RenderingServer.global_shader_parameter_set(&"mood_rim", rim)
+	RenderingServer.global_shader_parameter_set(&"mood_rough", rough)
+	if pollen != null:
+		pollen.visible = bugs.a > 0.0
+		(pollen.process_material as ParticleProcessMaterial).color = bugs
+		(pollen.draw_pass_1 as QuadMesh).size = Vector2(0.045, 0.045) * bug_size
+
+
+# The mood's particles (rain, snow, falling leaves, mist) or the night's torches,
+# made again when the map or Graphics Low/High changes. Bigger maps get more, so
+# the weather is as thick everywhere.
+func mood_fx() -> void:
+	if weather_root != null:
+		weather_root.free()
+	torches = []
+	weather_root = Node3D.new()
+	map_root.add_child(weather_root)
+	var high := graphics_high
+	var k := clampf(map_cols * map_rows / (24.0 * 18.0), 1.0, 2.0)
+	match mood:
+		"evening":
+			add_leaves(int((90 if high else 45) * k))
+		"rain":
+			add_rain(int((1600 if high else 700) * k))
+		"fog":
+			add_mist(int((36 if high else 18) * k))
+		"night":
+			add_torches()
+		"snow":
+			add_snow(int((1200 if high else 500) * k))
+	festival_decor()
+
+
+# Weather falling or drifting over the whole board, from a box at height y
+func weather_particles(amount: int, life: float, pm: ParticleProcessMaterial, mesh: Mesh, y: float) -> GPUParticles3D:
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	pm.emission_box_extents = Vector3(map_cols / 2.0 + 3, 0.2, map_rows / 2.0 + 3)
+	var p := GPUParticles3D.new()
+	p.amount = maxi(amount, 1)
+	p.lifetime = life
+	p.process_material = pm
+	p.draw_pass_1 = mesh
+	p.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	p.position = Vector3(map_cols / 2.0, y, map_rows / 2.0)
+	p.visibility_aabb = AABB(Vector3(-map_cols, -y - 2, -map_rows), Vector3(map_cols * 2, y + 8, map_rows * 2))
+	p.preprocess = life
+	weather_root.add_child(p)
+	return p
+
+
+# A soft dot drawn over what's behind it (not added like the glowing dots)
+func weather_dot(size: Vector2) -> QuadMesh:
+	var m: StandardMaterial3D = dot_mat.duplicate()
+	m.blend_mode = BaseMaterial3D.BLEND_MODE_MIX
+	var q := QuadMesh.new()
+	q.size = size
+	q.material = m
+	return q
+
+
+# A thin vertical streak, see-through at both ends
+func streak_tex() -> Texture2D:
+	var g := Gradient.new()
+	g.set_color(0, Color(1, 1, 1, 0))
+	g.set_color(1, Color(1, 1, 1, 0))
+	g.add_point(0.7, Color(1, 1, 1, 1))
+	var tex := GradientTexture2D.new()
+	tex.gradient = g
+	tex.fill_from = Vector2(0.5, 0.0)
+	tex.fill_to = Vector2(0.5, 1.0)
+	tex.width = 4
+	tex.height = 32
+	return tex
+
+
+# Rain streaks, and small rings that grow and fade where drops hit the ground
+func add_rain(amount: int) -> void:
+	if not weather_mats.has("rain"):
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		m.billboard_mode = BaseMaterial3D.BILLBOARD_FIXED_Y
+		m.billboard_keep_scale = true
+		m.albedo_texture = streak_tex()
+		m.albedo_color = Color(0.8, 0.88, 1.0, 0.32)
+		var q := QuadMesh.new()
+		q.size = Vector2(0.018, 0.5)
+		q.material = m
+		weather_mats["rain"] = q
+		var sq := QuadMesh.new()
+		sq.size = Vector2(0.09, 0.09)
+		sq.orientation = PlaneMesh.FACE_Y
+		var sm: StandardMaterial3D = dot_mat.duplicate()
+		sm.billboard_mode = BaseMaterial3D.BILLBOARD_DISABLED
+		sm.blend_mode = BaseMaterial3D.BLEND_MODE_MIX
+		sq.material = sm
+		weather_mats["splash"] = sq
+	var pm := ParticleProcessMaterial.new()
+	pm.direction = Vector3(0.08, -1, 0.03)
+	pm.spread = 2.0
+	pm.initial_velocity_min = 11.0
+	pm.initial_velocity_max = 13.0
+	pm.gravity = Vector3.ZERO
+	# Falls 9 units in 0.75 s: from y 9 to the ground
+	weather_particles(amount, 0.75, pm, weather_mats["rain"], 9.0)
+	var sp := ParticleProcessMaterial.new()
+	sp.gravity = Vector3.ZERO
+	sp.color = Color(0.75, 0.85, 1.0, 0.5)
+	sp.color_ramp = fade_ramp()
+	var curve := Curve.new()
+	curve.add_point(Vector2(0, 0.3))
+	curve.add_point(Vector2(1, 1))
+	var ct := CurveTexture.new()
+	ct.curve = curve
+	sp.scale_curve = ct
+	weather_particles(int(amount / 4.0), 0.3, sp, weather_mats["splash"], 0.03)
+
+
+# Slow snowflakes drifting down
+func add_snow(amount: int) -> void:
+	if not weather_mats.has("snow"):
+		weather_mats["snow"] = weather_dot(Vector2(0.06, 0.06))
+	var pm := ParticleProcessMaterial.new()
+	pm.direction = Vector3(0.2, -1, 0.1)
+	pm.spread = 10.0
+	pm.initial_velocity_min = 0.8
+	pm.initial_velocity_max = 1.2
+	pm.gravity = Vector3.ZERO
+	pm.turbulence_enabled = true
+	pm.turbulence_noise_scale = 3.0
+	pm.turbulence_influence_min = 0.05
+	pm.turbulence_influence_max = 0.12
+	pm.color = Color(1.0, 1.0, 1.0, 0.9)
+	pm.color_ramp = fade_ramp()
+	pm.scale_min = 0.6
+	pm.scale_max = 1.3
+	weather_particles(amount, 8.0, pm, weather_mats["snow"], 8.0)
+
+
+# Orange and red leaves tumbling down in the evening
+func add_leaves(amount: int) -> void:
+	if not weather_mats.has("leaf"):
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA_SCISSOR
+		m.billboard_mode = BaseMaterial3D.BILLBOARD_PARTICLES
+		m.vertex_color_use_as_albedo = true
+		m.albedo_texture = soft_dot()
+		var q := QuadMesh.new()
+		q.size = Vector2(0.11, 0.06)
+		q.material = m
+		weather_mats["leaf"] = q
+	var pm := ParticleProcessMaterial.new()
+	pm.direction = Vector3(0.6, -1, 0.2)
+	pm.spread = 20.0
+	pm.initial_velocity_min = 0.6
+	pm.initial_velocity_max = 1.0
+	pm.gravity = Vector3(0.1, -0.2, 0)
+	pm.turbulence_enabled = true
+	pm.turbulence_noise_scale = 2.0
+	pm.turbulence_influence_min = 0.1
+	pm.turbulence_influence_max = 0.2
+	pm.angle_min = 0.0
+	pm.angle_max = 360.0
+	pm.angular_velocity_min = -180.0
+	pm.angular_velocity_max = 180.0
+	var g := Gradient.new()
+	g.set_color(0, Color(0.95, 0.45, 0.12))
+	g.set_color(1, Color(0.95, 0.8, 0.25))
+	g.add_point(0.5, Color(0.8, 0.25, 0.1))
+	var gt := GradientTexture1D.new()
+	gt.gradient = g
+	pm.color_initial_ramp = gt
+	weather_particles(amount, 9.0, pm, weather_mats["leaf"], 6.0)
+
+
+# Big soft patches of mist drifting low over the board
+func add_mist(amount: int) -> void:
+	if not weather_mats.has("mist"):
+		weather_mats["mist"] = weather_dot(Vector2(3.0, 3.0))
+	var pm := ParticleProcessMaterial.new()
+	pm.direction = Vector3(1, 0, 0.2)
+	pm.spread = 20.0
+	pm.initial_velocity_min = 0.15
+	pm.initial_velocity_max = 0.3
+	pm.gravity = Vector3.ZERO
+	pm.color = Color(0.92, 0.94, 0.95, 0.07)
+	pm.color_ramp = fade_ramp()
+	pm.scale_min = 0.7
+	pm.scale_max = 1.4
+	weather_particles(amount, 14.0, pm, weather_mats["mist"], 0.5)
+	pm.emission_box_extents.y = 0.3
+
+
+# A torch on each side of every gate: a post, a flame and a warm light (no shadows)
+func add_torches() -> void:
+	if not weather_mats.has("post"):
+		weather_mats["post"] = box(0.08, 0.7, 0.08)
+		weather_mats["wood"] = painted(mat(Color(0.3, 0.2, 0.12)))
+	for g in gate_cells.size():
+		if gate_cells[g] == null:
+			continue
+		var at := to3d(routes[g][0])
+		var out_dir: Vector2 = (routes[g][1] - routes[g][0]).normalized()
+		var side := Vector3(out_dir.y, 0, -out_dir.x)
+		for k in [-1.0, 1.0]:
+			# In front of the gate's pillars, inside its own tile
+			var p: Vector3 = at + side * (0.5 * GATE_W + 0.05) * k + Vector3(out_dir.x, 0, out_dir.y) * 0.3
+			add_mesh(weather_root, weather_mats["post"], weather_mats["wood"], p + Vector3(0, 0.35, 0))
+			var pm := ParticleProcessMaterial.new()
+			pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_SPHERE
+			pm.emission_sphere_radius = 0.04
+			pm.direction = Vector3(0, 1, 0)
+			pm.spread = 10.0
+			pm.initial_velocity_min = 0.3
+			pm.initial_velocity_max = 0.6
+			pm.gravity = Vector3.ZERO
+			pm.color = Color(2.4, 1.2, 0.4)
+			pm.color_ramp = fade_ramp()
+			var fl := particles(weather_root, 16, 0.5, 0.14, pm)
+			fl.position = p + Vector3(0, 0.75, 0)
+		var l := OmniLight3D.new()
+		l.light_color = Color(1.0, 0.6, 0.3)
+		l.omni_range = 3.5
+		l.light_energy = 2.2
+		l.position = at + Vector3(out_dir.x, 0, out_dir.y) * 0.6 + Vector3(0, 0.9, 0)
+		weather_root.add_child(l)
+		torches.append(l)
+
+
 # The shared effects, made once: the glowing arrow and pools of spark and fire
 # bursts that are reused round-robin (no new nodes while playing)
 func make_effects() -> void:
@@ -1253,6 +1794,12 @@ func make_effects() -> void:
 	make_ability_fx()
 	make_cloud_fx()
 	make_special_fx()
+	# Grimwhistle's death: a purple blast as he falls, bone shards when he lands
+	var blast := burst(60, 0.9, 0.09, 4.0)
+	(blast.process_material as ParticleProcessMaterial).gravity = Vector3(0, 0.5, 0)
+	var shards := burst(70, 1.2, 0.06, 2.4)
+	(shards.process_material as ParticleProcessMaterial).spread = 70.0
+	grim_bursts = [blast, shards]
 
 
 func burst(amount: int, life: float, size: float, speed: float) -> GPUParticles3D:
@@ -1837,7 +2384,9 @@ func merge_parts(parts: Node3D) -> ArrayMesh:
 # whole model faces its rally point, where a small flag stands.
 const BARRACKS_FILE := "res://assets/towers/barracks/barracks_%d_%d.glb"
 const BARRACKS_WIDTH := 0.9  # L1's width on a 1-unit tile
+const BARRACKS_REACH := 0.48  # how far from its tile's middle the hall may reach
 var barracks_parts := {}  # Vector2i(path, look) -> [[mesh, transform], ...]
+var barracks_box := {}  # Vector2i(path, look) -> the model's box before scaling
 var barracks_scale := 0.0
 var barracks_mats := {}
 
@@ -1864,6 +2413,16 @@ func build_barracks_tower(root: Node3D, t: Tower) -> Node3D:
 		root.rotation.y = atan2(d.x, d.y)
 		var flag := add_mesh(root, rally_flag(t.owner), null)
 		flag.position = root.basis.inverse() * (to3d(r - d.normalized() * CELL * 0.4) - root.position)
+	# Turned towards its rally point, the hall stays inside its own tile, so it
+	# never cuts into a gate, the board's edge or the next tower
+	var box: AABB = barracks_box[kit_look(t.level, t.path)]
+	var turn := Basis(Vector3.UP, root.rotation.y)
+	var reach := 0.0
+	for i in 4:
+		var corner := turn * Vector3(box.position.x if i % 2 == 0 else box.end.x, 0, box.position.z if i < 2 else box.end.z) * barracks_scale
+		reach = maxf(reach, maxf(absf(corner.x), absf(corner.z)))
+	if reach > BARRACKS_REACH:
+		model.scale *= BARRACKS_REACH / reach
 	return model
 
 
@@ -1884,6 +2443,10 @@ func barracks_model(k: Vector2i) -> Array:
 		collect_meshes(scene, Transform3D.IDENTITY, parts)
 		scene.free()
 		barracks_parts[k] = parts
+		var b := AABB()
+		for p: Array in parts:
+			b = b.merge(p[1] * (p[0] as Mesh).get_aabb())
+		barracks_box[k] = b
 		# All looks use L1's size, so higher levels can grow
 		if barracks_scale == 0.0:
 			var box := AABB()
@@ -1999,6 +2562,8 @@ func soldier_pose(root: Node3D, player: AnimationPlayer, t: float, top: Transfor
 				parts.c.append(cs[k] if cs != null else Color(1, 1, 1, 0))
 			for k: int in a[Mesh.ARRAY_INDEX]:
 				parts.i.append(base + k)
+		if festival == "frostfall" and mi.name == "Head":
+			soldier_scarf(parts, xf)
 	return parts
 
 
@@ -2125,13 +2690,33 @@ func update_visuals(delta: float) -> void:
 	# the shift grows with the camera's distance
 	camera.v_offset = CAMERA_V_OFFSET * zoom * view_scale
 	update_ability_fx(delta)
+	# The night's torches flicker
+	for i in torches.size():
+		torches[i].light_energy = 2.2 + sin(time * 13.0 + i) * 0.15 + sin(time * 7.3 + i * 2.0) * 0.15
 	for g in gate_parts.size():
 		if gate_parts[g] == null:
 			continue
-		var in_use: bool = players[g] != null
-		for part in gate_parts[g].values():
-			part.visible = in_use
-		gate_parts[g]["sparks"].rotation.z += delta * 2.0
+		# The doors swing open and the portal fades in while a player uses the gate
+		var gp: Dictionary = gate_parts[g]
+		var want := 1.0 if players[g] != null else 0.0
+		if gp["open"] == want:
+			continue
+		gp["open"] = move_toward(gp["open"], want, delta * 0.6)
+		var o: float = gp["open"]
+		var ease_o := o * o * (3.0 - 2.0 * o)
+		gp["surface"].visible = o > 0.01
+		gp["light"].visible = o > 0.01
+		gp["light"].light_energy = 2.0 * ease_o
+		var on := o > 0.5
+		gp["motes"].visible = on
+		gp["mist"].visible = on and graphics_high
+		for i in gp["doors"].size():
+			gp["doors"][i].rotation.y = (1.0 if i == 0 else -1.0) * deg_to_rad(95.0) * ease_o
+		# The cracks, eyes and runes glow bright while it's open
+		if gp["lit"] != on:
+			gp["lit"] = on
+			for gl: Array in gp["glows"]:
+				(gl[0] as MeshInstance3D).set_surface_override_material(gl[1], gate_mat(gl[2] if on else gl[2] + "Off", g))
 	var turn := minf(1.0, delta * 12.0)
 	# Room in the ice MultiMesh for every monster (grows only, so rarely)
 	var ice := ice_shards.multimesh
@@ -2192,6 +2777,8 @@ func update_visuals(delta: float) -> void:
 	ice.visible_instance_count = frozen
 	end_specials(delta)
 	update_corpses(delta)
+	update_crescendo(delta)
+	update_festival_looks()
 	start_soldiers()
 	for t: Tower in towers.values():
 		if t.type == "barracks":
@@ -2348,6 +2935,18 @@ func build_monsters() -> void:
 		add_mob_variant(look, "heal", Color(1.0, 0.9, 0.6), Color(1.0, 0.72, 0.25))
 	add_skeleton("mage", "Skeleton_Mage", "Walking_C", SKELETON_SIZE * 1.8,
 			[["Skeleton_Staff", "handslot.r"]], Color(1.0, 0.75, 0.75))
+	mob_shapes()
+	add_creature("unicorn", unicorn_pose, 0.7)
+	add_creature("spider", spider_pose, 0.35)
+	# Grimwhistle (the boss with special "conductor", see special_look()) and his Crescendo pose
+	add_grim("mage conductor", false)
+	add_grim("mage conductor cast", true)
+
+
+# The shapes the code-built monsters and decorations are made of, made once
+func mob_shapes() -> void:
+	if mob_ball != null:
+		return
 	mob_ball = SphereMesh.new()
 	mob_ball.radius = 0.5
 	mob_ball.height = 1.0
@@ -2361,8 +2960,6 @@ func build_monsters() -> void:
 	mob_rod.rings = 1
 	mob_cone = mob_rod.duplicate()
 	mob_cone.top_radius = 0.0
-	add_creature("unicorn", unicorn_pose, 0.7)
-	add_creature("spider", spider_pose, 0.35)
 
 
 # The painted materials of a look: normal, icy for slowed monsters, frozen solid
@@ -2484,7 +3081,7 @@ func add_glb_monster(look: String, file: String, height: float, tint: Color, glo
 	var death := player.get_animation("Death")
 	player.play("Walk")
 	# Pose 0 unscaled first, to fit the height and put the feet on the ground
-	var probe := glb_pose(root, player, 0.0, Transform3D.IDENTITY)
+	var probe := glb_pose(root, player, 0.0, Transform3D.IDENTITY, false, false)
 	var box := AABB(probe.v[0], Vector3.ZERO)
 	for v: Vector3 in probe.v:
 		box = box.expand(v)
@@ -2505,6 +3102,7 @@ func add_glb_monster(look: String, file: String, height: float, tint: Color, glo
 	root.free()
 	var m := base.duplicate() as StandardMaterial3D
 	m.albedo_color = tint
+	m.vertex_color_use_as_albedo = festival == "lantern"  # the pumpkin hats' colors
 	glow_mat(m, glow)
 	mob_base[look] = m
 	mobs[look] = [poses, mob_mats(m), walk.length, poses[0].get_aabb().end.y, falls]
@@ -2529,7 +3127,8 @@ func add_mob_variant(look: String, special: String, tint: Color, glow: Color) ->
 
 # Every mesh of the model at time t of the playing animation, in one set of parts.
 # two_heads: a second, smaller skull grows out of the left shoulder (splitters).
-func glb_pose(root: Node3D, player: AnimationPlayer, t: float, top: Transform3D, two_heads := false) -> Dictionary:
+# hat: in Lantern Night, a pumpkin on the skull (not while measuring the height).
+func glb_pose(root: Node3D, player: AnimationPlayer, t: float, top: Transform3D, two_heads := false, hat := true) -> Dictionary:
 	player.seek(t, true)
 	var parts := new_parts()
 	var back := root.global_transform.affine_inverse()
@@ -2539,6 +3138,8 @@ func glb_pose(root: Node3D, player: AnimationPlayer, t: float, top: Transform3D,
 			if two_heads and mi.name == "Skull":
 				var lean := Transform3D(Basis(Vector3.UP, 0.6) * Basis(Vector3.BACK, -0.35) * Basis.from_scale(Vector3.ONE * 0.78), Vector3.ZERO)
 				add_part(parts, mi.mesh, top * Transform3D(Basis(), SPLIT_HEAD) * back * mi.global_transform * lean)
+			if hat and festival == "lantern" and mi.name == "Skull":
+				pumpkin_hat(parts, top * back * mi.global_transform)
 	return parts
 
 
@@ -2552,6 +3153,7 @@ var corpses: Array[MeshInstance3D] = []
 
 func drop_corpse(e: Enemy) -> void:
 	sound_death(e)
+	paint_splash(e)
 	var falls: Array = e.node.get_meta("mob")[4]
 	if falls.is_empty():
 		e.node.queue_free()
@@ -2559,6 +3161,10 @@ func drop_corpse(e: Enemy) -> void:
 	e.node.set_meta("dead_time", 0.0)
 	e.node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	corpses.append(e.node)
+	if e.special == "conductor":
+		# Grimwhistle: a purple blast as he falls, his bones crumble when he lands
+		grim_burst(0, e.node.position + Vector3(0, 0.9, 0))
+		e.node.set_meta("crumble", true)
 
 
 func update_corpses(delta: float) -> void:
@@ -2568,6 +3174,9 @@ func update_corpses(delta: float) -> void:
 		node.set_meta("dead_time", t)
 		var falls: Array = node.get_meta("mob")[4]
 		node.mesh = falls[mini(int(t / CORPSE_FALL * falls.size()), falls.size() - 1)]
+		if t > CORPSE_FALL * 0.7 and node.has_meta("crumble"):
+			node.remove_meta("crumble")
+			grim_burst(1, node.position + Vector3(0, 0.25, 0))
 		if t > CORPSE_FALL:
 			node.position.y = -0.3 * (t - CORPSE_FALL) / CORPSE_SINK
 		if t > CORPSE_FALL + CORPSE_SINK:
@@ -2600,18 +3209,25 @@ func clear_world() -> void:
 	for list: Array in soldier_poses.values():
 		for node: MultiMeshInstance3D in list:
 			node.multimesh.visible_instance_count = 0
+	# Grimwhistle's Crescendos and the paint splats go too
+	cresc.clear()
+	hasted.clear()
+	splat_next = 0
+	if splat_mm != null:
+		splat_mm.multimesh.visible_instance_count = 0
 	super()
 
 
 # Adds a skinned mesh in the skeleton's current pose (the skinning is done here, once)
-func add_skinned(parts: Dictionary, mi: MeshInstance3D, skel: Skeleton3D, top: Transform3D) -> void:
+# gp: the bones' poses from bone_globals() (empty: the skeleton's own).
+func add_skinned(parts: Dictionary, mi: MeshInstance3D, skel: Skeleton3D, top: Transform3D, gp: Array[Transform3D] = []) -> void:
 	var skin := mi.skin
 	var bind := []
 	for b in skin.get_bind_count():
 		var bone := skin.get_bind_bone(b)
 		if bone < 0:
 			bone = skel.find_bone(skin.get_bind_name(b))
-		bind.append(skel.get_bone_global_pose(bone) * skin.get_bind_pose(b))
+		bind.append((skel.get_bone_global_pose(bone) if gp.is_empty() else gp[bone]) * skin.get_bind_pose(b))
 	for s in mi.mesh.get_surface_count():
 		var a := mi.mesh.surface_get_arrays(s)
 		var vs: PackedVector3Array = a[Mesh.ARRAY_VERTEX]
@@ -3409,6 +4025,8 @@ func start_specials() -> void:
 func special_look(e: Enemy) -> void:
 	e.node.set_meta("sp", e.special)
 	var key := "%s %s" % [e.node.get_meta("look", ""), e.special]
+	if e.special == "conductor":
+		key = "mage conductor"  # Grimwhistle, whatever boss he was
 	if mobs.has(key):
 		e.node.set_meta("mob", mobs[key])
 	e.node.scale = Vector3.ONE * (0.75 if e.special == "splitling" else 1.0)
@@ -3458,3 +4076,943 @@ func end_specials(delta: float) -> void:
 	halo_mm.multimesh.visible_instance_count = halos
 	ring_mm.multimesh.visible_instance_count = rings
 	mm.visible_instance_count = bubbles
+
+
+# ================================================================ holiday festivals
+# Looks only: on top of the weather (see apply_mood()), each computer dresses the
+# valley for today's festival (festival_today() in game_base.gd, picked when a
+# game starts). Frostfall Fair: snow on the trees and rocks, garlands on the
+# gates, string lights round the towers, scarves on the soldiers. Lantern Night:
+# glowing pumpkins on towers, gates and the board's edge, fireflies, pumpkin hats
+# on the bone warriors. Spring Paint Day: bunting, eggs under the trees, painted
+# gates, and monsters burst into paint where they fall.
+var festival := ""  # "", "frostfall", "lantern" or "paint"
+var festival_picked := false
+var baked_fest := ""  # the festival the monsters' and soldiers' poses were made with
+var fest_root: Node3D  # the festival's decorations (under weather_root, see festival_decor())
+var fest_mesh := {}  # shared meshes and materials, made once
+var lantern_mm: MultiMeshInstance3D  # Lantern Night: a pumpkin on every tower, gate and the edge
+var lights_mm: MultiMeshInstance3D  # Frostfall: string lights round the tower bases
+var fest_towers := -1  # tower count the MultiMeshes were filled for
+var splat_mm: MultiMeshInstance3D  # Paint Day: paint splats where monsters fell
+var splat_next := 0
+var paint_pool: Array[GPUParticles3D] = []
+var paint_next := 0
+
+
+# Picks festival f (one of FESTIVALS, or "" for none). Hats and scarves are baked
+# into the poses, so those are made again when the festival changes.
+func apply_festival(f: String) -> void:
+	festival = f if f in FESTIVALS else ""
+	RenderingServer.global_shader_parameter_set(&"fest_snow", 1.0 if festival == "frostfall" else 0.0)
+	if festival == baked_fest:
+		return
+	baked_fest = festival
+	if not mobs.is_empty():
+		mobs.clear()
+		mob_base.clear()
+		build_monsters()
+	if not soldier_poses.is_empty():
+		for list: Array in soldier_poses.values():
+			for node: MultiMeshInstance3D in list:
+				node.free()
+		soldier_poses.clear()
+		soldier_vis.clear()
+		soldier_need.clear()
+		load_soldiers()
+
+
+# The festival's decorations, made again with the weather (see mood_fx())
+func festival_decor() -> void:
+	fest_root = null
+	lantern_mm = null
+	lights_mm = null
+	splat_mm = null
+	fest_towers = -1
+	if festival == "" or weather_root == null:
+		return
+	fest_root = Node3D.new()
+	weather_root.add_child(fest_root)
+	for g in gate_cells.size():
+		if gate_cells[g] != null:
+			fest_gate(g)
+	match festival:
+		"frostfall":
+			lights_mm = color_mm(fest_ball(), fest_glow_mat())
+		"lantern":
+			var lm := lantern_mat()
+			lm.set_shader_parameter("glow", 6.0 if mood in ["night", "evening"] else 3.5)
+			lantern_mm = color_mm(lantern_mesh(), lm)
+			lantern_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+			add_fireflies()
+		"paint":
+			add_eggs()
+			add_border_bunting()
+			var q := QuadMesh.new()
+			q.size = Vector2(1, 1)
+			q.orientation = PlaneMesh.FACE_Y
+			splat_mm = color_mm(q, splat_mat())
+			splat_mm.multimesh.instance_count = 96
+			splat_mm.multimesh.visible_instance_count = 0
+			splat_next = 0
+			if paint_pool.is_empty():
+				for i in 12:
+					var p := burst(18, 0.6, 0.06, 2.6)
+					var pm := p.process_material as ParticleProcessMaterial
+					pm.color_initial_ramp = pastel_ramp()
+					paint_pool.append(p)
+
+
+# Each frame: the tower decorations follow the towers, the splats fade
+func update_festival_looks() -> void:
+	if fest_root == null:
+		return
+	if fest_towers != towers.size():
+		fest_towers = towers.size()
+		fill_fest_towers()
+	if splat_mm != null:
+		(splat_mm.material_override as ShaderMaterial).set_shader_parameter("now", time)
+
+
+# Whether p is within r of a gate (on the ground, any height)
+func near_gate(p: Vector3, r: float) -> bool:
+	for g in gate_cells.size():
+		if gate_cells[g] != null:
+			var c := to3d(routes[g][0])
+			if Vector2(p.x - c.x, p.z - c.z).length() < r:
+				return true
+	return false
+
+
+# A MultiMesh with a color (and custom data) per instance, under fest_root
+func color_mm(mesh: Mesh, material: Material) -> MultiMeshInstance3D:
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.use_custom_data = true
+	mm.mesh = mesh
+	var node := MultiMeshInstance3D.new()
+	node.multimesh = mm
+	node.material_override = material
+	node.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	fest_root.add_child(node)
+	fx_box(mm)
+	return node
+
+
+func pastel(i: int) -> Color:
+	return [Color(1.0, 0.6, 0.75), Color(0.6, 0.85, 1.0), Color(0.7, 0.95, 0.6), Color(1.0, 0.9, 0.5), Color(0.8, 0.65, 1.0), Color(1.0, 0.72, 0.5)][posmod(i, 6)]
+
+
+func pastel_ramp() -> GradientTexture1D:
+	var g := Gradient.new()
+	g.interpolation_mode = Gradient.GRADIENT_INTERPOLATE_CONSTANT
+	g.offsets = PackedFloat32Array([0.0, 0.17, 0.33, 0.5, 0.67, 0.83])
+	var cols := PackedColorArray()
+	for i in 6:
+		cols.append(pastel(i) * 1.6)
+	g.colors = cols
+	var tex := GradientTexture1D.new()
+	tex.gradient = g
+	return tex
+
+
+# A vertex-colored painted material, shared by the decorations
+func fest_vcol() -> Material:
+	if not fest_mesh.has("vcol"):
+		var m := StandardMaterial3D.new()
+		m.vertex_color_use_as_albedo = true
+		m.roughness = 0.7
+		fest_mesh["vcol"] = painted(m)
+	return fest_mesh["vcol"]
+
+
+func fest_ball() -> SphereMesh:
+	if not fest_mesh.has("ball"):
+		var b := SphereMesh.new()
+		b.radius = 0.5
+		b.height = 1.0
+		b.radial_segments = 8
+		b.rings = 4
+		fest_mesh["ball"] = b
+	return fest_mesh["ball"]
+
+
+func fest_glow_mat() -> StandardMaterial3D:
+	if not fest_mesh.has("glow"):
+		var m := StandardMaterial3D.new()
+		m.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		m.vertex_color_use_as_albedo = true
+		fest_mesh["glow"] = m
+	return fest_mesh["glow"]
+
+
+# ---------------------------------------------------------------- gates
+
+# Gate g's decorations, one mesh
+func fest_gate(g: int) -> void:
+	var parts := new_parts()
+	mob_shapes()
+	match festival:
+		"frostfall":
+			# Snow on the lintel and the gem's seat
+			for p: Array in [[Vector3(0, 1.43, 0), Vector3(1.4, 0.07, 0.4)], [Vector3(-0.4, 1.45, 0.04), Vector3(0.45, 0.08, 0.32)], [Vector3(0.36, 1.45, -0.03), Vector3(0.5, 0.075, 0.34)]]:
+				shape(parts, mob_ball, p[0], p[1], Color(0.95, 0.97, 1.0))
+			for side: float in [-1.0, 1.0]:
+				# A pine garland sagging over each face, with red and gold baubles
+				var z := 0.21 * side
+				for i in 25:
+					var k := i / 24.0
+					var x := lerpf(-0.62, 0.62, k)
+					var y := 1.27 - sin(k * PI) * 0.13
+					shape(parts, mob_ball, Vector3(x, y, z), Vector3(0.09, 0.08, 0.08), Color(0.12, 0.32, 0.14) if i % 2 == 0 else Color(0.18, 0.42, 0.18))
+					if i % 4 == 2:
+						shape(parts, mob_ball, Vector3(x, y - 0.065, z + 0.02 * side), Vector3.ONE * 0.055, Color(0.85, 0.1, 0.1) if i % 8 == 2 else Color(1.0, 0.78, 0.2))
+				# A red bow in the middle
+				for s: float in [-1.0, 1.0]:
+					shape(parts, mob_ball, Vector3(0.08 * s, 1.31, z + 0.03 * side), Vector3(0.12, 0.08, 0.04), Color(0.8, 0.08, 0.1), Vector3(0, 0, 0.5 * s))
+					rod(parts, Vector3(0.02 * s, 1.27, z + 0.03 * side), Vector3(0.06 * s, 1.12, z + 0.03 * side), 0.015, Color(0.8, 0.08, 0.1))
+				shape(parts, mob_ball, Vector3(0, 1.3, z + 0.04 * side), Vector3.ONE * 0.05, Color(1.0, 0.8, 0.25))
+			# Red and gold ribbon wound round both pillars
+			for px: float in [-0.5, 0.5]:
+				for i in 7:
+					var y := 0.12 + i * 0.16
+					for side: float in [-1.0, 1.0]:
+						shape(parts, mob_rod, Vector3(px, y, 0.155 * side), Vector3(0.05, 0.25, 0.012), Color(0.82, 0.1, 0.12) if i % 2 == 0 else Color(1.0, 0.8, 0.25), Vector3(PI / 2, 0, 0.9 * side))
+		"paint":
+			# Pastel bunting over both faces of the lintel
+			for side: float in [-1.0, 1.0]:
+				var z := 0.215 * side
+				var pts := []
+				for i in 6:
+					var k := i / 5.0
+					pts.append(Vector3(lerpf(-0.66, 0.66, k), 1.41 - sin(k * PI) * 0.08, z))
+				for i in 5:
+					rod(parts, pts[i], pts[i + 1], 0.008, Color(0.95, 0.95, 0.9))
+					fest_flag(parts, pts[i].lerp(pts[i + 1], 0.1), pts[i].lerp(pts[i + 1], 0.9), 0.25, pastel(i + g), side)
+			# Painted dots climbing the pillars
+			for px: float in [-0.5, 0.5]:
+				for i in 6:
+					var y := 0.15 + i * 0.19
+					for side: float in [-1.0, 1.0]:
+						shape(parts, mob_ball, Vector3(px + (0.05 if i % 2 else -0.05), y, 0.15 * side), Vector3(0.07, 0.07, 0.02), pastel(i + int(px * 4) + 3))
+			# A nest of eggs in front of each pillar's foot
+			for px: float in [-0.5, 0.5]:
+				for i in 3:
+					shape(parts, mob_ball, Vector3(px + (i - 1) * 0.07, 0.05, 0.24 + (i % 2) * 0.06), Vector3(0.07, 0.095, 0.07), pastel(i * 2 + g), Vector3(0.3 * (i - 1), 0, 0.2))
+	if parts.v.is_empty():
+		return
+	var gate := Node3D.new()
+	gate.position = to3d(routes[g][0])
+	var out_dir: Vector2 = routes[g][1] - routes[g][0]
+	gate.rotation.y = atan2(out_dir.x, out_dir.y)
+	# Made for the first gate: moved back and sized onto the crypt gate's pillars and lintel
+	gate.position -= Vector3(out_dir.x, 0, out_dir.y).normalized() * 0.235
+	gate.scale = Vector3(0.95 * GATE_W, 0.78, 1.45)
+	fest_root.add_child(gate)
+	add_mesh(gate, pose_mesh(parts), fest_vcol())
+
+
+# A triangle flag hanging from a to b, its tip depth below, facing side
+func fest_flag(parts: Dictionary, a: Vector3, b: Vector3, depth: float, col: Color, side: float) -> void:
+	var base: int = parts.v.size()
+	var tip := (a + b) * 0.5 + Vector3(0, -depth, 0.01 * side)
+	for p in [a, b, tip]:
+		parts.v.append(p)
+		parts.n.append(Vector3(0, 0, side))
+		parts.uv.append(Vector2.ZERO)
+		parts.c.append(col)
+	parts.i.append_array([base, base + 1, base + 2, base, base + 2, base + 1])
+
+
+# ---------------------------------------------------------------- pumpkins
+
+# A ribbed pumpkin, radius 1, its UVs all on uv (a plain spot of a texture)
+func pumpkin_body(uv := Vector2.ZERO) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	var rings := 10
+	var segs := 24
+	var pts := []
+	for i in rings + 1:
+		var th := PI * i / rings
+		var row := []
+		for j in segs + 1:
+			var ph := TAU * j / segs
+			var r := 1.0 - 0.13 * pow(absf(cos(ph * 4.0)), 6.0)
+			# A dimple at the top and bottom
+			var y := cos(th) * 0.72 - signf(cos(th)) * 0.12 * (1.0 - smoothstep(0.0, 0.5, sin(th)))
+			row.append(Vector3(sin(th) * cos(ph) * r, y, sin(th) * sin(ph) * r))
+		pts.append(row)
+	st.set_smooth_group(0)
+	for i in rings:
+		for j in segs:
+			var q: Array = [pts[i][j], pts[i + 1][j], pts[i + 1][j + 1], pts[i][j + 1]]
+			for k: int in [0, 1, 2, 0, 2, 3]:
+				st.set_uv(uv)
+				st.set_color(Color.WHITE)
+				st.add_vertex(q[k])
+	st.index()
+	st.generate_normals()
+	return st.commit()
+
+
+func pumpkin_stem(uv := Vector2.ZERO) -> Mesh:
+	var c := CylinderMesh.new()
+	c.top_radius = 0.09
+	c.bottom_radius = 0.16
+	c.height = 0.4
+	c.radial_segments = 6
+	c.rings = 1
+	var st := SurfaceTool.new()
+	st.create_from(c, 0)
+	var arr := st.commit_to_arrays()
+	var uvs := PackedVector2Array()
+	uvs.resize((arr[Mesh.ARRAY_VERTEX] as PackedVector3Array).size())
+	uvs.fill(uv)
+	arr[Mesh.ARRAY_TEX_UV] = uvs
+	var m := ArrayMesh.new()
+	m.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
+	return m
+
+
+# The lantern: body (color alpha 1: the carved face glows) and stem
+func lantern_mesh() -> ArrayMesh:
+	if not fest_mesh.has("lantern"):
+		var parts := new_parts()
+		add_part(parts, pumpkin_body(), Transform3D.IDENTITY, Color(0.95, 0.45, 0.08, 1.0))
+		add_part(parts, pumpkin_stem(), Transform3D(Basis(Vector3.BACK, 0.25), Vector3(0.03, 0.72, 0)), Color(0.3, 0.38, 0.12, 0.0))
+		fest_mesh["lantern"] = pose_mesh(parts)
+	return fest_mesh["lantern"]
+
+
+# The carved face is worked out from the position, so the mesh needs no UVs
+const LANTERN_SHADER := """
+shader_type spatial;
+render_mode diffuse_lambert_wrap;
+uniform float glow = 3.0;
+global uniform vec4 mood_rim;
+varying vec3 lp;
+varying vec4 vc;
+void vertex() { lp = VERTEX; vc = COLOR; }
+float tri(vec2 p, vec2 c, float s) {
+	vec2 d = p - c;
+	return step(-0.45 * s, d.y) * step(d.y, 0.55 * s - 1.6 * abs(d.x));
+}
+void fragment() {
+	vec3 col = pow(vc.rgb, vec3(2.2));
+	float m = 0.0;
+	if (vc.a > 0.5 && lp.z > 0.25) {
+		vec2 p = lp.xy;
+		m = max(tri(p, vec2(-0.36, 0.16), 0.32), tri(p, vec2(0.36, 0.16), 0.32));
+		m = max(m, tri(p, vec2(0.0, -0.02), 0.14));
+		float yc = -0.3 + 0.35 * p.x * p.x;
+		float teeth = step(0.5, fract(p.x * 3.0 + 0.25)) * step(abs(p.x), 0.3);
+		float mouth = step(abs(p.x), 0.6) * step(abs(lp.y - yc - 0.02), 0.11 - 0.12 * p.x * p.x) * (1.0 - teeth * step(lp.y, yc - 0.02));
+		m = max(m, mouth);
+	}
+	ALBEDO = mix(col, vec3(0.03, 0.01, 0.0), m);
+	ROUGHNESS = 0.7;
+	float rim = pow(clamp(1.0 - dot(NORMAL, VIEW), 0.0, 1.0), 3.0);
+	vec3 rc = mood_rim.a > 0.0 ? mood_rim.rgb : vec3(1.0, 0.85, 0.6);
+	EMISSION = vec3(1.0, 0.5, 0.1) * glow * m + col * vc.a * 0.12 * glow + rc * col * rim * 0.4;
+}
+"""
+
+
+func lantern_mat() -> ShaderMaterial:
+	if not fest_mesh.has("lantern mat"):
+		var sh := Shader.new()
+		sh.code = LANTERN_SHADER
+		var m := ShaderMaterial.new()
+		m.shader = sh
+		fest_mesh["lantern mat"] = m
+	return fest_mesh["lantern mat"]
+
+
+# Orange and purple fireflies over the board
+func add_fireflies() -> void:
+	var pm := ParticleProcessMaterial.new()
+	pm.emission_shape = ParticleProcessMaterial.EMISSION_SHAPE_BOX
+	pm.emission_box_extents = Vector3(map_cols / 2.0 + 2, 0.5, map_rows / 2.0 + 2)
+	pm.color_ramp = fade_ramp()
+	var g := Gradient.new()
+	g.interpolation_mode = Gradient.GRADIENT_INTERPOLATE_CONSTANT
+	g.set_color(0, Color(2.2, 0.9, 0.2))
+	g.set_color(1, Color(1.3, 0.5, 2.2))
+	g.set_offset(1, 0.6)
+	var gt := GradientTexture1D.new()
+	gt.gradient = g
+	pm.color_initial_ramp = gt
+	pm.turbulence_enabled = true
+	pm.turbulence_noise_scale = 3.0
+	pm.turbulence_influence_min = 0.05
+	pm.turbulence_influence_max = 0.1
+	pm.gravity = Vector3.ZERO
+	pm.initial_velocity_min = 0.05
+	pm.initial_velocity_max = 0.15
+	pm.spread = 180.0
+	pm.scale_min = 0.6
+	pm.scale_max = 1.3
+	var p := particles(fest_root, 140 if graphics_high else 70, 6.0, 0.07, pm)
+	p.position = Vector3(map_cols / 2.0, 0.8, map_rows / 2.0)
+	p.visibility_aabb = AABB(-pm.emission_box_extents - Vector3(2, 2, 2), pm.emission_box_extents * 2 + Vector3(4, 6, 4))
+	p.preprocess = 6.0
+
+
+# Lantern Night: bone warriors wear a pumpkin (baked into their poses, see glb_pose())
+func pumpkin_hat(parts: Dictionary, skull: Transform3D) -> void:
+	if not fest_mesh.has("hat"):
+		# On the bone texture's plain spot
+		fest_mesh["hat"] = pumpkin_body(Vector2(0.2, 0.06))
+		fest_mesh["hat stem"] = pumpkin_stem(Vector2(0.2, 0.06))
+	var hat := skull * Transform3D(Basis(Vector3.BACK, 0.18).scaled(Vector3(0.3, 0.28, 0.3)), Vector3(0.02, 0.62, -0.02))
+	add_part(parts, fest_mesh["hat"], hat, Color(1.0, 0.5, 0.12))
+	add_part(parts, fest_mesh["hat stem"], hat * Transform3D(Basis(), Vector3(0, 0.75, 0)), Color(0.3, 0.42, 0.15))
+
+
+# ---------------------------------------------------------------- Paint Day
+
+# Pastel bunting on posts round the board's edge
+func add_border_bunting() -> void:
+	mob_shapes()
+	var parts := new_parts()
+	var corners := [Vector3(-0.15, 0, -0.15), Vector3(map_cols + 0.15, 0, -0.15), Vector3(map_cols + 0.15, 0, map_rows + 0.15), Vector3(-0.15, 0, map_rows + 0.15)]
+	var k := 0
+	for side in 4:
+		var a: Vector3 = corners[side]
+		var b: Vector3 = corners[(side + 1) % 4]
+		var n := maxi(int(a.distance_to(b) / 3.0), 1)
+		for i in n:
+			var p0 := a.lerp(b, float(i) / n)
+			var p1 := a.lerp(b, float(i + 1) / n)
+			# Posts and flags stop at the gates
+			if not near_gate(p0, 0.5 * GATE_W + 0.2):
+				rod(parts, p0, p0 + Vector3(0, 0.6, 0), 0.02, Color(0.55, 0.4, 0.28))
+			var pts := []
+			for j in 5:
+				var u := j / 4.0
+				pts.append(p0.lerp(p1, u) + Vector3(0, 0.57 - sin(u * PI) * 0.12, 0))
+			for j in 4:
+				if near_gate((pts[j] + pts[j + 1]) / 2.0, 0.5 * GATE_W + 0.45):
+					continue
+				rod(parts, pts[j], pts[j + 1], 0.006, Color(0.95, 0.95, 0.9))
+				fest_flag(parts, pts[j].lerp(pts[j + 1], 0.1), pts[j].lerp(pts[j + 1], 0.9), 0.24, pastel(k), 1.0)
+				k += 1
+	var mi := add_mesh(fest_root, pose_mesh(parts), fest_vcol())
+	mi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+
+# Painted eggs in the grass under the trees near the board
+func add_eggs() -> void:
+	if not fest_mesh.has("egg"):
+		var egg := SphereMesh.new()
+		egg.radius = 0.5
+		egg.height = 1.3
+		egg.radial_segments = 10
+		egg.rings = 6
+		fest_mesh["egg"] = egg
+		var m := StandardMaterial3D.new()
+		m.vertex_color_use_as_albedo = true
+		m.roughness = 0.5
+		fest_mesh["egg mat"] = painted(m)
+	var xf: Array[Transform3D] = []
+	var cols: Array[Color] = []
+	for tr: Array in land_trees:
+		var h: int = tr[3]
+		var pos: Vector3 = tr[0]
+		var x := floori(pos.x)
+		var y := floori(pos.z)
+		var dist := maxi(maxi(maxi(-x, x - map_cols + 1), maxi(-y, y - map_rows + 1)), 0)
+		if dist > 3 or (h >> 11) % 3 == 0:
+			continue
+		for k in 1 + (h >> 13) % 2:
+			var a := ((h >> (5 + k * 3)) % 360) * PI / 180.0
+			var r := 0.32 + ((h >> 17) % 5) * 0.05
+			var p := pos + Vector3(cos(a) * r, 0.05, sin(a) * r)
+			var s := 0.09 + ((h >> 19) % 3) * 0.01
+			xf.append(Transform3D(Basis(Vector3(cos(a), 0, sin(a)), 0.4).scaled(Vector3(s, s, s)), p))
+			cols.append(pastel((h >> 7) + k))
+	var mmi := color_mm(fest_mesh["egg"], fest_mesh["egg mat"])
+	var mm := mmi.multimesh
+	mm.instance_count = xf.size()
+	for i in xf.size():
+		mm.set_instance_transform(i, xf[i])
+		mm.set_instance_color(i, cols[i])
+	mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
+
+
+# A paint splat on the ground (born: INSTANCE_CUSTOM.x), fading after 8 seconds
+const SPLAT_SHADER := """
+shader_type spatial;
+render_mode unshaded, depth_draw_never, cull_disabled, shadows_disabled;
+uniform sampler2D splat : filter_linear_mipmap;
+uniform float now;
+varying vec4 col;
+varying float born;
+void vertex() { col = COLOR; born = INSTANCE_CUSTOM.x; }
+void fragment() {
+	float age = now - born;
+	float a = texture(splat, UV).r * (1.0 - smoothstep(8.0, 11.0, age)) * smoothstep(0.0, 0.08, age);
+	ALBEDO = col.rgb * 0.85;
+	ALPHA = a * 0.85;
+}
+"""
+
+
+# The splat's shape is drawn here: a blob with drops round it
+func splat_mat() -> ShaderMaterial:
+	if not fest_mesh.has("splat"):
+		var img := Image.create(64, 64, false, Image.FORMAT_L8)
+		var rng := RandomNumberGenerator.new()
+		rng.seed = 7
+		var blobs := [[Vector2(32, 32), 15.0]]
+		for i in 9:
+			var a := rng.randf() * TAU
+			var d := rng.randf_range(14, 27)
+			blobs.append([Vector2(32, 32) + Vector2(cos(a), sin(a)) * d, rng.randf_range(2.0, 6.0)])
+		for y in 64:
+			for x in 64:
+				var v := 0.0
+				for b: Array in blobs:
+					var dd: float = (Vector2(x, y) - b[0]).length()
+					v = maxf(v, clampf((b[1] - dd) / 1.5 + 0.5, 0.0, 1.0))
+				img.set_pixel(x, y, Color(v, v, v))
+		img.generate_mipmaps()
+		var sh := Shader.new()
+		sh.code = SPLAT_SHADER
+		var m := ShaderMaterial.new()
+		m.shader = sh
+		m.set_shader_parameter("splat", ImageTexture.create_from_image(img))
+		fest_mesh["splat"] = m
+	return fest_mesh["splat"]
+
+
+# Paint Day: a killed monster bursts into pastel paint (see drop_corpse())
+func paint_splash(e: Enemy) -> void:
+	if splat_mm == null or e.node == null:
+		return
+	var at := e.node.position
+	var p := paint_pool[paint_next % paint_pool.size()]
+	paint_next += 1
+	p.position = at + Vector3(0, 0.3, 0)
+	p.restart()
+	var mm := splat_mm.multimesh
+	var i := splat_next % mm.instance_count
+	splat_next += 1
+	var s := 0.5 + e.radius / CELL * 0.8
+	mm.set_instance_transform(i, Transform3D(Basis(Vector3.UP, randf() * TAU).scaled(Vector3(s, 1, s)), at + Vector3(0, 0.03 + (i % 8) * 0.001, 0)))
+	mm.set_instance_color(i, pastel(splat_next))
+	mm.set_instance_custom_data(i, Color(time, 0, 0, 0))
+	mm.visible_instance_count = mini(splat_next, mm.instance_count)
+
+
+# ---------------------------------------------------------------- Frostfall scarves
+
+# Soldiers wear a scarf in their Warden's color with white ends (baked into
+# their poses, see soldier_pose()); head: the head mesh's transform
+func soldier_scarf(parts: Dictionary, head: Transform3D) -> void:
+	mob_shapes()
+	if not fest_mesh.has("scarf"):
+		var tor := TorusMesh.new()
+		tor.inner_radius = 0.17
+		tor.outer_radius = 0.31
+		tor.rings = 12
+		tor.ring_segments = 6
+		fest_mesh["scarf"] = tor
+	scarf_part(parts, fest_mesh["scarf"], head * Transform3D(Basis.from_scale(Vector3(1.0, 0.9, 1.0)), Vector3(0, -0.02, 0)), 1.0)
+	# Two tails down the back
+	for s: float in [-1.0, 1.0]:
+		var tail := head * Transform3D(Basis(Vector3.RIGHT, 0.35) * Basis(Vector3.BACK, 0.12 * s), Vector3(0.06 * s, -0.16, -0.25))
+		scarf_part(parts, mob_rod, tail * Transform3D(Basis.from_scale(Vector3(0.1, 0.26, 0.04)), Vector3.ZERO), 1.0)
+		scarf_part(parts, mob_rod, tail * Transform3D(Basis.from_scale(Vector3(0.11, 0.07, 0.05)), Vector3(0, -0.15, 0)), 0.0)
+
+
+# mask 1: the owner's color (soldier.gdshader); 0: the texture's white cloth
+func scarf_part(parts: Dictionary, mesh: Mesh, xf: Transform3D, mask: float) -> void:
+	var from: int = parts.v.size()
+	add_part(parts, mesh, xf, Color(1, 1, 1, mask))
+	for k in range(from, parts.v.size()):
+		parts.uv[k] = Vector2(0.37, 0.37)
+
+
+# ---------------------------------------------------------------- tower decorations
+
+# Lantern Night's pumpkins and Frostfall's string lights, filled again when towers change
+func fill_fest_towers() -> void:
+	if lantern_mm != null:
+		var mm := lantern_mm.multimesh
+		var list: Array[Transform3D] = []
+		for tw: Tower in towers.values():
+			list.append(Transform3D((Basis(Vector3.UP, -0.3) * Basis(Vector3.RIGHT, -0.45)).scaled(Vector3.ONE * 0.18), to3d(tw.pos) + Vector3(0.27, 0.13, 0.32)))
+		for g in gate_cells.size():
+			if gate_cells[g] == null:
+				continue
+			var at := to3d(routes[g][0])
+			var out_dir: Vector2 = routes[g][1] - routes[g][0]
+			var b := Basis(Vector3.UP, atan2(out_dir.x, out_dir.y))
+			# On the lintel, between its spikes, their faces toward the camera whichever way the gate looks
+			for s: float in [-0.45 * GATE_W, 0.45 * GATE_W]:
+				list.append(Transform3D((Basis(Vector3.UP, s * 0.6) * Basis(Vector3.RIGHT, -0.45)).scaled(Vector3.ONE * 0.155), at + b * Vector3(s, 1.23, -0.3)))
+		# And one on the board's edge every 2 tiles
+		# (not in front of a gate)
+		var tilt := Basis(Vector3.RIGHT, -0.45).scaled(Vector3.ONE * 0.17)
+		var edge: Array[Transform3D] = []
+		for x in range(1, map_cols - 1, 2):
+			edge.append(Transform3D(Basis(Vector3.UP, 0.3 * (x % 3 - 1)) * tilt, Vector3(x + 0.5, 0.21, map_rows + 0.08)))
+			edge.append(Transform3D(Basis(Vector3.UP, 0.3 * (x % 3 - 1)) * tilt, Vector3(x + 0.5, 0.21, -0.08)))
+		for y in range(1, map_rows - 1, 2):
+			edge.append(Transform3D(Basis(Vector3.UP, 0.3 * (y % 3 - 1)) * tilt, Vector3(-0.08, 0.21, y + 0.5)))
+			edge.append(Transform3D(Basis(Vector3.UP, 0.3 * (y % 3 - 1)) * tilt, Vector3(map_cols + 0.08, 0.21, y + 0.5)))
+		for e: Transform3D in edge:
+			if not near_gate(e.origin, 0.5 * GATE_W + 0.3):
+				list.append(e)
+		mm.instance_count = list.size()
+		for i in list.size():
+			mm.set_instance_transform(i, list[i])
+			mm.set_instance_color(i, Color.WHITE)
+	if lights_mm != null:
+		var mm := lights_mm.multimesh
+		var cols := [Color(3.0, 0.5, 0.4), Color(3.0, 2.2, 0.6), Color(0.6, 2.6, 0.8), Color(0.7, 1.4, 3.0)]
+		mm.instance_count = towers.size() * 16
+		var i := 0
+		for tw: Tower in towers.values():
+			var c := to3d(tw.pos)
+			for k in 16:
+				# Round the base's edge, sagging between posts
+				var u := (k % 4 + 0.5) / 4.0
+				var off := Basis(Vector3.UP, (k / 4) * PI / 2) * Vector3(lerpf(-0.42, 0.42, u), 0, 0.42)
+				var y := 0.2 - sin(u * PI) * 0.06
+				mm.set_instance_transform(i, Transform3D(Basis.from_scale(Vector3.ONE * 0.035), c + off + Vector3(0, y, 0)))
+				mm.set_instance_color(i, cols[(k + tw.cell.x) % 4])
+				i += 1
+
+
+# ================================================================ Grimwhistle
+# The wave-300 boss (special "conductor"): the boss mage 1.4 times bigger, in a
+# purple robe, with a bone crown and collar and a bone baton he beats time with
+# as he walks. "mage conductor cast" is his Crescendo pose (both arms up).
+# His death: he topples backwards flinging his arms up, and his bones crumble
+# into a heap (see grim_fall() and drop_corpse()).
+const CROWN_Y := 0.8
+
+
+func add_grim(look: String, cast: bool) -> void:
+	var root: Node3D = load("res://assets/monsters/Skeleton_Mage.glb").instantiate()
+	add_child(root)
+	var skel: Skeleton3D = root.find_child("Skeleton3D")
+	var player := AnimationPlayer.new()
+	root.add_child(player)
+	player.add_animation_library("", walk_anims)
+	var anim := walk_anims.get_animation("Walking_C")
+	var top := Transform3D(Basis.from_scale(Vector3.ONE * SKELETON_SIZE * 1.8 * 1.4), Vector3.ZERO)
+	var ua_r := skel.find_bone("upperarm.r")
+	var la_r := skel.find_bone("lowerarm.r")
+	var ua_l := skel.find_bone("upperarm.l")
+	var hand := skel.find_bone("handslot.r")
+	var head := skel.find_bone("head")
+	var chest := skel.find_bone("chest")
+	var base_mat: StandardMaterial3D
+	var poses := []
+	var falls := []
+	player.play("Walking_C")
+	var frames := 8 if cast else 16
+	var white := Vector2(0.94, 0.52)  # the texture's plain white spot
+	var crown := Color(0.95, 0.85, 0.55)
+	# The walk (or cast), then (not for the cast: it shares them) the fall
+	for f in frames + (0 if cast else DEATH_POSES):
+		var ph := TAU * f / frames
+		var dying := f >= frames
+		var dk := (f - frames) / (DEATH_POSES - 1.0)  # moment of the fall
+		player.seek(0.0 if dying else anim.length * f / frames, true)
+		if dying:
+			# Both arms flung up as he falls
+			for b: Array in [[ua_r, -1.0], [ua_l, 1.0]]:
+				var q := skel.get_bone_pose_rotation(b[0])
+				skel.set_bone_pose_rotation(b[0], Quaternion(Vector3(1, 0, 0), -2.3 * minf(dk * 2.0, 1.0)) * Quaternion(Vector3(0, 0, 1), b[1] * 0.8 * dk) * q)
+		elif cast:
+			# Both arms raised high
+			for b: Array in [[ua_r, -1.0], [ua_l, 1.0]]:
+				var q := skel.get_bone_pose_rotation(b[0])
+				skel.set_bone_pose_rotation(b[0], Quaternion(Vector3(1, 0, 0), -2.9 - sin(ph) * 0.15) * Quaternion(Vector3(0, 0, 1), b[1] * 0.55) * q)
+		else:
+			# The baton arm raised, beating time (two beats a step)
+			var q := skel.get_bone_pose_rotation(ua_r)
+			skel.set_bone_pose_rotation(ua_r, Quaternion(Vector3(1, 0, 0), -1.7 - sin(ph * 2.0) * 0.4) * Quaternion(Vector3(0, 0, 1), -0.3) * q)
+			var q2 := skel.get_bone_pose_rotation(la_r)
+			skel.set_bone_pose_rotation(la_r, Quaternion(Vector3(1, 0, 0), -0.3 - cos(ph * 2.0) * 0.25) * q2)
+		var gp := bone_globals(skel)
+		var parts := new_parts()
+		for c in skel.get_children():
+			if c is MeshInstance3D:
+				if base_mat == null:
+					base_mat = c.get_active_material(0)
+				var from: int = parts.v.size()
+				add_skinned(parts, c, skel, top, gp)
+				# The robe: the maroon cloth becomes deep purple
+				for k in range(from, parts.v.size()):
+					var uv: Vector2 = parts.uv[k]
+					if int(uv.x * 8) == 2 and int(uv.y * 4) == 2:
+						parts.uv[k] = uv + Vector2(-0.125, 0.0)
+						parts.c[k] = Color(1.0, 0.36, 0.62)
+		# Bone crown with a gem, a high stiff collar, the baton
+		var hx := top * gp[head]
+		grim_part(parts, mob_rod, hx * Transform3D(Basis.from_scale(Vector3(0.56, 0.08, 0.56)), Vector3(0, CROWN_Y, 0.0)), crown, white)
+		for k in 7:
+			var a := TAU * k / 7.0
+			var tall := 0.32 if k == 0 else 0.22
+			grim_part(parts, mob_cone, hx * Transform3D(Basis(Vector3(cos(a + PI / 2), 0, sin(a + PI / 2)), 0.25) * Basis.from_scale(Vector3(0.09, tall, 0.09)), Vector3(cos(a + PI / 2) * 0.26, CROWN_Y + 0.04 + tall / 2.0, sin(a + PI / 2) * 0.3)), crown, white)
+		grim_part(parts, mob_ball, hx * Transform3D(Basis.from_scale(Vector3.ONE * 0.11), Vector3(0, CROWN_Y + 0.05, 0.29)), Color(0.75, 0.3, 1.0), white)
+		var cx := top * gp[chest]
+		grim_part(parts, mob_cone, cx * Transform3D(Basis(Vector3.RIGHT, PI).scaled(Vector3(1.0, 0.45, 0.85)), Vector3(0, 0.62, -0.05)), Color(0.32, 0.12, 0.45), white)
+		grim_part(parts, mob_rod, cx * Transform3D(Basis.from_scale(Vector3(0.62, 0.05, 0.55)), Vector3(0, 0.5, -0.03)), crown, white)
+		var bx := top * gp[hand]
+		grim_part(parts, mob_rod, bx * Transform3D(Basis(Vector3.RIGHT, -PI / 2).scaled(Vector3(0.035, 0.9, 0.035)), Vector3(0, 0.05, 0.45)), Color(0.96, 0.94, 0.85), white)
+		grim_part(parts, mob_ball, bx * Transform3D(Basis.from_scale(Vector3.ONE * 0.12), Vector3(0, 0.05, -0.02)), crown, white)
+		grim_part(parts, mob_ball, bx * Transform3D(Basis.from_scale(Vector3.ONE * 0.07), Vector3(0, 0.05, 0.9)), Color(1.0, 0.85, 1.0), white)
+		if dying:
+			grim_fall(parts, dk, poses[0].get_aabb().end.y)
+			falls.append(pose_mesh(parts))
+		else:
+			poses.append(pose_mesh(parts))
+	root.free()
+	if cast and mobs.has("mage conductor"):
+		falls = mobs["mage conductor"][4]
+	var m := base_mat.duplicate() as StandardMaterial3D
+	m.albedo_texture = load("res://assets/monsters/skeleton_texture.png")
+	m.albedo_color = Color(1.0, 0.97, 1.0)
+	m.vertex_color_use_as_albedo = true
+	m.emission_enabled = true
+	m.emission = Color(0.45, 0.12, 0.8)
+	m.emission_energy_multiplier = 0.05
+	mobs[look] = [poses, mob_mats(m), anim.length * (1.0 if cast else 1.15), poses[0].get_aabb().end.y, falls]
+
+
+var grim_bursts: Array[GPUParticles3D] = []  # his death: [purple blast, bone shards] (see make_effects())
+
+
+# Grimwhistle's death burst i at p (0: purple blast, 1: crumbling bones)
+func grim_burst(i: int, p: Vector3) -> void:
+	fire_burst(grim_bursts[i], p, Color(1.6, 0.5, 2.6) if i == 0 else Color(1.15, 1.1, 0.95))
+
+
+# Moment k (0-1) of his fall, on a pose of height h: he topples backwards (lying
+# by k 0.7), then his bones slump into a flat heap.
+func grim_fall(parts: Dictionary, k: float, h: float) -> void:
+	var p := pow(minf(k / 0.7, 1.0), 2.0)
+	var crumble := smoothstep(0.65, 1.0, k)
+	# Turning round the heels (a little behind the feet), lifted so his back stays above ground
+	var pivot := Vector3(0, 0, -0.1 * h)
+	var turn := Basis(Vector3.RIGHT, -1.45 * p)
+	var heap := Basis.from_scale(Vector3(1.0 + 0.3 * crumble, 1.0 - 0.6 * crumble, 1.0 + 0.15 * crumble))
+	var xf := Transform3D(heap, Vector3.ZERO) * Transform3D(turn, pivot + Vector3(0, sin(1.45 * p) * 0.14 * h, 0)) * Transform3D(Basis(), -pivot)
+	var nb := xf.basis.inverse().transposed()
+	for i in parts.v.size():
+		parts.v[i] = xf * parts.v[i]
+		parts.n[i] = (nb * parts.n[i]).normalized()
+
+
+# Every bone's pose in the skeleton, from the local poses (the skeleton's own
+# global poses aren't updated yet after set_bone_pose_rotation())
+func bone_globals(skel: Skeleton3D) -> Array[Transform3D]:
+	var gp: Array[Transform3D] = []
+	gp.resize(skel.get_bone_count())
+	for b in skel.get_bone_count():
+		var par := skel.get_bone_parent(b)
+		gp[b] = skel.get_bone_pose(b) if par < 0 else gp[par] * skel.get_bone_pose(b)
+	return gp
+
+
+func grim_part(parts: Dictionary, mesh: Mesh, xf: Transform3D, col: Color, uv: Vector2) -> void:
+	var from: int = parts.v.size()
+	add_part(parts, mesh, xf, col)
+	for k in range(from, parts.v.size()):
+		parts.uv[k] = uv
+
+
+# ---------------------------------------------------------------- Crescendo
+# A purple ring sweeps out to his reach, music notes spiral out from his baton,
+# and every monster in reach gets a small bouncing note while its haste lasts.
+# Two notes always circle his crown.
+const CRESC_LIFE := 1.6  # seconds of the ring and the notes
+const CRESC_NOTES := 18
+var cresc: Array = []  # [Enemy, Vector3 where, seconds since]
+var hasted := {}  # Enemy -> seconds of its haste note left (looks only, from where he stood)
+var cresc_ring: MultiMeshInstance3D
+var note_mm: MultiMeshInstance3D
+
+const NOTE_SHADER := """
+shader_type spatial;
+render_mode unshaded, blend_mix, depth_draw_never, cull_disabled, shadows_disabled, fog_disabled;
+uniform sampler2D notes : source_color, filter_linear_mipmap;
+varying vec4 col;
+varying float pick;
+void vertex() {
+	col = COLOR;
+	pick = INSTANCE_CUSTOM.x;
+	// Faces the camera
+	MODELVIEW_MATRIX = VIEW_MATRIX * mat4(INV_VIEW_MATRIX[0] * length(MODEL_MATRIX[0].xyz), INV_VIEW_MATRIX[1] * length(MODEL_MATRIX[1].xyz), INV_VIEW_MATRIX[2], MODEL_MATRIX[3]);
+}
+void fragment() {
+	vec4 n = texture(notes, vec2((UV.x + floor(pick)) * 0.5, UV.y));
+	ALBEDO = mix(vec3(0.1, 0.03, 0.16), col.rgb * 1.3, n.r);
+	ALPHA = n.a * col.a;
+}
+"""
+
+
+# Two music notes side by side (a quaver and two beamed ones), white with a dark rim
+func note_texture() -> ImageTexture:
+	var img := Image.create(128, 64, false, Image.FORMAT_RGBA8)
+	for y in 64:
+		for x in 128:
+			var p := Vector2(x % 64, y)
+			var d := 99.0
+			if x < 64:
+				d = note_dist(p, [Vector2(24, 46)], [Vector2(33, 44), Vector2(33, 10)])
+				# The flag
+				for k in 8:
+					var q := Vector2(33, 10) + Vector2(k * 1.6, k * 2.2 + sin(k * 0.6) * 2.0)
+					d = minf(d, p.distance_to(q) - 2.2)
+			else:
+				d = note_dist(p, [Vector2(16, 48), Vector2(44, 42)], [Vector2(25, 46), Vector2(25, 14), Vector2(53, 40), Vector2(53, 8)])
+				d = minf(d, seg_dist(p, Vector2(25, 15), Vector2(53, 9)) - 3.5)
+			var inner := clampf(0.5 - d, 0.0, 1.0)
+			var outer := clampf(0.5 - (d - 2.5), 0.0, 1.0)
+			img.set_pixel(x, y, Color(inner, inner, inner, outer))
+	img.generate_mipmaps()
+	return ImageTexture.create_from_image(img)
+
+
+func note_dist(p: Vector2, heads: Array, stems: Array) -> float:
+	var d := 99.0
+	for h: Vector2 in heads:
+		var q := (p - h).rotated(0.45)
+		d = minf(d, Vector2(q.x / 1.35, q.y).length() - 7.0)
+	for i in range(0, stems.size(), 2):
+		d = minf(d, seg_dist(p, stems[i], stems[i + 1]) - 1.8)
+	return d
+
+
+func seg_dist(p: Vector2, a: Vector2, b: Vector2) -> float:
+	var ab := b - a
+	var k := clampf((p - a).dot(ab) / ab.length_squared(), 0.0, 1.0)
+	return p.distance_to(a + ab * k)
+
+
+func make_cresc_fx() -> void:
+	var plane := PlaneMesh.new()
+	plane.size = Vector2(2, 2)
+	var rm := ShaderMaterial.new()
+	rm.shader = load("res://assets/shaders/heal_ring.gdshader")
+	rm.set_shader_parameter("tint", Color(0.7, 0.3, 1.0))
+	rm.set_shader_parameter("energy", 1.6)
+	cresc_ring = fx_multimesh(plane, rm, 8)
+	var q := QuadMesh.new()
+	q.size = Vector2(0.39, 0.195)
+	var sh := Shader.new()
+	sh.code = NOTE_SHADER
+	var nm := ShaderMaterial.new()
+	nm.shader = sh
+	nm.set_shader_parameter("notes", note_texture())
+	var mm := MultiMesh.new()
+	mm.transform_format = MultiMesh.TRANSFORM_3D
+	mm.use_colors = true
+	mm.use_custom_data = true
+	mm.mesh = q
+	mm.instance_count = 256
+	mm.visible_instance_count = 0
+	note_mm = MultiMeshInstance3D.new()
+	note_mm.multimesh = mm
+	note_mm.material_override = nm
+	note_mm.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	add_child(note_mm)
+	fx_box(mm)
+
+
+# Every computer: Grimwhistle e does his Crescendo (only the look here)
+func crescendo_fx(e: Enemy) -> void:
+	super(e)
+	if e.node == null or not mobs.has("mage conductor cast"):
+		return
+	if cresc_ring == null:
+		make_cresc_fx()
+	cresc.append([e, e.node.position, 0.0])
+	e.node.set_meta("cast", 1.0)
+	e.node.set_meta("mob", mobs["mage conductor cast"])
+	for o in enemies:
+		if o.pos.distance_to(e.pos) <= CRESCENDO_RANGE:
+			hasted[o] = CRESCENDO_TIME
+
+
+func update_crescendo(delta: float) -> void:
+	if cresc_ring == null:
+		return
+	var rings := 0
+	var notes := 0
+	var mm := note_mm.multimesh
+	var tints := [Color(0.8, 0.45, 1.0), Color(1.0, 0.55, 0.9), Color(1.0, 0.85, 0.4)]
+	var s := CRESCENDO_RANGE / CELL
+	for i in range(cresc.size() - 1, -1, -1):
+		var c: Array = cresc[i]
+		c[2] += delta
+		var k: float = c[2] / CRESC_LIFE
+		if k >= 1.0:
+			cresc.remove_at(i)
+			continue
+		var at: Vector3 = c[1]
+		if rings < cresc_ring.multimesh.instance_count:
+			cresc_ring.multimesh.set_instance_transform(rings, Transform3D(Basis.from_scale(Vector3(s, 1, s)), at + Vector3(0, 0.06, 0)))
+			cresc_ring.multimesh.set_instance_custom_data(rings, Color(minf(k * 1.4, 0.99), 0, 0, 0))
+			rings += 1
+		# Notes burst from his baton and spiral out to the ring's edge
+		for n in CRESC_NOTES:
+			if notes >= mm.instance_count:
+				break
+			var a := TAU * n / CRESC_NOTES + k * 2.0
+			var r := s * (1.0 - pow(1.0 - k, 2.0)) * (0.55 + 0.45 * float(n % 3) / 2.0)
+			var p := at + Vector3(cos(a) * r, 0.9 + sin(k * PI) * 0.5 + (n % 3) * 0.12, sin(a) * r)
+			var sc := 1.0 + 0.4 * (n % 2)
+			mm.set_instance_transform(notes, Transform3D(Basis.from_scale(Vector3(sc, sc * 2.0, 1)), p))
+			var col: Color = tints[n % 3]
+			col.a = clampf((1.0 - k) * 2.0, 0.0, 1.0)
+			mm.set_instance_color(notes, col)
+			mm.set_instance_custom_data(notes, Color(n % 2, 0, 0, 0))
+			notes += 1
+	for e in enemies:
+		if e.special != "conductor" or e.node == null:
+			continue
+		# The cast pose for a moment, then his walk again
+		if e.node.has_meta("cast"):
+			var left: float = e.node.get_meta("cast") - delta
+			if left <= 0.0:
+				e.node.remove_meta("cast")
+				e.node.set_meta("mob", mobs["mage conductor"])
+			else:
+				e.node.set_meta("cast", left)
+		# Two notes always circle his crown
+		if notes + 2 <= mm.instance_count:
+			var h: float = mobs["mage conductor"][3]
+			for n in 2:
+				var a := time * 1.6 + n * PI
+				var p := e.node.position + Vector3(cos(a) * 0.32, h + 0.08 + sin(time * 3.0 + n) * 0.05, sin(a) * 0.32)
+				mm.set_instance_transform(notes, Transform3D(Basis.from_scale(Vector3(0.8, 1.6, 1)), p))
+				mm.set_instance_color(notes, Color(0.8, 0.45, 1.0, 0.9))
+				mm.set_instance_custom_data(notes, Color(n, 0, 0, 0))
+				notes += 1
+	# Hasted monsters: a small bouncing note over their heads while it lasts
+	for o: Enemy in hasted.keys():
+		hasted[o] -= delta
+		if hasted[o] <= 0.0 or o.dead or o.node == null or not enemies.has(o):
+			hasted.erase(o)
+			continue
+		if notes >= mm.instance_count or o.special == "conductor":
+			continue
+		var h2: float = o.node.get_meta("mob")[3] * o.node.scale.y
+		var p := o.node.position + Vector3(0, h2 + 0.12 + absf(sin(time * 8.0 + o.bob * 6.0)) * 0.06, 0)
+		mm.set_instance_transform(notes, Transform3D(Basis.from_scale(Vector3(0.6, 1.2, 1)), p))
+		mm.set_instance_color(notes, Color(1.0, 0.6, 1.0, clampf(hasted[o], 0.0, 1.0)))
+		mm.set_instance_custom_data(notes, Color(0, 0, 0, 0))
+		notes += 1
+	cresc_ring.multimesh.visible_instance_count = rings
+	mm.visible_instance_count = notes

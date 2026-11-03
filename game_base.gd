@@ -461,7 +461,8 @@ class Enemy:
 	var sent := false  # host: a snapshot has had it, so the players know it (see send_shot())
 	var past := false  # other players: the host says it got past (once round the loop, see got_past())
 	# Monster SPECIALS (see wave_special()): "" none, "split" (breaks in 2 when it
-	# dies), "splitling" (one of those 2), "heal" (heals monsters near it)
+	# dies), "splitling" (one of those 2), "heal" (heals monsters near it),
+	# "conductor" (Grimwhistle, a boss: see grimwhistle_wave())
 	var special := ""
 	var shield := 0.0  # host: takes hits before health and armor (0: none or broken)
 	var max_shield := 0.0  # 0: this monster has no shield
@@ -471,6 +472,7 @@ class Enemy:
 	var poisoned := 0.0  # host: seconds it still looks poisoned (for the looks)
 	var held := false  # host: a Barracks soldier holds it (it stands still)
 	var hold_immune := 0.0  # host: no soldier holds it while above 0
+	var haste_time := 0.0  # host: Grimwhistle's Crescendo, walks CRESCENDO_HASTE times faster while above 0
 	var node: MeshInstance3D
 	var mat: Material
 	var bob := 0.0
@@ -958,6 +960,7 @@ func use_map(m: Dictionary, title := "Default") -> void:
 	blocked = m.blocked
 	area_of = m.areas
 	daily_date = ""  # another map ends the daily challenge (start_daily() sets it after this)
+	weekly_id = ""  # ...and the weekly one (start_weekly() in main.gd sets it after this)
 
 
 # The built-in map with exactly these rows ("Default", "Serpent"...), or "".
@@ -1028,17 +1031,64 @@ func wave_special(w: int) -> String:
 
 
 # A monster's trait and shield in 3 bits, for snapshots and the replay:
-# SPECIALS index * 4 (bits 4 and 8), + 16 while its shield is up.
+# SPECIALS index * 4 (bits 4 and 8), + 16 while its shield is up. Bosses never
+# have a trait, so a boss with index 3 is Grimwhistle ("conductor").
 func special_bits(e: Enemy) -> int:
-	return maxi(SPECIALS.find(e.special), 0) * 4 | (16 if e.shield > 0.0 else 0)
+	var i := 3 if e.special == "conductor" else maxi(SPECIALS.find(e.special), 0)
+	return i * 4 | (16 if e.shield > 0.0 else 0)
 
 
 # The other players' (and the replay's) copy of a monster: its trait and whether
-# its shield is up (max_shield 1, shield 1 or 0) from special_bits().
+# its shield is up (max_shield 1, shield 1 or 0) from special_bits(). e.kind
+# must be set first (make_enemy()).
 func apply_special_bits(e: Enemy, bits: int) -> void:
-	e.special = SPECIALS[(bits >> 2) & 3]
+	var i := (bits >> 2) & 3
+	if e.kind == "boss":
+		e.special = "conductor" if i == 3 else ""
+		if i == 3:
+			e.radius = GRIM_RADIUS
+	else:
+		e.special = SPECIALS[i]
 	e.max_shield = 1.0 if bits & 16 else e.max_shield
 	e.shield = 1.0 if bits & 16 else 0.0
+
+
+# ----- Grimwhistle, the Bone Conductor
+# The last wave (MAX_WAVE, not in the daily or weekly challenge) sends from every
+# gate Grimwhistle first, then 4 bosses. He is a boss (kind "boss") with special
+# "conductor". His Crescendo (every CRESCENDO_EVERY seconds): monsters within
+# CRESCENDO_RANGE of him (himself too) lose slows and freezes, soldiers let go
+# of them, and they walk CRESCENDO_HASTE times faster for CRESCENDO_TIME. Knights
+# hold him for GRIM_HOLD of their boss hold, and he wears soldiers down GRIM_HURT
+# times faster than a boss. When every Grimwhistle has fallen, the monsters
+# left crumble (no gold) and the game is won (main.gd).
+const GRIM_NAME := "Grimwhistle, the Bone Conductor"  # over his health bar (the ui)
+const GRIM_HP := 1.5  # times a boss's health (and shield)
+const GRIM_SPEED := 0.6  # times a normal monster's speed (bosses 0.7)
+const GRIM_RADIUS := 22.0  # bosses 18
+const GRIM_GOLD := 2  # times a boss's gold
+const GRIM_HOLD := 0.5
+const GRIM_HURT := 2.0
+const CRESCENDO_FIRST := 6.0  # seconds after he comes out
+const CRESCENDO_EVERY := 10.0
+const CRESCENDO_RANGE := 160.0  # pixels
+const CRESCENDO_HASTE := 1.4
+const CRESCENDO_TIME := 3.0
+
+
+# Is wave w Grimwhistle's wave?
+func grimwhistle_wave(w: int) -> bool:
+	return w == MAX_WAVE and daily_date == "" and weekly_id == ""
+
+
+# Every computer: Grimwhistle e just did his Crescendo (the host's crescendo()
+# in main.gd, the other players from net_show_crescendo, the replay from its
+# recording). Empty here: game_audio.gd (the sound), game_world.gd (the look),
+# game_net.gd (the host tells the other players) and main.gd (the replay
+# records it) override it and call super(). Overrides only show and play: the
+# game itself (slows, holds, haste) is changed by crescendo() on the host.
+func crescendo_fx(_e: Enemy) -> void:
+	pass
 
 
 # Every computer: a poison cloud's look at pos (map pixels), radius r, for
@@ -1181,11 +1231,13 @@ func show_soldiers(t: Tower) -> void:
 			s.rotation.x = 0.35 if b & 128 else 0.0
 
 
-# The last wave: MAX_WAVE, DAILY_WAVES in the daily challenge (no endless mode
-# there), or (practically) never in endless mode.
+# The last wave: MAX_WAVE, DAILY_WAVES in the daily challenge, WEEKLY_WAVES in the
+# weekly one (no endless mode there), or (practically) never in endless mode.
 func last_wave() -> int:
 	if daily_date != "":
 		return DAILY_WAVES
+	if weekly_id != "":
+		return WEEKLY_WAVES
 	return ENDLESS_LAST_WAVE if endless else MAX_WAVE
 
 
@@ -1411,6 +1463,202 @@ func daily_rules(date := "") -> Dictionary:
 			"bounty": tw.get("bounty", 1.0), "income": tw.get("income", 1.0), "towers": types,
 			"no_sell": tw.get("no_sell", false), "armored": tw.get("armored", false)}
 	return daily_cache
+
+
+# ---------------------------------------------------------------- weekly challenge
+# Like the daily, but harder and longer: the same map and rules for everyone each
+# ISO week (Monday 00:00 UTC to Sunday), worked out from the week id ("2026-W45")
+# with the daily's random numbers. Always Hard, two daily twists (never "Rich
+# start"), 100 waves, and the Rising tide: from wave WEEKLY_TIDE_FROM monster
+# health grows by WEEKLY_TIDE a wave on top (gold doesn't follow it).
+# main.gd starts it (start_weekly(), menu_weekly()) and applies the rules
+# through challenge_rules(), like the daily's.
+
+const WEEKLY_VERSION := 1  # raise when the weekly map pick or rules change (the board gets "-r2")
+const WEEKLY_WAVES := 100  # the weekly challenge is won after this wave (the server knows it too)
+const WEEKLY_LEVEL := 2  # index in DIFFICULTIES: always Hard
+const WEEKLY_TWIST_COUNT := 2
+# Daily twists the weekly never picks: Rich start and Swarm make it easier, Two
+# towers without Frost makes 100 waves out of reach. 3 twists left: 3 pairs.
+const WEEKLY_NO_TWISTS := ["rich", "two_towers", "swarm"]
+const WEEKLY_TIDE_FROM := 31  # Rising tide: from this wave...
+const WEEKLY_TIDE := 0.01  # ...+1% monster health a wave (x1.20 at wave 50, x1.70 at wave 100)
+# The maps a week can have: the built-in ones, and "" for a map of its own
+# (made like the daily's). Every block of 6 weeks has each one once, in a
+# seeded order, and never the same one two weeks in a row.
+const WEEKLY_MAPS := ["Default", "Serpent", "Twin Lanes", "Hourglass", "Four Roads", ""]
+var weekly_id := ""  # "2026-W45" while playing that week's challenge, "" otherwise
+var weekly_cache := {}  # the last weekly_rules() worked out
+var weekly_maps := {}  # id -> read_map() result, worked out once
+
+
+# The ISO week (UTC) a moment is in, as "2026-W45": weeks start on Monday, and
+# week 1 is the one with the year's first Thursday.
+func weekly_id_at(unix: float) -> String:
+	var day := floori(unix / 86400.0)
+	var thursday := day - posmod(day + 3, 7) + 3  # day 0 (1970-01-01) was a Thursday
+	var year: int = Time.get_date_dict_from_unix_time(thursday * 86400).year
+	var jan1 := floori(Time.get_unix_time_from_datetime_string("%04d-01-01T00:00:00" % year) / 86400.0)
+	return "%04d-W%02d" % [year, floori((thursday - jan1) / 7.0) + 1]
+
+
+# This week's id, the same for everyone at the same moment.
+func weekly_now() -> String:
+	return weekly_id_at(Time.get_unix_time_from_system())
+
+
+# Seconds until this week's challenge ends (next Monday 00:00 UTC).
+func weekly_ends_in() -> int:
+	var now := Time.get_unix_time_from_system()
+	var day := floori(now / 86400.0)
+	return int((day - posmod(day + 3, 7) + 7) * 86400 - now)
+
+
+# A week's Monday (days since 1970-01-01), or -1 if id isn't a real week
+# ("2025-W53" isn't: 2025 has 52 weeks). Years 2000-9999.
+func weekly_monday(id: String) -> int:
+	if id.length() != 8 or id.substr(4, 2) != "-W" or not id.left(4).is_valid_int() or not id.right(2).is_valid_int():
+		return -1
+	var year := id.left(4).to_int()
+	var w := id.right(2).to_int()
+	if year < 2000 or w < 1 or w > 53:
+		return -1
+	var jan4 := floori(Time.get_unix_time_from_datetime_string("%04d-01-04T00:00:00" % year) / 86400.0)
+	var monday := jan4 - posmod(jan4 + 3, 7) + 7 * (w - 1)  # jan 4 is always in week 1
+	return monday if weekly_id_at(monday * 86400.0) == id else -1
+
+
+func weekly_valid(id: Variant) -> bool:
+	return id is String and weekly_monday(id) >= 0
+
+
+# The week before (for "never the same map two weeks in a row").
+func weekly_before(id: String) -> String:
+	var monday := weekly_monday(id)
+	return weekly_id_at((monday - 7) * 86400.0) if monday >= 0 else ""
+
+
+# The week's map: a built-in map's name, or "" for a map of its own.
+func weekly_map_pick(id: String) -> String:
+	var monday := weekly_monday(id)
+	if monday < 0:
+		return "Default"
+	var n := floori((monday + 3) / 7.0)  # weeks since Monday 1969-12-29
+	var block := floori(n / 6.0)
+	var order := weekly_map_order(block)
+	var i := n - block * 6
+	# A block never starts with the map the block before ended with
+	if i <= 1 and weekly_map_order(block - 1)[5] == order[0]:
+		var first: String = order[0]
+		order[0] = order[1]
+		order[1] = first
+	return order[i]
+
+
+# Block b's 6 weeks of maps: WEEKLY_MAPS in a seeded order.
+func weekly_map_order(block: int) -> Array:
+	daily_seed("gtd-weekly-map-%d-%d" % [WEEKLY_VERSION, block])
+	var order: Array = WEEKLY_MAPS.duplicate()
+	for k in range(order.size() - 1, 0, -1):
+		var j := daily_roll(0, k)
+		var t: String = order[k]
+		order[k] = order[j]
+		order[j] = t
+	return order
+
+
+# The week's map, checked by read_map() like any map.
+func weekly_map(id: String) -> Dictionary:
+	if not weekly_maps.has(id):
+		var pick := weekly_map_pick(id)
+		var m := read_map(BUILTIN_MAPS[pick] if pick != "" else weekly_map_rows(id))
+		weekly_maps[id] = m if not m.has("error") else read_map(DEFAULT_MAP)
+	return weekly_maps[id]
+
+
+# A week's own map (when weekly_map_pick() is ""): made by the daily's map maker
+# (daily_map_rows() in game_net.gd, after this file) from the week's id.
+func weekly_map_rows(id: String) -> Array:
+	return call("daily_map_rows", "weekly-%d-%s" % [WEEKLY_VERSION, id])
+
+
+# For the menu tip and the banner: the week's map name, or "its own map".
+func weekly_map_label(id: String) -> String:
+	var pick := weekly_map_pick(id)
+	return pick if pick != "" else "its own map"
+
+
+func weekly_title(id: String) -> String:
+	return "Weekly " + id
+
+
+# The week's rules (id "": the one being played), or {} when this game isn't a
+# weekly challenge. The same keys as daily_rules() (twist is ""), plus
+# twists: [the 2 twist keys], tide, tide_from.
+func weekly_rules(id := "") -> Dictionary:
+	if id == "":
+		id = weekly_id
+	if id == "":
+		return {}
+	if weekly_cache.get("id", "") == id:
+		return weekly_cache
+	daily_seed("gtd-weekly-rules-%d-%s" % [WEEKLY_VERSION, id])
+	var keys: Array = DAILY_TWISTS.keys().filter(func(k: String) -> bool: return not k in WEEKLY_NO_TWISTS)
+	keys.sort()  # the same order everywhere
+	var picked := []
+	while picked.size() < WEEKLY_TWIST_COUNT and not keys.is_empty():
+		picked.append(keys.pop_at(daily_roll(0, keys.size() - 1)))
+	var r := {"id": id, "date": "", "twist": "", "twists": picked, "level": WEEKLY_LEVEL, "waves": WEEKLY_WAVES,
+			"start_gold": 1.0, "count": 1.0, "hp": 1.0, "bounty": 1.0, "income": 1.0, "towers": TOWER_TYPES.duplicate(),
+			"no_sell": false, "armored": false, "tide": WEEKLY_TIDE, "tide_from": WEEKLY_TIDE_FROM}
+	var names := []
+	var descs := []
+	for k: String in picked:
+		var tw: Dictionary = DAILY_TWISTS[k]
+		names.append(tw.name)
+		descs.append(tw.desc)
+		for n: String in ["start_gold", "count", "hp", "bounty", "income"]:
+			r[n] *= tw.get(n, 1.0)
+		r.no_sell = r.no_sell or tw.get("no_sell", false)
+		r.armored = r.armored or tw.get("armored", false)
+		var keep: int = tw.get("towers", 0)
+		while keep > 0:
+			var types: Array = TOWER_TYPES.duplicate()
+			while types.size() > keep:
+				types.remove_at(daily_roll(0, types.size() - 1))
+			r.towers = types
+			if types.any(func(t: String) -> bool: return not t in DAILY_HELPERS):
+				break
+	r["name"] = " + ".join(names)
+	r["desc"] = " ".join(descs)
+	weekly_cache = r
+	return weekly_cache
+
+
+# The challenge being played: the daily's rules, the weekly's, or {} (main.gd's
+# rule overrides and the ui use this).
+func challenge_rules() -> Dictionary:
+	return daily_rules() if daily_date != "" else weekly_rules()
+
+
+# Rising tide: the weekly's extra monster health in wave w (1.0 otherwise).
+func weekly_tide(w: int) -> float:
+	if weekly_id == "":
+		return 1.0
+	return 1.0 + WEEKLY_TIDE * maxi(w - WEEKLY_TIDE_FROM + 1, 0)
+
+
+# Host: tells the other players the weekly challenge (id, or "" for none) after
+# it starts. Empty here; game_net.gd sends it (net_set_weekly).
+func send_weekly(_id: String) -> void:
+	pass
+
+
+# Host: tells the other players the mood (weather and time of day, one of MOODS
+# in game_world.gd) after main.gd picked it. Empty here; game_net.gd sends it,
+# and the other players call set_mood_from_host() (main.gd) with it.
+func send_mood(_m: String) -> void:
+	pass
 
 
 # Every tower level up to MAX_LEVEL: levels 1-4 from TOWER_BASE, then each level
@@ -1648,9 +1896,15 @@ var tip_queue: Array = []  # ids waiting to be shown; the first one is on screen
 var tip_spots := {}  # id -> the map spot of the tower an anchor "tower" points at
 
 
-# The tip on screen: {id, text, anchor}, or {} for none.
+# The tip on screen: {id, text, anchor}, or {} for none. A story card (see
+# STORY_CARDS) comes before the tips: {id, text, anchor "none", story true, who}.
 func current_tip() -> Dictionary:
-	if not tips_on or tip_queue.is_empty() or state != "playing":
+	if state != "playing":
+		return {}
+	if story_on and not story_queue.is_empty():
+		var sid: String = story_queue[0]
+		return {"id": sid, "text": STORY_CARDS[sid]["text"], "anchor": "none", "story": true, "who": STORY_CARDS[sid]["who"]}
+	if not tips_on or tip_queue.is_empty():
 		return {}
 	var id: String = tip_queue[0]
 	var text: String = TIPS[id]["text"]
@@ -1662,8 +1916,11 @@ func current_tip() -> Dictionary:
 	return {"id": id, "text": text, "anchor": anchor}
 
 
-# "Got it": the tip on screen won't come back.
+# "Got it" (or a story card fading out): the card on screen won't come back.
 func tip_got_it() -> void:
+	if story_on and not story_queue.is_empty():
+		story_queue.pop_front()
+		return
 	if tip_queue.is_empty():
 		return
 	var id: String = tip_queue.pop_front()
@@ -1672,9 +1929,13 @@ func tip_got_it() -> void:
 	save_tutorial()
 
 
-# "Skip all tips": turns them off (Settings can turn them on again).
+# "Skip all": turns the tips off, or on a story card the story cards (Settings
+# can turn them on again).
 func tip_skip_all() -> void:
-	set_tutorial(false)
+	if story_on and not story_queue.is_empty():
+		set_story_cards(false)
+	else:
+		set_tutorial(false)
 
 
 func tutorial_on() -> bool:
@@ -1703,6 +1964,162 @@ func tip_click(_p: Vector2) -> bool:
 	return false
 
 
+# ---------------------------------------------------------------- story cards and the Chronicle
+# Short story pages at story moments, each once per player ever, shown in the
+# tip card (current_tip() returns them first, with "story" and "who"). Only on
+# this computer: nothing is sent, so in multiplayer every player gets their own.
+# Not in the daily (but daily_omen) or weekly challenge, the replay or the map
+# editor, and a wave's card only when that wave starts while playing (not after
+# loading or joining). When each one comes: update_story() in main.gd.
+#
+# A card unlocks when its moment comes, even with the story cards Off (then it
+# just isn't shown). Unlocked cards are kept in profile.cfg under [chronicle]
+# (id = the date), and the Profile's Chronicle page lists them (chronicle_list()).
+# first_win and first_loss come at the end of a game, when the tip card is gone:
+# the ui shows end_story_card() on the end screen.
+#
+# The texts are the story agent's (graphics plan\story\card texts.md).
+# "hint" is what the Chronicle shows for a card that's still locked.
+const STORY_CARDS := {
+	"gates_waking": {"who": "Wren", "text": "Welcome, Warden! The gates are waking. Build towers along the Ring and keep it clear. Fifty monsters, and it breaks!", "hint": "Play your first game."},
+	"daily_omen": {"who": "Wren", "text": "A new Omen is nailed to the well! One ring, one strange rule, one day. Let's see what you make of it.", "hint": "Start a daily challenge."},
+	"mirages": {"who": "Wren", "text": "Unicorns? No, those are painted fakes. The Choir wants to see if we're awake. Pop them!", "hint": "Start wave 1."},
+	"first_boss": {"who": "Sergeant Thump", "text": "A Bone Mage, one of the Choir's singers! Big and slow, and it crowds the Ring like five. Hit it hard!", "hint": "Meet your first boss."},
+	"new_songs": {"who": "Wren", "text": "Hear that? The Choir is teaching new songs. Splitters, Bubblebones, Hummers... watch for new tricks!", "hint": "Reach wave 31."},
+	"wave_100": {"who": "Sergeant Thump", "text": "One hundred waves! My soldiers asked for cake. I said after the next hundred.", "hint": "Reach wave 100."},
+	"halfway": {"who": "The Ringkeeper", "text": "Halfway, little Warden. The song below is growing tired. Keep the Ring clear, and I will keep watch.", "hint": "Reach wave 150."},
+	"wave_200": {"who": "Wren", "text": "Two hundred waves! The guild ran out of paint for the tally board. Only a hundred to go!", "hint": "Reach wave 200."},
+	"grimwhistle": {"who": "Grimwhistle", "text": "ENOUGH! If my Choir can't do it, I'll conduct this song myself! Cover your ears, Wardens!", "hint": "Reach wave 300."},
+	"first_win": {"who": "Wren", "text": "The gates are quiet. Grimwhistle has no one left to send. You did it, Warden! Fireworks, everyone!", "hint": "Win a game."},
+	"first_loss": {"who": "Sergeant Thump", "text": "The Ring broke. Happens to the best of us. Grab a brush, Warden. We'll paint it again!", "hint": "Lose a game."},
+}
+# The Profile's Chronicle page (the ui draws it)
+const CHRONICLE_TITLE := "The Warden's Chronicle"
+const CHRONICLE_INTRO := "Every story moment you've lived, written down by the Lamplight Guild."
+# The wave whose start brings each wave card (first_boss: the first boss wave)
+const STORY_WAVES := {"mirages": 1, "new_songs": 31, "wave_100": 100, "halfway": 150, "wave_200": 200}
+const STORY_START := 1.0  # seconds of the first game before gates_waking
+var story_on := true  # the Settings row "Story cards: On / Off", settings.cfg [story] cards
+var story_queue: Array = []  # ids waiting to be shown; the first one is on screen
+var story_end := ""  # first_win / first_loss to show on this game's end screen ("" none)
+
+
+# Unlocks story card id (once ever): into the Chronicle, and shown if show and
+# the story cards are on. Returns true if it was new.
+func story_unlock(id: String, show := true) -> bool:
+	if profile.is_empty():
+		profile = new_profile()
+	if not STORY_CARDS.has(id) or profile.chronicle.has(id):
+		return false
+	profile.chronicle[id] = Time.get_date_string_from_system()
+	save_profile()
+	if show and story_on:
+		if id in ["first_win", "first_loss"]:
+			story_end = id
+		elif not id in story_queue:
+			story_queue.append(id)
+	return true
+
+
+# For the ui: the card for this game's end screen, {id, text, who}, or {}.
+func end_story_card() -> Dictionary:
+	if story_end == "" or not story_on:
+		return {}
+	return {"id": story_end, "text": STORY_CARDS[story_end]["text"], "who": STORY_CARDS[story_end]["who"]}
+
+
+# For the ui: the end screen's card was closed (or faded).
+func end_story_done() -> void:
+	story_end = ""
+
+
+# For the ui's Chronicle page: every card in story order, {id, who, text, hint,
+# date ("" while locked, then text and who are for the ui to hide)}.
+func chronicle_list() -> Array:
+	var out := []
+	var got: Dictionary = profile.get("chronicle", {})
+	for id: String in STORY_CARDS:
+		var c: Dictionary = STORY_CARDS[id]
+		out.append({"id": id, "who": c.who, "text": c.text, "hint": c.hint, "date": got.get(id, "")})
+	return out
+
+
+func story_cards_on() -> bool:
+	return story_on
+
+
+# The Settings row. main.gd also saves it (settings.cfg [story] cards, written
+# by save_settings() in game_world.gd).
+func set_story_cards(on: bool) -> void:
+	story_on = on
+	story_queue.clear()
+	story_end = ""
+
+
+# ---------------------------------------------------------------- holiday festivals
+# Looks only (game_world.gd's apply_festival() dresses the valley up): nothing
+# about play changes, so every computer uses its own local date and nothing is
+# sent. Picked when a game starts. The Settings row "Festivals" (festivals_on,
+# settings.cfg [graphics] festivals) turns them off. Test option (debug builds):
+# --festival=frostfall / lantern / paint / none.
+const FESTIVALS := ["frostfall", "lantern", "paint"]
+const FESTIVAL_NAMES := {"frostfall": "Frostfall Fair", "lantern": "Lantern Night", "paint": "Spring Paint Day"}
+# The ui's festival banner line
+const FESTIVAL_BANNERS := {
+	"frostfall": "Frostfall Fair! Snow on the trees, ribbons on the gates, and warm scarves for the guard.",
+	"lantern": "Lantern Night! Pumpkin lanterns on every tower. Even the bones are wearing hats.",
+	"paint": "Spring Paint Day! Every fallen monster leaves a splash of color.",
+}
+var festivals_on := true
+
+
+# Today's festival on this computer: "", "frostfall", "lantern" or "paint".
+func festival_today() -> String:
+	if OS.is_debug_build():
+		for a in OS.get_cmdline_user_args():
+			if a.begins_with("--festival="):
+				var f := a.trim_prefix("--festival=")
+				return f if f in FESTIVALS else ""
+	if not festivals_on:
+		return ""
+	var d := Time.get_date_dict_from_system()
+	return festival_on(d.year, d.month, d.day)
+
+
+# The festival on a date: Frostfall Fair Dec 18 - Jan 1, Lantern Night Oct 24 -
+# Nov 1, Spring Paint Day from 3 days before to 3 days after Easter Sunday.
+func festival_on(y: int, m: int, d: int) -> String:
+	if (m == 12 and d >= 18) or (m == 1 and d == 1):
+		return "frostfall"
+	if (m == 10 and d >= 24) or (m == 11 and d == 1):
+		return "lantern"
+	var e := easter(y)
+	var day := func(mm: int, dd: int) -> int:
+		return int(Time.get_unix_time_from_datetime_dict({"year": y, "month": mm, "day": dd}) / 86400)
+	if absi(day.call(m, d) - day.call(e.x, e.y)) <= 3:
+		return "paint"
+	return ""
+
+
+# Easter Sunday in year y (Gregorian, the anonymous algorithm): Vector2i(month, day).
+func easter(y: int) -> Vector2i:
+	var a := y % 19
+	var b := y / 100
+	var c := y % 100
+	var dd := b / 4
+	var e := b % 4
+	var f := (b + 8) / 25
+	var g := (b - f + 1) / 3
+	var h := (19 * a + b - dd - g + 15) % 30
+	var i := c / 4
+	var k := c % 4
+	var l := (32 + 2 * e + 2 * i - h - k) % 7
+	var mm := (a + 11 * h + 22 * l) / 451
+	var month := (h + l - 7 * mm + 114) / 31
+	var day := (h + l - 7 * mm + 114) % 31 + 1
+	return Vector2i(month, day)
+
+
 # ---------------------------------------------------------------- achievements and profile
 # Each player's own stats and achievements, kept on their own computer in
 # PROFILE_FILE (apart from settings.cfg). The host (or a player alone) watches the
@@ -1713,7 +2130,7 @@ func tip_click(_p: Vector2) -> bool:
 # apply_profile_update() with it). That happens at every wave start, at the end
 # of a game, and right away for the host's own achievements.
 # Achievements, best waves and wins per level only count on the Default map and
-# the daily challenge's map (map_counts() in main.gd); games, kills, play time and
+# the daily and weekly challenges' maps (map_counts() in main.gd); games, kills, play time and
 # towers count on any map. Headless runs never write the profile.
 #
 # For the ui (game_ui.gd): profile_stats(), achievement_list(), pop_achievement()
@@ -1722,11 +2139,12 @@ func tip_click(_p: Vector2) -> bool:
 const PROFILE_FILE := "user://profile.cfg"
 const JOIN_BY := 60  # a win or an endless wave counts only for players in the game by this wave (20% of MAX_WAVE)...
 const JOIN_BY_DAILY := 8  # ...and by this wave in the daily challenge
-const ACHIEVEMENT_GROUPS := ["Levels", "Endless", "Daily", "Abilities", "Towers", "Monsters", "Together"]
+const JOIN_BY_WEEKLY := 20  # ...and in the weekly challenge
+const ACHIEVEMENT_GROUPS := ["Levels", "Endless", "Daily", "Weekly", "Abilities", "Towers", "Monsters", "Together"]
 # goal: the number the progress bar fills to (0: no bar). counter: what it counts
 # (a key in the profile's progress, or one of the keys achievement_progress() works out).
 const ACHIEVEMENTS := [
-	{"id": "warming_up", "name": "Warming Up", "desc": "Reach wave 30 (any level, not a daily).", "group": "Levels", "goal": 30, "counter": "best_wave"},
+	{"id": "warming_up", "name": "Warming Up", "desc": "Reach wave 30 (any level, not a challenge).", "group": "Levels", "goal": 30, "counter": "best_wave"},
 	{"id": "easy_win", "name": "Easy Does It", "desc": "Win on Easy.", "group": "Levels", "goal": 0, "counter": ""},
 	{"id": "normal_win", "name": "Holding the Line", "desc": "Win on Normal.", "group": "Levels", "goal": 0, "counter": ""},
 	{"id": "hard_win", "name": "Hard Earned", "desc": "Win on Hard.", "group": "Levels", "goal": 0, "counter": ""},
@@ -1738,6 +2156,8 @@ const ACHIEVEMENTS := [
 	{"id": "daily_win", "name": "Daily Bread", "desc": "Win a daily challenge (beat wave 40).", "group": "Daily", "goal": 0, "counter": ""},
 	{"id": "daily_7", "name": "Habit", "desc": "Win daily challenges on 7 different days.", "group": "Daily", "goal": 7, "counter": "daily_days"},
 	{"id": "daily_twists", "name": "Twist Master", "desc": "Win a daily with each of the 6 twists.", "group": "Daily", "goal": 6, "counter": "daily_twists"},
+	{"id": "weekly_win", "name": "Week Warrior", "desc": "Win a weekly challenge (beat wave 100).", "group": "Weekly", "goal": 0, "counter": ""},
+	{"id": "weekly_4", "name": "Regular", "desc": "Win weekly challenges in 4 different weeks.", "group": "Weekly", "goal": 4, "counter": "weekly_weeks"},
 	{"id": "meteor_20", "name": "Meteor Shower", "desc": "Kill 20 or more monsters with one Meteor.", "group": "Abilities", "goal": 0, "counter": ""},
 	{"id": "freeze_40", "name": "Ice Age", "desc": "Use Freeze all while 40 or more monsters are on the map.", "group": "Abilities", "goal": 0, "counter": ""},
 	{"id": "hands_off", "name": "Hands Off", "desc": "Win without using Meteor or Freeze all yourself.", "group": "Abilities", "goal": 0, "counter": ""},
@@ -1773,8 +2193,10 @@ var profile_seconds := 0.0  # play time not written into the profile yet (main.g
 
 
 # An empty profile: {stats: {key: n}, levels: [per level {games, best, wins,
-# endless}], daily: {played, won, dates, twists}, towers: {type: {built, damage,
-# kills}}, progress: {key: n}, achievements: {id: date earned}}.
+# endless}], daily: {played, won, dates, twists}, weekly: {played, won, weeks
+# (ids won)}, towers: {type: {built, damage,
+# kills}}, progress: {key: n}, achievements: {id: date earned}, chronicle: {story
+# card id: date unlocked}}.
 func new_profile() -> Dictionary:
 	var stats := {}
 	for k: String in PROFILE_STATS:
@@ -1789,7 +2211,8 @@ func new_profile() -> Dictionary:
 	for k: String in PROGRESS_KEYS:
 		progress[k] = 0
 	return {"stats": stats, "levels": levels, "daily": {"played": 0, "won": 0, "dates": [], "twists": [], "best_streak": 0},
-			"towers": tower_stats, "progress": progress, "achievements": {}}
+			"weekly": {"played": 0, "won": 0, "weeks": []}, "towers": tower_stats, "progress": progress, "achievements": {},
+			"chronicle": {}}
 
 
 # A whole number from a file or the network (0 for anything else).
@@ -1828,6 +2251,13 @@ func read_profile(path: String) -> Dictionary:
 					out.daily[k].append(s)
 	# A profile from before best_streak gets it from its won dates (at least its current streak)
 	out.daily.best_streak = maxi(count_of(cfg.get_value("daily", "best_streak", 0)), longest_streak(out.daily.dates))
+	out.weekly.played = count_of(cfg.get_value("weekly", "played", 0))
+	out.weekly.won = count_of(cfg.get_value("weekly", "won", 0))
+	var weeks: Variant = cfg.get_value("weekly", "weeks", [])
+	if weeks is Array or weeks is PackedStringArray:
+		for s: Variant in weeks:
+			if weekly_valid(s) and not s in out.weekly.weeks:
+				out.weekly.weeks.append(s)
 	for type: String in TOWER_TYPES:
 		var d: Variant = cfg.get_value("towers", type, {})
 		if d is Dictionary:
@@ -1843,6 +2273,12 @@ func read_profile(path: String) -> Dictionary:
 			var date: Variant = cfg.get_value("achievements", id, "")
 			if id in ids and date is String:
 				out.achievements[id] = date.left(10)
+	# The story cards unlocked (see STORY_CARDS): id = the date
+	if cfg.has_section("chronicle"):
+		for id: String in cfg.get_section_keys("chronicle"):
+			var date: Variant = cfg.get_value("chronicle", id, "")
+			if STORY_CARDS.has(id) and date is String:
+				out.chronicle[id] = date.left(10)
 	return out
 
 
@@ -1855,12 +2291,16 @@ func write_profile(path: String) -> Error:
 		cfg.set_value("levels", DIFFICULTIES[i].to_lower(), profile.levels[i])
 	for k: String in profile.daily:
 		cfg.set_value("daily", k, profile.daily[k])
+	for k: String in profile.weekly:
+		cfg.set_value("weekly", k, profile.weekly[k])
 	for type: String in TOWER_TYPES:
 		cfg.set_value("towers", type, profile.towers[type])
 	for k: String in PROGRESS_KEYS:
 		cfg.set_value("progress", k, profile.progress[k])
 	for id: String in profile.achievements:
 		cfg.set_value("achievements", id, profile.achievements[id])
+	for id: String in profile.chronicle:
+		cfg.set_value("chronicle", id, profile.chronicle[id])
 	return cfg.save(path)
 
 
@@ -1889,6 +2329,8 @@ func save_profile() -> void:
 func reset_profile() -> void:
 	profile = new_profile()
 	achievement_queue.clear()
+	story_queue.clear()  # the Chronicle starts over too
+	story_end = ""
 	profile_seconds = 0.0
 	if DisplayServer.get_name() != "headless" and FileAccess.file_exists(PROFILE_FILE):
 		DirAccess.remove_absolute(PROFILE_FILE)
@@ -1917,8 +2359,9 @@ func send_profile_update(_slot: int, _data: Dictionary) -> void:
 #   earned: [ids] achievements the host judged earned
 #   counts: this map counts for achievements, best waves and level wins
 #   start: a new game for this player (counted once: not again for a loaded game)
-#   level (index in DIFFICULTIES), daily (date or ""), twist, wave, endless
-#   there: the player was in the game by JOIN_BY (JOIN_BY_DAILY) wave
+#   level (index in DIFFICULTIES), daily (date or ""), weekly (week id or ""),
+#   twist, wave, endless
+#   there: the player was in the game by JOIN_BY (JOIN_BY_DAILY, JOIN_BY_WEEKLY) wave
 #   result: "" while playing, "won", "lost", or "endless_end" (an endless run ended)
 #   mp: the game had 2 or more players (with a result)
 func apply_profile_update(data: Variant) -> void:
@@ -1929,6 +2372,7 @@ func apply_profile_update(data: Variant) -> void:
 	var counts: bool = data.get("counts") == true
 	var level: int = data.get("level") if data.get("level") is int and data.level >= 0 and data.level < DIFFICULTIES.size() else -1
 	var daily: String = data.get("daily") if data.get("daily") is String and data.daily.length() <= 16 else ""
+	var weekly: String = data.get("weekly") if daily == "" and weekly_valid(data.get("weekly")) else ""
 	var w: int = count_of(data.get("wave", 0))
 	var there: bool = data.get("there") == true
 	var result: String = data.get("result") if data.get("result") in ["won", "lost", "endless_end"] else ""
@@ -1958,10 +2402,12 @@ func apply_profile_update(data: Variant) -> void:
 		stats.games += 1
 		if counts and daily != "":
 			profile.daily.played += 1
+		elif counts and weekly != "":
+			profile.weekly.played += 1
 		elif counts and level >= 0:
 			profile.levels[level].games += 1
-	# How far the game got
-	if counts and daily == "" and level >= 0:
+	# How far the game got (not in the challenges: they have their own rules)
+	if counts and daily == "" and weekly == "" and level >= 0:
 		var lv: Dictionary = profile.levels[level]
 		lv.best = maxi(lv.best, mini(w, MAX_WAVE))
 		if data.get("endless") == true and there:
@@ -1983,6 +2429,10 @@ func apply_profile_update(data: Variant) -> void:
 			var twist: Variant = data.get("twist")
 			if twist is String and DAILY_TWISTS.has(twist) and not twist in profile.daily.twists:
 				profile.daily.twists.append(twist)
+		elif weekly != "":
+			profile.weekly.won += 1
+			if not weekly in profile.weekly.weeks:
+				profile.weekly.weeks.append(weekly)
 		elif level >= 0:
 			profile.levels[level].wins += 1
 	# Achievements: the host's verdicts, then the counters this computer keeps
@@ -2022,6 +2472,8 @@ func achievement_progress(a: Dictionary) -> int:
 			return profile.daily.dates.size()
 		"daily_twists":
 			return profile.daily.twists.size()
+		"weekly_weeks":
+			return profile.weekly.weeks.size()
 	return profile.progress.get(a.counter, 0)
 
 
@@ -2056,6 +2508,7 @@ func pop_achievement() -> Dictionary:
 #   daily: {played, won, days (different days won), twists (won with), streak
 #     (days in a row won, up to today or yesterday), best_streak (the longest
 #     streak so far, kept in profile.cfg)}
+#   weekly: {played, won, weeks (different weeks won)}
 #   towers: [{type, name, built, damage, share (of all tower damage, 0-1), kills}]
 #   favourite: the most built type (ties: more damage), "" before any tower
 #   earned, total: achievements earned and how many there are
@@ -2083,6 +2536,7 @@ func profile_stats() -> Dictionary:
 	return {"stats": stats, "levels": levels, "towers": tower_list, "favourite": favourite,
 			"daily": {"played": d.played, "won": d.won, "days": d.dates.size(), "twists": d.twists.size(), "streak": daily_streak(),
 				"best_streak": maxi(d.best_streak, daily_streak())},
+			"weekly": {"played": profile.weekly.played, "won": profile.weekly.won, "weeks": profile.weekly.weeks.size()},
 			"earned": profile.achievements.size(), "total": ACHIEVEMENTS.size()}
 
 

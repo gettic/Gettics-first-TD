@@ -182,6 +182,10 @@ func check_wave_votes() -> bool:
 	return false
 
 
+func set_mood_from_host(_m: Variant) -> void:
+	pass
+
+
 func new_game() -> void:
 	pass
 
@@ -265,7 +269,7 @@ func stop_joining(text: String) -> void:
 func accept_offer(keep: bool) -> void:
 	if net_mode != "map_offer" or map_offer.is_empty():
 		return
-	map_offer.keep = keep
+	map_offer.keep = keep and not offer_is_weekly()  # a week's map is made again from its id
 	map_offer.accepted = true
 	net_try_join.rpc_id(1, my_name(), map_offer.hash, true)
 
@@ -501,7 +505,7 @@ func _on_games_listed(result: int, code: int, _headers: PackedStringArray, body:
 # Each board is named after the last wave, this number and the difficulty level
 # ("300w-3-hard"): raise the number after a balance change, so new scores aren't
 # mixed with ones from the old rules. Each level has its own board (and stats).
-const BOARD_SEASON := 5  # 2: tower specializations, 3: difficulty levels, 4: abilities and endless mode, 5: Barracks
+const BOARD_SEASON := 6  # 2: tower specializations, 3: difficulty levels, 4: abilities and endless mode, 5: Barracks, 6: Grimwhistle
 const BOARD_ROWS := 10
 
 var board_open := false  # the leaderboard box in the Esc menu
@@ -520,12 +524,14 @@ var score_http: HTTPRequest
 
 # The board a game's score goes on: "300w-4-hard", "endless-4-hard" for a run
 # kept going in endless mode (see keep_going() in main.gd), or "daily-2026-11-02"
-# for the daily challenge. endless_board: -1 follows the game (daily, endless),
-# 0 the normal board, 1 the endless board.
+# for the daily challenge, "weekly-2026-W45" for the weekly one. endless_board:
+# -1 follows the game (daily, weekly, endless), 0 the normal board, 1 the endless board.
 func board_id(level := -1, endless_board := -1) -> String:
 	var d := difficulty if level < 0 else level
 	if endless_board < 0 and daily_date != "":
 		return daily_board_id(daily_date)
+	if endless_board < 0 and weekly_id != "":
+		return weekly_board_id(weekly_id)
 	if endless_board == 1 or (endless_board < 0 and endless):
 		return "endless-%d-%s" % [BOARD_SEASON, DIFFICULTIES[d].to_lower()]
 	return "%dw-%d-%s" % [MAX_WAVE, BOARD_SEASON, DIFFICULTIES[d].to_lower()]
@@ -564,8 +570,12 @@ func submit_score() -> void:
 	# A loaded game never goes on a leaderboard (it could be loaded again and again)
 	if from_save:
 		return
-	# Only the Default map or the day's daily map: on a map of your own the waves can be made easy
-	var map_ok: bool = map_rows_text == DEFAULT_MAP if daily_date == "" else map_rows_text == daily_map(daily_date).text
+	# Only the Default map, the day's daily map or the week's weekly map: on a map of your own the waves can be made easy
+	var map_ok: bool = map_rows_text == DEFAULT_MAP
+	if daily_date != "":
+		map_ok = map_rows_text == daily_map(daily_date).text
+	elif weekly_id != "":
+		map_ok = map_rows_text == weekly_map(weekly_id).text
 	if relay_url == "" or not map_ok or score_http != null or not scores_allowed():
 		return
 	var names := []
@@ -604,7 +614,13 @@ func _on_score_sent(result: int, code: int, _headers: PackedStringArray, body: P
 		return
 	board_asked = -100.0  # show the new list next time
 	board_saved.erase(difficulty)
-	var list := "daily leaderboard" if daily_date != "" else ("endless leaderboard" if endless else "leaderboard")
+	var list := "leaderboard"
+	if daily_date != "":
+		list = "daily leaderboard"
+	elif weekly_id != "":
+		list = "weekly leaderboard"
+	elif endless:
+		list = "endless leaderboard"
 	var text := "You're #%d on the %s!" % [int(r.rank), list]
 	if player_count() > 1:
 		text = "Your team is #%d on the %s!" % [int(r.rank), list]
@@ -909,6 +925,59 @@ func net_set_daily(date: Variant) -> void:
 		if daily_date != date and wave == 0:
 			play_sound("daily_start")
 		daily_date = date
+
+
+# ----- weekly challenge (the rules, week ids and map pick are in game_base.gd)
+
+# "weekly-2026-W45"; "-r2" and up once WEEKLY_VERSION is raised, so games with
+# other weekly rules never share a list (the server accepts both).
+func weekly_board_id(id: String) -> String:
+	return "weekly-" + id + ("-r%d" % WEEKLY_VERSION if WEEKLY_VERSION > 1 else "")
+
+
+# A map offer for the weekly challenge (a week with a map of its own): it's made
+# again from the week id, so it's never kept.
+func offer_is_weekly() -> bool:
+	var n: String = map_offer.get("name", "")
+	if not n.begins_with("Weekly "):
+		return false
+	var id := n.trim_prefix("Weekly ")
+	return weekly_valid(id) and map_offer.get("rows") == weekly_map(id).text
+
+
+# Host: start_weekly() (main.gd) tells the players already there (nobody, so far).
+func send_weekly(id: String) -> void:
+	send_all("net_set_weekly", [id])
+
+
+# The host's weekly challenge (its week id, "" for none), when we join a game
+# playing one. Only used when our map (from the host) really is that week's map.
+# Its name sorts after net_refused (see net_say).
+@rpc("authority", "call_remote", "reliable")
+func net_set_weekly(id: Variant) -> void:
+	if net_mode != "client" or not id is String:
+		return
+	if id == "":
+		weekly_id = ""
+	elif weekly_valid(id) and map_rows_text == weekly_map(id).text:
+		if weekly_id != id and wave == 0:
+			play_sound("daily_start")
+		weekly_id = id
+
+
+# ----- the weather (the host picks the mood, see pick_mood() in main.gd)
+
+# Host: the mood for everyone (a few bytes, only when it changes).
+func send_mood(m: String) -> void:
+	send_all("net_set_mood", [m])
+
+
+# The host's mood. set_mood_from_host() (main.gd) checks it's one of MOODS.
+# Its name sorts after net_refused (see net_say).
+@rpc("authority", "call_remote", "reliable")
+func net_set_mood(m: Variant) -> void:
+	if net_mode == "client":
+		set_mood_from_host(m)
 
 
 # ----- pings (Alt + click on the map, see show_ping())
@@ -1357,7 +1426,9 @@ func decode_monster(id: int, data: PackedByteArray, at: int) -> Enemy:
 		e = make_enemy(ENEMY_KINDS[data[at + 6] & 3])
 		e.id = id
 		e.pos = p
-		# Its trait (splitter, splitling, healer); splitlings are smaller, like on the host
+		# Its trait (splitter, splitling, healer; a boss: Grimwhistle, with his
+		# radius); splitlings are smaller, like on the host. The look follows
+		# the trait in game_world.gd (special_look()).
 		apply_special_bits(e, data[at + 6])
 		if e.special == "splitling":
 			e.radius *= 0.75
@@ -1458,6 +1529,9 @@ func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant) -
 		net_set_endless.rpc_id(peer, true)
 	if daily_date != "":
 		net_set_daily.rpc_id(peer, daily_date)
+	if weekly_id != "":
+		net_set_weekly.rpc_id(peer, weekly_id)
+	net_set_mood.rpc_id(peer, mood)  # always: the joiner's own game may have had another mood
 	for t: Tower in towers.values():
 		net_tower.rpc_id(peer, t.cell, t.type, t.level, t.owner, t.spent, t.mode, t.path)
 	# Joining a game that just ended: its stats too
@@ -1548,6 +1622,7 @@ func net_welcome(slot: Variant, map: Variant) -> void:
 	net_mode = "client"
 	clear_world()
 	daily_date = ""  # the host says if it plays the daily challenge (net_set_daily)
+	weekly_id = ""  # ...or the weekly one (net_set_weekly)
 	if not rows.is_empty():
 		if own_map.is_empty():
 			own_map = [map_rows_text, map_name]
@@ -1843,6 +1918,28 @@ func net_boom(pos: Vector2, r: float) -> void:
 @rpc("authority", "call_remote", "unreliable_ordered")
 func net_frost_ring(pos: Vector2, r: float) -> void:
 	add_frost_ring(pos, r)
+
+
+# Grimwhistle e did his Crescendo: the look and sound (game_audio.gd and
+# game_world.gd, through super), and the host tells the other players (his id,
+# once every CRESCENDO_EVERY seconds). On the players it runs from
+# net_show_crescendo, so the overrides before this one must only show and play.
+func crescendo_fx(e: Enemy) -> void:
+	super(e)
+	# Not while the replay plays it back (replay_on is in main.gd)
+	if net_mode == "host" and get("replay_on") != true:
+		send_all("net_show_crescendo", [e.id])
+
+
+# The host's Crescendo, on the players. Reliable: it's rare, and the effect
+# shouldn't be missed. Its name sorts after net_refused (see net_say).
+@rpc("authority", "call_remote", "reliable")
+func net_show_crescendo(id: Variant) -> void:
+	if net_mode != "client" or not id is int:
+		return
+	var e: Enemy = enemy_by_id.get(id)
+	if e != null and not e.dead and e.special == "conductor":
+		crescendo_fx(e)
 
 
 # Blizzard's hit: a pale blue ring the size of its area. A placeholder (the

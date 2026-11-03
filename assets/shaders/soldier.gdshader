@@ -12,6 +12,7 @@ uniform float grad_low = 0.75;
 uniform float grad_high = 1.15;
 uniform float grad_top = 0.5;
 uniform float top_light = 0.2;
+global uniform vec4 mood_rim;  // the weather's rim (see painted.gdshader)
 varying float wy;
 varying vec3 team;
 varying float mask;
@@ -33,5 +34,7 @@ void fragment() {
 	ROUGHNESS = 0.8;
 	SPECULAR = 0.3;
 	float rim = pow(clamp(1.0 - dot(NORMAL, VIEW), 0.0, 1.0), 3.0);
-	EMISSION = rim_color * mix(vec3(1.0), col, 0.5) * rim * rim_strength;
+	vec3 rc = mood_rim.a > 0.0 ? mood_rim.rgb : rim_color;
+	float rs = mood_rim.a > 0.0 ? rim_strength * mood_rim.a : rim_strength;
+	EMISSION = rc * mix(vec3(1.0), col, 0.5) * rim * rs;
 }

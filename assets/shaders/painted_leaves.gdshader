@@ -15,6 +15,8 @@ uniform float grad_low = 0.7;    // brightness at the foot (height 0)
 uniform float grad_high = 1.1;   // brightness at grad_top
 uniform float grad_top = 1.2;    // world height
 uniform float top_light = 0.15;  // extra light on surfaces that face up
+global uniform vec4 mood_rim;  // the weather's rim (see painted.gdshader)
+global uniform float fest_snow;  // Frostfall Fair: snow on the leaves' tops (0-1, see apply_festival())
 varying float wy;
 varying vec3 vcol;
 varying float leafy;
@@ -43,9 +45,13 @@ void fragment() {
 	vec3 wn = (INV_VIEW_MATRIX * vec4(NORMAL, 0.0)).xyz;
 	col *= mix(grad_low, grad_high, clamp(wy / grad_top, 0.0, 1.0));
 	col *= 1.0 + top_light * max(wn.y, 0.0);
+	float snow = fest_snow * clamp(leafy, 0.0, 1.0) * smoothstep(0.74, 0.9, wn.y + (dot(leaf, vec3(0.333)) - 0.32) * 0.5);
+	col = mix(col, vec3(0.86, 0.9, 0.97) * (0.8 + 0.25 * clamp(wy / grad_top, 0.0, 1.0)), snow);
 	ALBEDO = col;
 	ROUGHNESS = 0.8;
 	SPECULAR = 0.3;
 	float rim = pow(clamp(1.0 - dot(NORMAL, VIEW), 0.0, 1.0), rim_power);
-	EMISSION = rim_color * mix(vec3(1.0), col, 0.5) * rim * rim_strength;
+	vec3 rc = mood_rim.a > 0.0 ? mood_rim.rgb : rim_color;
+	float rs = mood_rim.a > 0.0 ? rim_strength * mood_rim.a : rim_strength;
+	EMISSION = rc * mix(vec3(1.0), col, 0.5) * rim * rs;
 }

@@ -33,6 +33,10 @@ const SOUNDS := {
 	"shield_break": {"db": -10.0, "max": 3, "gap": 0.08, "pitch": 0.08},
 	"heal": {"db": -18.0, "max": 2, "gap": 0.5, "pitch": 0.05},
 	"split": {"db": -13.0, "max": 3, "gap": 0.07, "pitch": 0.1},
+	# Grimwhistle (wave 300)
+	"grim_entrance": {"db": -3.0, "max": 1, "gap": 1.0, "duck": 8.0, "important": true},
+	"crescendo": {"db": -8.0, "max": 2, "gap": 0.3, "pitch": 0.04, "duck": 2.0, "important": true},
+	"grim_fall": {"db": -3.0, "max": 1, "gap": 0.5, "duck": 6.0, "important": true},
 	# Abilities
 	"meteor": {"db": -3.0, "max": 2, "pitch": 0.03, "duck": 5.0, "important": true},
 	"freeze": {"db": -5.0, "max": 1, "gap": 0.5, "duck": 4.0, "important": true},
@@ -44,6 +48,10 @@ const SOUNDS := {
 	"endless_start": {"db": -3.0, "max": 1, "gap": 1.0, "duck": 8.0, "important": true},
 	"daily_start": {"db": -4.0, "max": 1, "gap": 1.0, "duck": 6.0, "important": true},
 	"replay_start": {"db": -6.0, "max": 1, "gap": 0.5, "important": true},
+	"story_page": {"db": -12.0, "max": 1, "gap": 0.5, "pitch": 0.04, "important": true},
+	"festival_frostfall": {"db": -7.0, "max": 1, "gap": 2.0, "duck": 5.0, "important": true},
+	"festival_lantern": {"db": -7.0, "max": 1, "gap": 2.0, "duck": 5.0, "important": true},
+	"festival_paint": {"db": -7.0, "max": 1, "gap": 2.0, "duck": 5.0, "important": true},
 	"build": {"db": -9.0, "max": 2, "gap": 0.05, "pitch": 0.05},
 	"upgrade": {"db": -9.0, "max": 2, "gap": 0.05, "pitch": 0.03},
 	"sell": {"db": -9.0, "max": 2, "gap": 0.05, "pitch": 0.05},
@@ -56,7 +64,7 @@ const SOUNDS := {
 	"denied": {"db": -12.0, "max": 1, "gap": 0.1, "important": true},
 }
 
-# The music: 4 layers of the same 68.6 s piece (3 variations) that play in step.
+# The music: 4 layers of the same 64 s dark-fantasy piece (16 bars) that play in step.
 # Each mood is a volume per layer; the layers fade over MUSIC_FADE seconds.
 const MUSIC_LAYERS := ["soft", "pad", "drive", "boss"]
 const MUSIC_MOODS := {"calm": [1.4, 1.0, 0.0, 0.0], "wave": [0.7, 1.0, 1.0, 0.0], "boss": [0.0, 0.8, 1.0, 1.0]}
@@ -99,6 +107,8 @@ var heard_state := ""
 var heard_towers := {}  # cell -> [level, owner]
 var heard_shields := {}  # Enemy -> true while its shield is up
 var heal_clock := {}  # Enemy -> game seconds to its next chime
+var heard_story := ""  # the story card on screen
+var heard_fresh := false  # a new game (wave 0) last frame (for the festival jingle)
 var ui_buttons := {}  # Rect2 -> [enabled, frame drawn] (see note_button())
 
 
@@ -330,7 +340,9 @@ func sound_hit(s: Shot) -> void:
 
 # A monster dies (drop_corpse(), on every computer and in the replay).
 func sound_death(e: Enemy) -> void:
-	if e.kind == "boss":
+	if e.special == "conductor":
+		play_sound("grim_fall", e.pos)
+	elif e.kind == "boss":
 		play_sound("boss_death", e.pos)
 	elif e.special == "split":
 		play_sound("split", e.pos)
@@ -344,6 +356,13 @@ func note_button(r: Rect2, enabled: bool) -> void:
 	if ui_buttons.size() > 300:
 		ui_buttons.clear()
 	ui_buttons[r] = [enabled, Engine.get_process_frames()]
+
+
+# Grimwhistle's Crescendo: on the host, on the players (net_show_crescendo) and
+# in the replay.
+func crescendo_fx(e: Enemy) -> void:
+	play_sound("crescendo", e.pos)
+	super(e)
 
 
 func ui_click(event: InputEvent) -> void:
@@ -373,6 +392,8 @@ func update_audio(_delta: float) -> void:
 	watch_towers()
 	watch_shields()
 	watch_healers(dt)
+	watch_story()
+	watch_festival()
 
 
 func music_mood(dt: float) -> String:
@@ -411,7 +432,10 @@ func update_music(dt: float) -> void:
 # one (not jumps, like loading or joining), and the game ending.
 func watch_game() -> void:
 	if heard_wave >= 0 and wave == heard_wave + 1 and state == "playing" and not held:
-		play_sound("boss_wave" if kind_for_wave(wave) == "boss" else "wave_start")
+		if grimwhistle_wave(wave):
+			play_sound("grim_entrance")
+		else:
+			play_sound("boss_wave" if kind_for_wave(wave) == "boss" else "wave_start")
 	heard_wave = wave
 	if heard_state == "playing" and wave > 0 and (state == "won" or state == "lost"):
 		play_sound("win" if state == "won" else "lose")
@@ -483,3 +507,22 @@ func watch_healers(dt: float) -> void:
 				play_sound("heal", e.pos)
 		next[e] = left
 	heal_clock = next
+
+
+# A page turn when a new story card shows (not Grimwhistle's: his entrance plays).
+func watch_story() -> void:
+	var tip := current_tip()
+	var id: String = tip.get("id", "") if tip.get("story", false) else ""
+	if id != "" and id != heard_story and id != "grimwhistle":
+		play_sound("story_page")
+	heard_story = id
+
+
+# The festival's jingle once when a new game starts (wave 0, like the ui's banner).
+func watch_festival() -> void:
+	var fresh: bool = state == "playing" and wave == 0 and get("editing") != true
+	if fresh and not heard_fresh and festivals_on:
+		var f := festival_today()
+		if f != "":
+			play_sound("festival_" + f)
+	heard_fresh = fresh

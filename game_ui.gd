@@ -81,6 +81,7 @@ func build_hud() -> void:
 	hud = Node2D.new()
 	layer.add_child(hud)
 	hud.draw.connect(draw_hud)
+	build_story_layer()
 	# The update notes go on top of the popup, cut off at their box
 	notes_clip = Control.new()
 	notes_clip.position = NOTES_RECT.position + Vector2(2, 2)
@@ -195,6 +196,8 @@ func update_visuals(delta: float) -> void:
 	update_notes_box()
 	update_save_boxes()
 	update_profile_boxes()
+	update_story_card(delta)
+	update_festival(delta)
 	if selected == null:
 		portrait_view.render_target_update_mode = SubViewport.UPDATE_DISABLED
 		return
@@ -621,6 +624,9 @@ func _input(event: InputEvent) -> void:
 	if ach_open and menu_open and ach_input(event):
 		get_viewport().set_input_as_handled()
 		return
+	if chron_open and menu_open and chron_input(event):
+		get_viewport().set_input_as_handled()
+		return
 	# The leaderboard box: Left / Right switch the level's board
 	if board_open and menu_open and event is InputEventKey and event.pressed and event.keycode in [KEY_LEFT, KEY_RIGHT]:
 		step_board_level(-1 if event.keycode == KEY_LEFT else 1)
@@ -720,17 +726,22 @@ const SOLDIER_BAR_W := 14.0  # a soldier's health bar (monsters' are wider)
 func draw_health_bars() -> void:
 	for e in enemies:
 		# Only hurt monsters show a bar, like in Warcraft III, so big waves stay readable
-		if e.hp >= e.max_hp:
+		# (Grimwhistle always shows his, with his name over it)
+		var grim := e.kind == "boss" and e.special == "conductor"
+		if e.hp >= e.max_hp and not grim:
 			continue
 		# Just above the monster's model (its height is the 4th part of its look)
 		var top: float = e.node.get_meta("mob")[3]
 		var p := camera.unproject_position(e.node.position + Vector3(0, top + 0.08, 0))
-		var w := e.radius * 2.4
+		var w := e.radius * (3.4 if grim else 2.4)
 		var bar := Vector2(p.x - w / 2.0, p.y)
 		# Black edge so the bar reads on grass and path alike
 		hud.draw_rect(Rect2(bar - Vector2(1, 1), Vector2(w + 2, 6)), Color(0, 0, 0, 0.85))
 		hud.draw_rect(Rect2(bar, Vector2(w, 4)), Color(0.3, 0.04, 0.02))
 		hud.draw_rect(Rect2(bar, Vector2(w * e.hp / e.max_hp, 4)), Color(0.2, 0.85, 0.2))
+		if grim:
+			hud.draw_rect(Rect2(bar - Vector2(2, 2), Vector2(w + 4, 8)), GRIM_COLOR, false, 1.0)
+			outlined(Vector2(p.x, bar.y - 6.0), GRIM_NAME, 14, GRIM_COLOR.lightened(0.45))
 	# Hurt Barracks soldiers (game_world.gd fills soldier_bars each frame): a
 	# smaller bar in the owner's color
 	for s: Array in soldier_bars:
@@ -855,10 +866,12 @@ func draw_top_bar() -> void:
 	resource(x, short(gold), 18, Color(1, 0.85, 0.3), "gold")
 	if gift_glow > 0.0:
 		draw_gift_glow(gold_end)
-	if daily_date != "" and state == "playing" and not menu_open:
+	if challenge_on() and state == "playing" and not menu_open:
 		draw_daily_banner()
+	if fest_name != "" and fest_t < FEST_SHOW and state == "playing" and not menu_open:
+		draw_festival_banner(TOP_BAR_H + (48 if challenge_on() else 9))
 	if held and state == "playing" and not menu_open:
-		draw_held_line(TOP_BAR_H + (48 if daily_date != "" else 9))
+		draw_held_line(TOP_BAR_H + (48 if challenge_on() else 9))
 
 
 # "12 / 300", or "312 (endless)" after the last wave (no "/ 9999").
@@ -1114,22 +1127,31 @@ func draw_wave_preview(x: float) -> void:
 
 
 func wave_chip_label(n: int) -> String:
+	if grimwhistle_wave(n):
+		return "GRIMWHISTLE"
 	var count := wave_count(n) * maxi(player_count(), 1)
 	return ("BOSS x%d" if kind_for_wave(n) == "boss" else "x%d") % count
+
+
+const GRIM_COLOR := Color(0.62, 0.38, 0.9)  # Grimwhistle's purple: his chip and name bar
 
 
 func wave_chip(r: Rect2, n: int, label: String) -> void:
 	var kind := kind_for_wave(n)
 	var boss := kind == "boss"
-	var col: Color = KIND_COLORS[kind]
+	var grim := grimwhistle_wave(n)
+	var col: Color = GRIM_COLOR if grim else KIND_COLORS[kind]
 	ui_button_bg(r, true, boss)
-	hud.draw_rect(r.grow(-2), Color(col, 0.16))
+	hud.draw_rect(r.grow(-2), Color(col, 0.22 if grim else 0.16))
 	if boss:
-		# A boss wave blinks red
+		# A boss wave blinks red (Grimwhistle's purple)
 		var a := 0.55 + 0.45 * sin(Time.get_ticks_msec() / 160.0)
-		hud.draw_rect(r.grow(2), Color(1, 0.3, 0.2, a), false, 2.0)
+		hud.draw_rect(r.grow(2), Color(GRIM_COLOR.lightened(0.2), a) if grim else Color(1, 0.3, 0.2, a), false, 2.0)
 	kind_icon(r.position + Vector2(13, r.size.y / 2.0 + 1), kind, 7.0)
-	text(r.position + Vector2(25, r.size.y / 2.0 + 5), label, 13, Color(1, 0.55, 0.45) if boss else UI_TEXT)
+	var label_col := Color(1, 0.55, 0.45) if boss else UI_TEXT
+	if grim:
+		label_col = GRIM_COLOR.lightened(0.5)
+	text(r.position + Vector2(25, r.size.y / 2.0 + 5), label, 13, label_col)
 	var special := wave_special(n)
 	if special != "":
 		special_badge(Vector2(r.end.x - 1, r.position.y), special)
@@ -1193,6 +1215,13 @@ func draw_chip_tip(n: int) -> void:
 		lines[0] = "%d %s monster%s (%d from each gate)." % [count, kind, "" if count == 1 else "s", wave_count(n)]
 	var title := "Wave %d" % n
 	var col := Color(1, 0.85, 0.3)
+	if grimwhistle_wave(n):
+		var mages := maxi(wave_count(n) - 1, 0)
+		lines = ["%s and %d bone mage%s, from each gate." % [GRIM_NAME, mages, "" if mages == 1 else "s"],
+				"His Crescendo frees the monsters near him from slows and holds.",
+				"When he falls, the rest crumble and the Ring is won."]
+		title += ":  Grimwhistle"
+		col = GRIM_COLOR.lightened(0.3)
 	var special := wave_special(n)
 	if special != "":
 		var info := special_info(special)
@@ -1303,6 +1332,12 @@ func draw_selected() -> void:
 	text(MODE_RECT.position + Vector2(20, 17), "Target: " + TARGET_MODES[selected.mode], 14, UI_TEXT if mine else UI_DIM)
 
 
+# Can this tower type be built in the challenge being played? ("Two towers"; always outside one.)
+func twist_allows(type: String) -> bool:
+	var rules := challenge_rules()
+	return rules.is_empty() or type in rules.get("towers", TOWER_TYPES)
+
+
 # Does this tower's panel have the Target button? (A Barracks doesn't.)
 func has_target_button(t: Tower) -> bool:
 	return t != null and t.type != "barracks"
@@ -1341,7 +1376,7 @@ func draw_build_list() -> void:
 		var type: String = TOWER_TYPES[i]
 		var data: Dictionary = TOWERS[type]
 		var y := BAR_TOP + 57 + i * BUILD_ROW_H
-		var affordable: bool = gold >= data["cost"][0]
+		var affordable: bool = gold >= data["cost"][0] and twist_allows(type)
 		if build_type == type:
 			hud.draw_rect(build_row_rect(i), Color(1, 0.85, 0.3, 0.15))
 		gem(Vector2(x + 6, y - 5), 4.5, data["color"])
@@ -1425,14 +1460,16 @@ func draw_command_card() -> void:
 		for i in TOWER_TYPES.size():
 			var data: Dictionary = TOWERS[TOWER_TYPES[i]]
 			var r := tower_button_rect(i)
-			var affordable: bool = gold >= data["cost"][0]
+			var allowed := twist_allows(TOWER_TYPES[i])
+			var affordable: bool = gold >= data["cost"][0] and allowed
 			if r.size.y < CARD_SIZE:
 				draw_build_chip(r, i, data, affordable)
 				continue
-			card_button(r, str(i + 1), data["name"], gold_text(data["cost"][0]), true, build_type == TOWER_TYPES[i], affordable)
+			card_button(r, str(i + 1), data["name"], gold_text(data["cost"][0]), allowed, build_type == TOWER_TYPES[i], affordable)
 			gem(r.get_center() + Vector2(0, -2), 11.0, data["color"] if affordable else data["color"].darkened(0.4))
-	# Upgrade and Sell only work on your own selected tower
+	# Upgrade and Sell only work on your own selected tower (Sell not in a no-selling challenge)
 	var mine := selected != null and selected.owner == local_slot
+	var can_sell: bool = mine and not challenge_rules().get("no_sell", false)
 	var up_label := "Upgrade"
 	var up_cost := ""
 	var can_up := false
@@ -1446,8 +1483,8 @@ func draw_command_card() -> void:
 		up_label = "Q or E"  # level 5 picks a path: the 2 buttons above
 	card_button(UPGRADE_RECT, "U", up_label, up_cost, can_up, false, can_up)
 	icon_upgrade(UPGRADE_RECT.get_center() + Vector2(0, -2), UI_GOLD_LIGHT if can_up else UI_DIM)
-	card_button(SELL_RECT, "X", "Sell", "+" + gold_text(selected.spent * 0.7) if mine else "", mine, false, true)
-	icon_coin(SELL_RECT.get_center() + Vector2(0, -2), 10.0, mine)
+	card_button(SELL_RECT, "X", "Sell", "+" + gold_text(selected.spent * 0.7) if can_sell else "", can_sell, false, true)
+	icon_coin(SELL_RECT.get_center() + Vector2(0, -2), 10.0, can_sell)
 	var w := wave_button()
 	var can_wave := wave < last_wave() and state == "playing" and monsters_left_to_spawn() == 0
 	card_button(WAVE_RECT, "Space", w[0], w[1], can_wave, local_slot in wave_votes, true)
@@ -1597,6 +1634,8 @@ func draw_card_tip(i: int) -> void:
 	elif i == CARD_SELL:
 		title = "Sell (X)"
 		lines = ["Get back %s gold for this tower." % short(selected.spent * 0.7)] if selected != null and selected.owner == local_slot else ["Select one of your towers first."]
+		if challenge_rules().get("no_sell", false):
+			lines = ["Towers can't be sold in this challenge (No selling)."]
 	elif i == CARD_WAVE:
 		title = "Next wave (SPACE)"
 		lines = [wave_tip(), next_wave_text()]
@@ -1788,6 +1827,13 @@ func draw_board() -> void:
 		var lv: int = rules.get("level", 1)
 		centered(board_tab_rect(0).position.y + 19, "Daily %s:  %s, %s level" % [board_daily_date(), rules.get("name", ""), DIFFICULTIES[lv]], 16, LEVEL_COLORS[lv])
 		sub = "%s  %d waves on the day's own map, the same for everyone." % [rules.get("desc", ""), DAILY_WAVES]
+	elif board_tab == "weekly":
+		# The weekly challenge: always Hard, the week's two twists
+		var id := board_weekly_week()
+		var rules := weekly_rules(id)
+		centered(board_tab_rect(0).position.y + 19, fit_text("Weekly %s:  %s, %s level" % [id, rules.get("name", ""), DIFFICULTIES[WEEKLY_LEVEL]], b.size.x - 40, 16), 16, LEVEL_COLORS[WEEKLY_LEVEL])
+		var ends := "Ends in %s." % time_left_text(weekly_ends_in()) if id == weekly_now() else "That week is over."
+		sub = "%d waves on the week's map (%s), the same for everyone. %s" % [WEEKLY_WAVES, weekly_map_label(id), ends]
 	else:
 		# A tab per level, in the level's color (Left / Right arrows switch too)
 		for i in DIFFICULTIES.size():
@@ -1841,6 +1887,8 @@ func draw_board() -> void:
 		var how := "Finish a game on the Default map at %s to get on this list." % DIFFICULTIES[board_level]
 		if board_tab == "daily":
 			how = "Play today's daily challenge (Esc menu) to get on this list."
+		elif board_tab == "weekly":
+			how = "Play this week's challenge (Esc menu) to get on this list."
 		elif board_tab == "endless":
 			how = "Win at %s and keep going (K) to get on this list." % DIFFICULTIES[board_level]
 		centered(below, how, 15, UI_GREY)
@@ -1854,26 +1902,37 @@ func draw_board() -> void:
 var settings_open := false  # the Settings box over the Esc menu
 
 
-# Each row of the Settings box: its name and the current choice.
+# Each row of the Settings box: its name, the current choice, its key, and
+# whether it counts from the next game (a small line under the name).
 func settings_rows() -> Array:
 	return [
-		["Graphics", "High" if graphics_high else "Low"],
-		["Window", "Fullscreen" if fullscreen else "Windowed"],
-		["3D resolution", "%d%%" % roundi(render_scale * 100.0)],
-		["Anti-aliasing", AA_NAMES[AA_MODES.find(aa_mode)]],
-		["Music", "%d%%" % roundi(music_volume * 100.0)],
-		["Sound effects", "%d%%" % roundi(effects_volume * 100.0)],
-		["Tutorial tips", "On" if tutorial_on() else "Off"],
+		["Graphics", "High" if graphics_high else "Low", "graphics", false],
+		["Window", "Fullscreen" if fullscreen else "Windowed", "window", false],
+		["3D resolution", "%d%%" % roundi(render_scale * 100.0), "scale", false],
+		["Anti-aliasing", AA_NAMES[AA_MODES.find(aa_mode)], "aa", false],
+		["Music", "%d%%" % roundi(music_volume * 100.0), "music", false],
+		["Sound effects", "%d%%" % roundi(effects_volume * 100.0), "effects", false],
+		["Tutorial tips", "On" if tutorial_on() else "Off", "tips", false],
+		["Story cards", "On" if story_cards_on() else "Off", "story", false],
+		["Weather", "Always day" if weather_setting == "day" else "Random", "weather", true],
+		["Festivals", "On" if festivals_on else "Off", "festivals", true],
 	]
 
 
+# The box is taller than SETTINGS_BOX (game_base.gd) so 10 rows fit
+const SETTINGS_TALL := Rect2(430, 58, 420, 600)
+const SETTINGS_TOP := 134  # the first row's button
+const SETTINGS_ROW_STEP := 42
+const SETTINGS_BACK := Rect2(560, 600, 160, 40)
+
+
 func settings_row_rect(i: int) -> Rect2:
-	return Rect2(SETTINGS_BUTTON_X, SETTINGS_ROW_Y + i * 48, 180, 34)
+	return Rect2(SETTINGS_BUTTON_X, SETTINGS_TOP + i * SETTINGS_ROW_STEP, 180, 34)
 
 
 # A click on a row's button picks the next choice; the 2 volume rows are sliders.
 func draw_settings() -> void:
-	var b := SETTINGS_BOX
+	var b := SETTINGS_TALL
 	hud.draw_rect(screen_rect(), Color(0, 0, 0, 0.5))
 	ui_box(b)
 	var title := "SETTINGS"
@@ -1882,44 +1941,56 @@ func draw_settings() -> void:
 	var rows := settings_rows()
 	for i in rows.size():
 		var r := settings_row_rect(i)
-		text(Vector2(b.position.x + 40, r.position.y + 23), rows[i][0], 17, UI_TEXT)
-		if i == 4 or i == 5:
-			volume_bar(r, music_volume if i == 4 else effects_volume, rows[i][1])
+		var later: bool = rows[i][3]
+		text(Vector2(b.position.x + 40, r.position.y + (17 if later else 23)), rows[i][0], 17, UI_TEXT)
+		if later:
+			text(Vector2(b.position.x + 40, r.position.y + 33), "from the next game", 12, UI_DIM)
+		if rows[i][2] in ["music", "effects"]:
+			volume_bar(r, music_volume if rows[i][2] == "music" else effects_volume, rows[i][1])
 		else:
 			button(r, rows[i][1])
-	centered(SETTINGS_BACK_RECT.position.y - 14, "F11 or Alt+Enter: fullscreen.  Lower 3D resolution: faster.", 13, UI_DIM)
-	button(SETTINGS_BACK_RECT, "Back (Esc)", true, true)
+	centered(SETTINGS_BACK.position.y - 14, "F11 or Alt+Enter: fullscreen.  Lower 3D resolution: faster.", 13, UI_DIM)
+	button(SETTINGS_BACK, "Back (Esc)", true, true)
 
 
 func settings_click(p: Vector2) -> void:
-	if SETTINGS_BACK_RECT.has_point(p):
+	if SETTINGS_BACK.has_point(p):
 		settings_open = false
 		return
-	for i in settings_rows().size():
+	var rows := settings_rows()
+	for i in rows.size():
 		if settings_row_rect(i).has_point(p):
-			match i:
-				0:
+			match rows[i][2]:
+				"graphics":
 					graphics_high = not graphics_high
 					apply_graphics()
-				1:
+				"window":
 					set_fullscreen(not fullscreen)
-				2:
+				"scale":
 					var scales := render_scales()
 					render_scale = scales[(scales.find(render_scale) + 1) % scales.size()]
 					apply_display()
-				3:
+				"aa":
 					aa_mode = AA_MODES[(AA_MODES.find(aa_mode) + 1) % AA_MODES.size()]
 					apply_display()
-				4, 5:
+				"music", "effects":
 					# Where the bar was clicked sets the volume (5% steps)
 					var r := settings_row_rect(i)
 					var v := snappedf(clampf((p.x - r.position.x - 8.0) / (r.size.x - 16.0), 0.0, 1.0), 0.05)
-					if i == 4:
+					if rows[i][2] == "music":
 						set_music_volume(v)
 					else:
 						set_effects_volume(v)
-				6:
+				"tips":
 					set_tutorial(not tutorial_on())  # saves itself
+				"story":
+					set_story_cards(not story_cards_on())  # saves itself
+				"weather":
+					# The next game's weather (pick_mood() in main.gd reads it)
+					weather_setting = WEATHER_SETTINGS[(WEATHER_SETTINGS.find(weather_setting) + 1) % WEATHER_SETTINGS.size()]
+				"festivals":
+					# The next game's decorations (festival_today() reads it)
+					festivals_on = not festivals_on
 			save_settings()
 
 
@@ -1941,14 +2012,15 @@ func board_tab_rect(i: int) -> Rect2:
 	return Rect2(left + i * (w + gap), BOARD_RECT.position.y + 104, w, 28)
 
 
-# ----- the leaderboard's lists: the normal game, endless mode and the daily challenge
+# ----- the leaderboard's lists: the normal game, endless mode, the daily and the weekly challenge
 
-const BOARD_TABS := [["normal", "Normal game"], ["endless", "Endless"], ["daily", "Daily challenge"]]
+const BOARD_TABS := [["normal", "Normal game"], ["endless", "Endless"], ["daily", "Daily challenge"], ["weekly", "Weekly challenge"]]
+const CHALLENGE_TABS := ["daily", "weekly"]  # one level each: no level tabs
 var board_tab := "normal"
 
 
 func board_mode_rect(i: int) -> Rect2:
-	var w := 150.0
+	var w := 140.0
 	var gap := 8.0
 	var left := (SCREEN_W - BOARD_TABS.size() * (w + gap) + gap) / 2.0
 	return Rect2(left + i * (w + gap), BOARD_RECT.position.y + 70, w, 28)
@@ -1959,11 +2031,27 @@ func board_daily_date() -> String:
 	return daily_date if daily_date != "" else daily_today()
 
 
+# The weekly list shows the week being played, or this week's.
+func board_weekly_week() -> String:
+	return weekly_id if weekly_id != "" else weekly_now()
+
+
+# "3 d 5 h", "5 h 12 min" or "12 min" (the weekly challenge's time left).
+func time_left_text(seconds: int) -> String:
+	var d := seconds / 86400
+	var h := (seconds % 86400) / 3600
+	if d > 0:
+		return "%d d %d h" % [d, h]
+	return "%d h %d min" % [h, (seconds % 3600) / 60] if h > 0 else "%d min" % maxi(seconds / 60, 1)
+
+
 # The box asks the server for board_id(level, 0) (see load_board()): here that's
 # the board of the list being shown.
 func board_id(level := -1, endless_board := -1) -> String:
 	if endless_board == 0 and board_tab == "daily":
 		return daily_board_id(board_daily_date())
+	if endless_board == 0 and board_tab == "weekly":
+		return weekly_board_id(board_weekly_week())
 	if endless_board == 0 and board_tab == "endless":
 		return super(level, 1)
 	return super(level, endless_board)
@@ -1971,7 +2059,12 @@ func board_id(level := -1, endless_board := -1) -> String:
 
 # Opens on the list of the game being played.
 func open_board() -> void:
-	set_board_tab("daily" if daily_date != "" else ("endless" if endless else "normal"))
+	if daily_date != "":
+		set_board_tab("daily")
+	elif weekly_id != "":
+		set_board_tab("weekly")
+	else:
+		set_board_tab("endless" if endless else "normal")
 	super()
 
 
@@ -1995,7 +2088,7 @@ func board_click(p: Vector2) -> void:
 				show_board_level(board_level)
 			return
 	for i in DIFFICULTIES.size():
-		if board_tab != "daily" and board_tab_rect(i).has_point(p):
+		if not board_tab in CHALLENGE_TABS and board_tab_rect(i).has_point(p):
 			if i != board_level:
 				show_board_level(i)
 			return
@@ -2284,11 +2377,13 @@ func ui_bar(r: Rect2, frac: float, col: Color) -> void:
 
 func toggle_menu() -> void:
 	# Esc in the reset question or Achievements goes back to the Profile, and from there to the menu
-	if menu_open and (profile_open or ach_open or reset_ask):
+	if menu_open and (profile_open or ach_open or chron_open or reset_ask):
 		if reset_ask:
 			reset_ask = false
 		elif ach_open:
 			ach_open = false
+		elif chron_open:
+			chron_open = false
 		else:
 			profile_open = false
 		return
@@ -3261,17 +3356,51 @@ func draw_gift_glow(gold_end: float) -> void:
 
 # ---------------------------------------------------------------- daily challenge
 
-# Under the top bar while playing the daily challenge: the day, its twist and level.
-func draw_daily_banner() -> void:
-	var rules := daily_rules()
+# Is a daily or weekly challenge being played? (Its banner shows under the top bar.)
+func challenge_on() -> bool:
+	return daily_date != "" or weekly_id != ""
+
+
+const BANNER_MAX_W := 820.0  # wider than this, the weekly banner leaves out its twists' text
+var banner_cache := []  # [key, head, twist, tail, head w, twist w, tail w]: made once per challenge
+
+
+# The banner's texts and widths, worked out again only when the challenge changes.
+func banner_texts() -> Array:
+	var key := "d" + daily_date if daily_date != "" else "w" + weekly_id
+	if not banner_cache.is_empty() and banner_cache[0] == key:
+		return banner_cache
+	var rules := challenge_rules()
 	if rules.is_empty():
-		return
+		return []
 	var head := "DAILY %s" % daily_date
-	var twist := "%s:  %s" % [rules.get("name", ""), rules.get("desc", "")]
 	var tail := "%s   %d waves" % [DIFFICULTIES[difficulty], DAILY_WAVES]
+	if daily_date == "":
+		head = weekly_title(weekly_id).to_upper()
+		tail = "%s   %d waves   Rising tide from wave %d" % [DIFFICULTIES[WEEKLY_LEVEL], WEEKLY_WAVES, WEEKLY_TIDE_FROM]
+	var twist := "%s:  %s" % [rules.get("name", ""), rules.get("desc", "")]
 	var hw := font.get_string_size(head, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
-	var tw := font.get_string_size(twist, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
 	var lw := font.get_string_size(tail, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
+	var tw := font.get_string_size(twist, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
+	if hw + tw + lw + 48.0 > BANNER_MAX_W:
+		twist = str(rules.get("name", ""))
+		tw = font.get_string_size(twist, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x
+	banner_cache = [key, head, twist, tail, hw, tw, lw]
+	return banner_cache
+
+
+# Under the top bar while playing the daily or weekly challenge: the day or
+# week, its twist(s) and level.
+func draw_daily_banner() -> void:
+	var b := banner_texts()
+	if b.is_empty():
+		return
+	var head: String = b[1]
+	var twist: String = b[2]
+	var tail: String = b[3]
+	var hw: float = b[4]
+	var tw: float = b[5]
+	var lw: float = b[6]
 	var total := hw + tw + lw + 48.0
 	var r := Rect2((SCREEN_W - total) / 2.0 - 18.0, TOP_BAR_H + 9, total + 36.0, 26)
 	# A ribbon: dark cloth with gold edges and cut ends
@@ -3291,6 +3420,82 @@ func draw_daily_banner() -> void:
 	text(Vector2(x, y), twist, 15, UI_TEXT)
 	x += tw + 24.0
 	text(Vector2(x, y), tail, 15, level_color())
+
+
+# ---------------------------------------------------------------- holiday festivals
+# For the first seconds of a new game: a ribbon with today's festival
+# (festival_today(), FESTIVAL_BANNERS), picked once when the game starts.
+
+const FEST_SHOW := 8.0  # seconds on screen
+const FEST_FADE := 0.6
+const FEST_COLORS := {"frostfall": [Color(0.16, 0.3, 0.46), Color(0.09, 0.17, 0.28)],
+		"lantern": [Color(0.42, 0.18, 0.04), Color(0.24, 0.09, 0.03)],
+		"paint": [Color(0.34, 0.24, 0.44), Color(0.2, 0.13, 0.27)]}
+var fest_name := ""  # this game's festival ("" none)
+var fest_t := 0.0  # seconds since the game started
+var fest_fresh := false  # a new game (wave 0) last frame
+var fest_texts := []  # [head, rest, head w, rest w]: made once per game
+
+
+# Every frame: a new game (wave 0, not the editor) picks the festival again.
+func update_festival(delta: float) -> void:
+	var fresh := state == "playing" and wave == 0 and not bool(get("editing")) and not replaying()
+	if fresh and not fest_fresh:
+		fest_name = festival_today()
+		fest_t = 0.0
+		fest_texts = []
+		if fest_name != "":
+			# The name (up to the "!") in gold, the rest in white
+			var s: String = FESTIVAL_BANNERS.get(fest_name, FESTIVAL_NAMES.get(fest_name, ""))
+			var cut := s.find("!") + 1
+			var head := s.substr(0, cut) if cut > 0 else ""
+			var rest := s.substr(cut).strip_edges()
+			fest_texts = [head, rest, font.get_string_size(head, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x,
+					font.get_string_size(rest, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x]
+	fest_fresh = fresh
+	if fest_name != "":
+		fest_t += delta
+
+
+# A ribbon like the daily's, in the festival's colors, fading in and out.
+func draw_festival_banner(y: float) -> void:
+	if fest_texts.is_empty():
+		return
+	var a := clampf(minf(fest_t / FEST_FADE, (FEST_SHOW - fest_t) / FEST_FADE), 0.0, 1.0)
+	var hw: float = fest_texts[2]
+	var rw: float = fest_texts[3]
+	var gap := 10.0 if hw > 0.0 else 0.0
+	var total := 26.0 + hw + gap + rw
+	var r := Rect2((SCREEN_W - total) / 2.0 - 18.0, y, total + 36.0, 26)
+	var cols: Array = FEST_COLORS.get(fest_name, FEST_COLORS["lantern"])
+	for side in 2:
+		var x := r.position.x if side == 0 else r.end.x
+		var out := -14.0 if side == 0 else 14.0
+		quad(PackedVector2Array([Vector2(x, r.position.y + 3), Vector2(x + out, r.position.y + 3), Vector2(x + out * 0.55, r.get_center().y + 1.5), Vector2(x + out, r.end.y + 3)]), Color(cols[1], 0.92 * a))
+	vgrad(r, Color(cols[0], 0.95 * a), Color(cols[1], 0.95 * a))
+	bevel(r, 2, Color(UI_GOLD_LIGHT, a), Color(UI_GOLD_DARK, a))
+	festival_icon(Vector2(r.position.x + 26.0, r.get_center().y), a)
+	var x := r.position.x + 44.0
+	text(Vector2(x, r.position.y + 18), fest_texts[0], 15, Color(1, 0.85, 0.3, a))
+	text(Vector2(x + hw + gap, r.position.y + 18), fest_texts[1], 15, Color(UI_TEXT, a))
+
+
+# A little mark: a snowflake, a pumpkin lantern or paint drops.
+func festival_icon(c: Vector2, a: float) -> void:
+	match fest_name:
+		"frostfall":
+			for k in 3:
+				var d := Vector2.from_angle(k * PI / 3.0) * 7.0
+				hud.draw_line(c - d, c + d, Color(0.85, 0.95, 1.0, a), 2.0)
+		"lantern":
+			hud.draw_circle(c + Vector2(0, 1), 7.0, Color(0.95, 0.5, 0.1, a))
+			hud.draw_rect(Rect2(c + Vector2(-1, -9), Vector2(2.5, 4)), Color(0.3, 0.5, 0.15, a))
+			hud.draw_circle(c + Vector2(-2.5, 0), 1.4, Color(1, 0.9, 0.4, a))
+			hud.draw_circle(c + Vector2(2.5, 0), 1.4, Color(1, 0.9, 0.4, a))
+		"paint":
+			hud.draw_circle(c + Vector2(-4, 2), 4.0, Color(1, 0.55, 0.7, a))
+			hud.draw_circle(c + Vector2(4, 3), 3.5, Color(0.5, 0.85, 1.0, a))
+			hud.draw_circle(c + Vector2(0, -4), 3.5, Color(1, 0.9, 0.4, a))
 
 
 # ---------------------------------------------------------------- saving and loading
@@ -3459,6 +3664,9 @@ func save_row(h: Dictionary) -> Dictionary:
 	var w: int = h.get("wave") if h.get("wave") is int else 0
 	var daily := clean_text(str(h.get("daily", "")), 12)
 	var map_s := "Daily " + daily if daily != "" else clean_text(str(h.get("map", "")), MAP_NAME_MAX)
+	var week := clean_text(str(h.get("weekly", "")), 12)
+	if daily == "" and week != "":
+		map_s = "Weekly " + week
 	var names: Array = h.get("players") if h.get("players") is Array else []
 	var who := "alone"
 	if names.size() > 1:
@@ -3601,8 +3809,8 @@ var tip_lines := PackedStringArray()
 # Hidden under the Esc menu and popups, and while a button's tooltip is up.
 func tip_layout() -> Dictionary:
 	var tip := current_tip()
-	if tip.is_empty() or menu_open or gift_to >= 0 or update_dialog != "":
-		return {}
+	if tip.is_empty() or tip.get("story", false) or menu_open or gift_to >= 0 or update_dialog != "":
+		return {}  # a story card has its own look (see draw_story_card)
 	if hovered_card() >= 0 or hovered_chip() >= 0:
 		return {}
 	if tip["text"] != tip_lines_for:
@@ -3711,6 +3919,8 @@ func tip_arrow(r: Rect2, target: Vector2) -> void:
 
 # on_click() asks this first: Got it, Skip all tips, and no building through the card.
 func tip_click(p: Vector2) -> bool:
+	if story_click(p):
+		return true
 	var l := tip_layout()
 	if l.is_empty() or not l["rect"].has_point(p):
 		return false
@@ -3718,6 +3928,161 @@ func tip_click(p: Vector2) -> bool:
 		tip_got_it()
 	elif l["skip"].has_point(p):
 		tip_skip_all()
+	return true
+
+
+# ---------------------------------------------------------------- story cards
+# A story card (current_tip() with "story", see STORY_CARDS) is a parchment page
+# with the speaker's portrait and name, not a tip. It fades out by itself after
+# STORY_SHOW seconds (held while the mouse is on it), then tip_got_it(). On the
+# end screen, end_story_card() shows as a narrower page left of the stats.
+# Drawn on story_layer so the whole card can fade (made in build_hud, see
+# build_story_layer), in screen pixels, above the console's click split.
+
+const STORY_W := 470.0
+const END_STORY_W := 210.0  # stops left of the win title (FW_KEEP) and the stats panel
+const STORY_SHOW := 12.0  # seconds before it fades out by itself
+const STORY_IN := 0.3
+const STORY_OUT := 0.6
+const PARCH_TOP := Color(0.92, 0.85, 0.67)
+const PARCH_LOW := Color(0.8, 0.69, 0.5)
+const INK := Color(0.24, 0.15, 0.07)
+# The speakers' portrait placeholders: [initial, color] (painted portraits later)
+const SPEAKERS := {"Wren": ["W", Color(0.36, 0.62, 0.34)], "Sergeant Thump": ["T", Color(0.72, 0.32, 0.22)],
+		"The Ringkeeper": ["R", Color(0.32, 0.5, 0.8)], "Grimwhistle": ["G", Color(0.55, 0.32, 0.82)]}
+var story_layer: Node2D
+var story_id := ""  # the story card up now ("" none)
+var story_end_card := false  # ...and whether it's the end screen's
+var story_who := ""
+var story_lines := PackedStringArray()  # its text, wrapped once
+var story_t := 0.0  # seconds it has been up
+
+
+func build_story_layer() -> void:
+	story_layer = Node2D.new()
+	story_layer.visible = false
+	hud.add_child(story_layer)  # over the hud's drawing
+	story_layer.draw.connect(draw_on.bind(story_layer, draw_story_card))
+
+
+# The story card to show now: {id, text, who}, or {}.
+func story_card() -> Dictionary:
+	if state == "playing":
+		var tip := current_tip()
+		return tip if tip.get("story", false) else {}
+	if replaying():
+		return {}
+	return end_story_card()
+
+
+# Every frame: picks up a new card, counts its time and closes it when it's faded.
+func update_story_card(delta: float) -> void:
+	var c := story_card()
+	var id: String = c.get("id", "")
+	var end := state != "playing"
+	if id != story_id or end != story_end_card:
+		story_id = id
+		story_end_card = end
+		story_t = 0.0
+		if id != "":
+			story_who = c.get("who", "")
+			var w := (END_STORY_W - 28.0) if end else (STORY_W - 92.0)
+			story_lines = wrap_words(c.text, w, w, 14 if end else 15)
+	var shown := story_id != "" and not menu_open and gift_to < 0 and update_dialog == ""
+	story_layer.visible = shown
+	if not shown:
+		return
+	story_layer.queue_redraw()
+	var l := story_layout()
+	var a := clampf(minf(story_t / STORY_IN, (STORY_SHOW + STORY_OUT - story_t) / STORY_OUT), 0.0, 1.0)
+	story_layer.modulate.a = a
+	# Held while the mouse is on it (once it's fully in)
+	if story_t < STORY_IN or not l["rect"].has_point(get_viewport().get_mouse_position()):
+		story_t += delta
+	if story_t >= STORY_SHOW + STORY_OUT:
+		close_story_card()
+
+
+func close_story_card() -> void:
+	if story_end_card:
+		end_story_done()
+	else:
+		tip_got_it()
+	story_id = ""
+	story_layer.visible = false
+
+
+# The card's place in screen pixels: {rect, got, skip (none on the end screen)}.
+func story_layout() -> Dictionary:
+	if story_end_card:
+		var h := 72.0 + story_lines.size() * 19.0 + 46.0
+		var e := Rect2(14, STATS_TOP + ui_extra / 2.0, END_STORY_W, h)
+		return {"rect": e, "got": Rect2(e.position.x + 14, e.end.y - 42, e.size.x - 28, 28), "skip": Rect2()}
+	var h := maxf(58.0 + story_lines.size() * 20.0 + 50.0, 126.0)
+	var r := Rect2((SCREEN_W - STORY_W) / 2.0, 96, STORY_W, h)
+	var got := Rect2(r.end.x - 114, r.end.y - 40, 100, 28)
+	return {"rect": r, "got": got, "skip": Rect2(got.position.x - 150, got.position.y, 140, 28)}
+
+
+func draw_story_card() -> void:
+	if story_id == "":
+		return
+	var l := story_layout()
+	var r: Rect2 = l["rect"]
+	# Parchment: warm paper, darker at the edges, an inked frame in the gold
+	hud.draw_rect(Rect2(r.position + Vector2(3, 5), r.size), Color(0, 0, 0, 0.45))
+	vgrad(r, PARCH_TOP, PARCH_LOW)
+	inner_shadow(r.grow(-3), 10, 0.22)
+	bevel(r, 3, UI_GOLD_LIGHT, UI_GOLD_DARK)
+	hud.draw_rect(r.grow(-7), Color(INK, 0.4), false, 1.0)
+	var col: Color = SPEAKERS.get(story_who, ["?", Color(0.5, 0.45, 0.4)])[1]
+	if story_end_card:
+		story_portrait(r.position + Vector2(36, 38), 20.0, story_who)
+		hud.draw_string(title_font, r.position + Vector2(64, 36), fit_text(story_who, r.size.x - 78, 18), HORIZONTAL_ALIGNMENT_LEFT, -1, 18, col.darkened(0.55))
+		hud.draw_line(r.position + Vector2(14, 62), Vector2(r.end.x - 14, r.position.y + 62), Color(INK, 0.35), 1.0)
+		for j in story_lines.size():
+			text(r.position + Vector2(14, 84 + j * 19), story_lines[j], 14, INK)
+	else:
+		story_portrait(r.position + Vector2(42, 44), 25.0, story_who)
+		hud.draw_string(title_font, r.position + Vector2(80, 34), story_who, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, col.darkened(0.55))
+		for j in story_lines.size():
+			text(r.position + Vector2(80, 60 + j * 20), story_lines[j], 15, INK)
+		button(l["skip"], "Turn off story")
+	button(l["got"], "Got it", true, true)
+	# How long it stays: a thin ink line along the bottom
+	var left := clampf(1.0 - story_t / STORY_SHOW, 0.0, 1.0)
+	hud.draw_rect(Rect2(r.position.x + 8, r.end.y - 9, (r.size.x - 16) * left, 2), Color(INK, 0.45))
+
+
+# The speaker's portrait slot: a gold-rimmed medallion with the initial (a painted
+# portrait goes here later).
+func story_portrait(c: Vector2, radius: float, who: String) -> void:
+	var s: Array = SPEAKERS.get(who, ["?", Color(0.5, 0.45, 0.4)])
+	hud.draw_circle(c + Vector2(1, 2), radius + 3.0, Color(0, 0, 0, 0.35))
+	hud.draw_circle(c, radius + 3.0, UI_GOLD_DARK)
+	hud.draw_circle(c, radius + 1.5, UI_GOLD)
+	hud.draw_circle(c, radius, s[1].darkened(0.35))
+	hud.draw_circle(c - Vector2(0, 2), radius - 3.0, s[1])
+	var size := roundi(radius * 1.1)
+	var w := title_font.get_string_size(s[0], HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	var p := c + Vector2(-w / 2.0, size * 0.36)
+	hud.draw_string_outline(title_font, p, s[0], HORIZONTAL_ALIGNMENT_LEFT, -1, size, 4, Color(0, 0, 0, 0.6))
+	hud.draw_string(title_font, p, s[0], HORIZONTAL_ALIGNMENT_LEFT, -1, size, Color(1, 0.95, 0.85))
+
+
+# Got it, Turn off story, and no building through the card.
+func story_click(p: Vector2) -> bool:
+	if story_layer == null or not story_layer.visible or story_id == "":
+		return false
+	var l := story_layout()
+	if not l["rect"].has_point(p):
+		return false
+	if l["got"].has_point(p):
+		close_story_card()
+	elif l["skip"].has_point(p):
+		tip_skip_all()  # turns the story cards off (saves itself)
+		story_id = ""
+		story_layer.visible = false
 	return true
 
 
@@ -3921,9 +4286,14 @@ func draw_tower_card(i: int) -> void:
 const PROFILE_RECT := Rect2(400, 50, 124, 28)  # the Esc menu's button, top left (Map editor under it)
 const PROFILE_BOX := Rect2(330, 40, 620, 640)
 const PROFILE_NAME_RECT := Rect2(436, 112, 320, 36)  # the name box moves here while the Profile is open
-const PROFILE_ACH_RECT := Rect2(366, 620, 200, 40)
-const PROFILE_RESET_RECT := Rect2(574, 620, 136, 40)
-const PROFILE_BACK_RECT := Rect2(754, 620, 160, 40)
+const PROFILE_ACH_RECT := Rect2(354, 620, 196, 40)
+const PROFILE_CHRON_RECT := Rect2(558, 620, 150, 40)
+const PROFILE_RESET_RECT := Rect2(716, 620, 116, 40)
+const PROFILE_BACK_RECT := Rect2(840, 620, 86, 40)
+const CHRON_BOX := Rect2(250, 30, 780, 660)
+const CHRON_BACK_RECT := Rect2(560, 630, 160, 40)
+const CHRON_ROWS := 8  # cards shown at once
+const CHRON_ROW_H := 60
 const ACH_BOX := Rect2(250, 30, 780, 660)
 const ACH_BACK_RECT := Rect2(560, 630, 160, 40)
 const ACH_ROWS := 6  # rows of 2 cards shown at once
@@ -3943,6 +4313,9 @@ var prof_cache := {}  # profile_stats() when the box opened
 var ach_cache: Array = []  # achievement_list() when the box opened
 var ach_tab := 0  # 0: All, then ACHIEVEMENT_GROUPS
 var ach_top := 0  # the first row shown
+var chron_open := false  # the Chronicle over the Profile box
+var chron_cache: Array = []  # chronicle_list() when it opened, each with its text wrapped ("lines")
+var chron_top := 0  # the first card shown
 var ach_popup := {}  # the achievement popping up, or {}
 var ach_popup_at := -1  # when it started showing (ms); -1: waiting for the menus to close
 
@@ -3951,8 +4324,91 @@ func open_profile() -> void:
 	prof_cache = profile_stats()
 	profile_open = true
 	ach_open = false
+	chron_open = false
 	reset_ask = false
 	code_input.release_focus()
+
+
+# The texts are wrapped once here, not every frame.
+func open_chronicle() -> void:
+	chron_cache = chronicle_list()
+	for c: Dictionary in chron_cache:
+		c["lines"] = wrap_words(c.text, CHRON_BOX.size.x - 150.0, CHRON_BOX.size.x - 150.0, 14) if c.date != "" else PackedStringArray()
+	chron_open = true
+	chron_top = 0
+	name_input.release_focus()
+
+
+func chron_max_top() -> int:
+	return maxi(chron_cache.size() - CHRON_ROWS, 0)
+
+
+# Mouse wheel, arrow keys and Page Up / Down scroll.
+func chron_input(event: InputEvent) -> bool:
+	var top := chron_top
+	if event is InputEventMouseButton and event.pressed:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			top -= 1
+		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			top += 1
+		else:
+			return false
+	elif event is InputEventKey and event.pressed:
+		match event.keycode:
+			KEY_UP: top -= 1
+			KEY_DOWN: top += 1
+			KEY_PAGEUP: top -= CHRON_ROWS
+			KEY_PAGEDOWN: top += CHRON_ROWS
+			_: return false
+	else:
+		return false
+	chron_top = clampi(top, 0, chron_max_top())
+	return true
+
+
+# The Warden's Chronicle: every story card, unlocked ones with who said it, the
+# date and the text, locked ones as "???" with how to unlock them.
+func draw_chronicle() -> void:
+	var b := CHRON_BOX
+	profile_box(b, CHRONICLE_TITLE.to_upper(), 30)
+	var got := 0
+	for c: Dictionary in chron_cache:
+		if c.date != "":
+			got += 1
+	center_text(b.get_center().x, b.position.y + 82, CHRONICLE_INTRO, 15, UI_GREY)
+	center_text(b.get_center().x, b.position.y + 104, "%d of %d pages found" % [got, chron_cache.size()], 13, UI_DIM)
+	chron_top = clampi(chron_top, 0, chron_max_top())
+	var top := b.position.y + 120
+	for k in range(chron_top, mini(chron_cache.size(), chron_top + CHRON_ROWS)):
+		var c: Dictionary = chron_cache[k]
+		var r := Rect2(b.position.x + 24, top + (k - chron_top) * CHRON_ROW_H, b.size.x - 56, CHRON_ROW_H - 6)
+		if c.date == "":
+			hud.draw_rect(r, Color(0, 0, 0, 0.32))
+			hud.draw_rect(r, Color(0.3, 0.28, 0.25), false, 1.0)
+			medal(r.position + Vector2(34, r.size.y / 2.0), 20.0, false)
+			text(r.position + Vector2(68, 22), "???", 16, UI_DIM)
+			text(r.position + Vector2(68, 42), c.hint, 13, UI_GREY)
+			continue
+		# A strip of parchment, like the card in the game
+		vgrad(r, PARCH_TOP, PARCH_LOW)
+		hud.draw_rect(r, UI_GOLD, false, 1.0)
+		story_portrait(r.position + Vector2(34, r.size.y / 2.0), 19.0, c.who)
+		var col: Color = SPEAKERS.get(c.who, ["?", Color(0.5, 0.45, 0.4)])[1]
+		hud.draw_string(title_font, r.position + Vector2(68, 19), c.who, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, col.darkened(0.55))
+		right_text(Vector2(r.end.x - 10, r.position.y + 17), c.date, 12, Color(INK, 0.7))
+		var lines: PackedStringArray = c.lines
+		for j in mini(lines.size(), 2):
+			var s := lines[j]
+			if j == 1 and lines.size() > 2:
+				s = fit_text(s + " " + " ".join(lines.slice(2)), r.size.x - 90.0, 14)
+			text(r.position + Vector2(68, 35 + j * 15), s, 14, INK)
+	# More than fits: a thin scrollbar and the hint
+	if chron_cache.size() > CHRON_ROWS:
+		var track := Rect2(b.end.x - 22, top, 4, CHRON_ROWS * CHRON_ROW_H - 6)
+		hud.draw_rect(track, Color(0, 0, 0, 0.5))
+		var h := track.size.y * CHRON_ROWS / chron_cache.size()
+		hud.draw_rect(Rect2(track.position.x, track.position.y + (track.size.y - h) * chron_top / maxf(chron_max_top(), 1), 4, h), UI_GOLD)
+	button(CHRON_BACK_RECT, "Back (Esc)", true, true)
 
 
 func open_achievements() -> void:
@@ -3968,13 +4424,14 @@ func update_profile_boxes() -> void:
 	if not menu_open and profile_open:
 		profile_open = false
 		ach_open = false
+		chron_open = false
 		reset_ask = false
 	var spot := (PROFILE_NAME_RECT.position if profile_open else NAME_INPUT_RECT.position) + Vector2(0, ui_extra / 2.0)
 	if name_input.position != spot:
 		name_input.position = spot
 	if profile_open:
 		code_input.visible = false
-		name_input.visible = net_mode == "" and not ach_open and not reset_ask
+		name_input.visible = net_mode == "" and not ach_open and not chron_open and not reset_ask
 		if not name_input.visible:
 			name_input.release_focus()
 
@@ -3985,6 +4442,8 @@ func draw_profile_boxes() -> void:
 	draw_profile()
 	if ach_open:
 		draw_achievements()
+	if chron_open:
+		draw_chronicle()
 	if reset_ask:
 		draw_reset_ask()
 
@@ -4001,8 +4460,14 @@ func profile_click(p: Vector2) -> void:
 	if ach_open:
 		ach_click(p)
 		return
+	if chron_open:
+		if CHRON_BACK_RECT.has_point(p):
+			chron_open = false
+		return
 	if PROFILE_ACH_RECT.has_point(p):
 		open_achievements()
+	elif PROFILE_CHRON_RECT.has_point(p):
+		open_chronicle()
 	elif PROFILE_RESET_RECT.has_point(p):
 		reset_ask = true
 		name_input.release_focus()
@@ -4053,13 +4518,13 @@ func draw_profile() -> void:
 		right_text(Vector2(x + 260, y), left[i][1], 15, UI_TEXT)
 		text(Vector2(x + 290, y), more[i][0], 15, UI_GREY)
 		right_text(Vector2(right, y), more[i][1], 15, UI_TEXT)
-	# Per level (Default map), then the daily challenge as the last row
-	ui_heading(Vector2(x, 300), "BEST WAVE PER LEVEL", w)
+	# Per level (Default map), then the daily and the weekly challenge as the last rows
+	ui_heading(Vector2(x, 294), "BEST WAVE PER LEVEL", w)
 	for h: Array in [[120, "Best wave"], [250, "Wins"], [340, "Endless best"], [470, "Games"]]:
-		text(Vector2(x + h[0], 330), h[1], 14, UI_GOLD)
+		text(Vector2(x + h[0], 322), h[1], 14, UI_GOLD)
 	for i in p.levels.size():
 		var lv: Dictionary = p.levels[i]
-		var ry: float = 338 + i * 26
+		var ry: float = 330 + i * 26
 		hud.draw_rect(Rect2(x - 8, ry, b.size.x - 56, 24), Color(0, 0, 0, 0.28 if i % 2 == 0 else 0.16))
 		text(Vector2(x, ry + 18), lv.name, 16, LEVEL_COLORS[i])
 		var best := "-" if lv.best <= 0 else str(lv.best) + ("  won" if lv.wins > 0 else "")
@@ -4068,7 +4533,7 @@ func draw_profile() -> void:
 		text(Vector2(x + 340, ry + 18), "-" if lv.endless <= 0 else str(lv.endless), 16, UI_TEXT)
 		text(Vector2(x + 470, ry + 18), short(lv.games), 16, UI_TEXT)
 	var d: Dictionary = p.daily
-	var dy: float = 338 + p.levels.size() * 26
+	var dy: float = 330 + p.levels.size() * 26
 	hud.draw_rect(Rect2(x - 8, dy, b.size.x - 56, 24), Color(0, 0, 0, 0.28))
 	text(Vector2(x, dy + 18), "Daily", 16, Color(1, 0.85, 0.3))
 	# The streak now and the best, or only the best when both don't fit
@@ -4079,10 +4544,17 @@ func draw_profile() -> void:
 	if font.get_string_size(daily, HORIZONTAL_ALIGNMENT_LEFT, -1, 15).x > w - 120:
 		daily = head + "Best streak: %d day%s" % [best_run, "" if best_run == 1 else "s"] + tail
 	text(Vector2(x + 120, dy + 18), fit_text(daily, w - 120, 15), 15, UI_TEXT)
+	# The weekly challenge: played, won, and in how many different weeks
+	var wk: Dictionary = p.get("weekly", {"played": 0, "won": 0, "weeks": 0})
+	var wy := dy + 26
+	hud.draw_rect(Rect2(x - 8, wy, b.size.x - 56, 24), Color(0, 0, 0, 0.16))
+	text(Vector2(x, wy + 18), "Weekly", 16, Color(1, 0.85, 0.3))
+	var weeks := "%s played, %s won   Weeks won: %d" % [short(wk.played), short(wk.won), wk.weeks]
+	text(Vector2(x + 120, wy + 18), fit_text(weeks, w - 120, 15), 15, UI_TEXT)
 	# Towers: built and share of the damage, the favourite lit up
-	ui_heading(Vector2(x, 496), "TOWERS", w)
+	ui_heading(Vector2(x, 508), "TOWERS", w)
 	var fav: String = p.favourite
-	right_text(Vector2(right, 501), "Favourite: %s (most built)" % TOWERS[fav]["name"] if fav != "" else "Favourite: none yet", 15, UI_GOLD_LIGHT)
+	right_text(Vector2(right, 513), "Favourite: %s (most built)" % TOWERS[fav]["name"] if fav != "" else "Favourite: none yet", 15, UI_GOLD_LIGHT)
 	# Spread over the width, centered, at most 112 apart
 	var n: int = p.towers.size()
 	var step := minf(112.0, w / maxf(n, 1.0))
@@ -4090,11 +4562,12 @@ func draw_profile() -> void:
 		var t: Dictionary = p.towers[i]
 		var cx: float = x + w / 2.0 + (i - (n - 1) / 2.0) * step
 		if t.type == fav:
-			hud.draw_rect(Rect2(cx - step / 2.0 + 4.0, 508, step - 8.0, 92), Color(0.55, 0.42, 0.15, 0.35))
-		gem(Vector2(cx, 532), 14.0, TOWERS[t.type]["color"])
-		center_text(cx, 566, "%s built" % short(t.built), 14, UI_TEXT)
-		center_text(cx, 584, "%d%% damage" % roundi(t.share * 100.0), 13, UI_GREY)
+			hud.draw_rect(Rect2(cx - step / 2.0 + 4.0, 520, step - 8.0, 88), Color(0.55, 0.42, 0.15, 0.35))
+		gem(Vector2(cx, 542), 14.0, TOWERS[t.type]["color"])
+		center_text(cx, 576, "%s built" % short(t.built), 14, UI_TEXT)
+		center_text(cx, 594, "%d%% damage" % roundi(t.share * 100.0), 13, UI_GREY)
 	button(PROFILE_ACH_RECT, "Achievements  %d / %d" % [p.earned, p.total], true, true)
+	button(PROFILE_CHRON_RECT, "Chronicle  %d / %d" % [(profile.get("chronicle", {}) as Dictionary).size(), STORY_CARDS.size()], true, true)
 	button(PROFILE_RESET_RECT, "Reset profile")
 	button(PROFILE_BACK_RECT, "Back (Esc)", true, true)
 
@@ -4113,8 +4586,8 @@ func draw_reset_ask() -> void:
 # ----- the Achievements box
 
 func ach_tab_rect(i: int) -> Rect2:
-	var tw := 86.0
 	var n := ACHIEVEMENT_GROUPS.size() + 1
+	var tw := minf(86.0, floorf((ACH_BOX.size.x - 40.0 - (n - 1) * 6.0) / n))  # narrower with more groups
 	var left := ACH_BOX.get_center().x - (n * (tw + 6.0) - 6.0) / 2.0
 	return Rect2(left + i * (tw + 6.0), ACH_BOX.position.y + 94, tw, 28)
 
@@ -4257,9 +4730,12 @@ func draw_achievement_popup() -> void:
 	if t > POPUP_STAY + POPUP_IN * 2.0:
 		ach_popup = {}
 		return
-	var y := TOP_BAR_H + 12.0 + (30.0 if daily_date != "" else 0.0) + (32.0 if held else 0.0)
+	var fest := fest_name != "" and fest_t < FEST_SHOW and state == "playing"
+	var y := TOP_BAR_H + 12.0 + (30.0 if challenge_on() else 0.0) + (32.0 if held or fest else 0.0)
 	var r := Rect2((SCREEN_W - POPUP_W) / 2.0, y, POPUP_W, POPUP_H)
 	var tip := tip_layout()
+	if tip.is_empty() and story_layer.visible and story_id != "" and not story_end_card:
+		tip = story_layout()
 	if not tip.is_empty() and tip["rect"].grow(8).intersects(r):
 		var tr: Rect2 = tip["rect"]
 		r.position.y = tr.end.y + 12.0 if tr.end.y + 12.0 + POPUP_H < TIP_LOW else maxf(tr.position.y - POPUP_H - 12.0, TOP_BAR_H + 6.0)

@@ -8,9 +8,10 @@ const MapShare := preload("res://map_share.gd")  # map codes and QR codes
 # Esc menu: the editor button, under Profile (top left), and the box asking before a game ends
 const EDITOR_RECT := Rect2(400, 82, 124, 22)
 # Esc menu: the map being played and the difficulty level, under the title
-const MAP_PICK_RECT := Rect2(530, 125, 186, 27)
-const DAILY_RECT := Rect2(722, 125, 128, 27)  # the daily challenge, right of the map
-const LEVEL_RECT := Rect2(530, 156, 320, 27)
+const MAP_PICK_RECT := Rect2(530, 125, 176, 27)
+const DAILY_RECT := Rect2(712, 125, 138, 27)  # the daily challenge, right of the map
+const WEEKLY_RECT := Rect2(712, 156, 138, 27)  # the weekly challenge, under the daily
+const LEVEL_RECT := Rect2(530, 156, 176, 27)  # left of the weekly button
 # Joining a game on a map you don't have: the preview and Download / Cancel
 const JOIN_BOX := Rect2(312, 100, 656, 470)
 const JOIN_PREVIEW := Rect2(336, 206, 296, 222)
@@ -357,6 +358,8 @@ func draw_join_box() -> void:
 	hud.draw_multiline_string(font, Vector2(340, JOIN_PREVIEW.end.y + 24), "Only the map's tiles are downloaded. Your game checks them and builds the map itself, like the map editor does.", HORIZONTAL_ALIGNMENT_LEFT, 600, 14, 2, UI_GREY)
 	if offer_is_daily():
 		text(JOIN_KEEP.position + Vector2(0, 16), "Today's daily challenge map: everyone gets the same one, so it isn't kept.", 15, UI_GREY)
+	elif offer_is_weekly():
+		text(JOIN_KEEP.position + Vector2(0, 16), "This week's challenge map: everyone gets the same one, so it isn't kept.", 15, UI_GREY)
 	else:
 		draw_keep_box()
 	if map_offer.accepted:
@@ -403,7 +406,7 @@ func join_box_click(p: Vector2) -> void:
 		if JOIN_NO.has_point(p):
 			cancel_offer()
 		return
-	if Rect2(JOIN_KEEP.position, Vector2(380, JOIN_KEEP.size.y)).has_point(p) and not offer_is_daily():
+	if Rect2(JOIN_KEEP.position, Vector2(380, JOIN_KEEP.size.y)).has_point(p) and not offer_is_daily() and not offer_is_weekly():
 		map_offer.keep = not map_offer.keep
 	elif JOIN_YES.has_point(p):
 		accept_offer(map_offer.keep)
@@ -821,16 +824,22 @@ func draw_menu() -> void:
 	if net_mode == "client":
 		text(Vector2(MAP_PICK_RECT.position.x, MAP_PICK_RECT.position.y + 19), fit_text(map_name, MAP_PICK_RECT.size.x, 16), 16, Color(1, 0.85, 0.3))
 	else:
+		# "(change)" only when it fits next to the name ("Weekly 2026-W45" is too long for it)
 		var label := map_name + ("   (change)" if can_pick_map() else "")
+		if font.get_string_size(label, HORIZONTAL_ALIGNMENT_LEFT, -1, 16).x > MAP_PICK_RECT.size.x - 12:
+			label = fit_text(map_name, MAP_PICK_RECT.size.x - 12, 16)
 		button(MAP_PICK_RECT, label, can_pick_map(), false)
 	if net_mode != "client":
 		button(DAILY_RECT, "Daily challenge", can_pick_map(), daily_date != "")
+		button(WEEKLY_RECT, "Weekly challenge", can_pick_map(), weekly_id != "")
 	draw_level_row()
 	var free := not (pick_open or ed_ask_open or board_open or settings_open or save_open or load_open or profile_open or net_mode == "map_offer")
 	if free and level_row().has_point(ui_mouse(true)):
 		draw_level_tip()
 	elif free and net_mode != "client" and DAILY_RECT.has_point(ui_mouse(true)):
 		draw_daily_tip()
+	elif free and net_mode != "client" and WEEKLY_RECT.has_point(ui_mouse(true)):
+		draw_weekly_tip()
 	if pick_open:
 		ed_draw_list("CHOOSE A MAP", map_name)
 	if net_mode == "map_offer" and not map_offer.is_empty():
@@ -889,6 +898,9 @@ func menu_click(p: Vector2) -> void:
 		return
 	if DAILY_RECT.has_point(p) and net_mode != "client":
 		call("menu_daily")  # in main.gd, after this file
+		return
+	if WEEKLY_RECT.has_point(p) and net_mode != "client":
+		call("menu_weekly")  # in main.gd too
 		return
 	if LEVEL_RECT.has_point(p):
 		if can_pick_level():
@@ -993,6 +1005,32 @@ func draw_daily_tip() -> void:
 		text(r.position + Vector2(12, 48 + j * 20), fit_text(lines[j], r.size.x - 24, 14), 14, LEVEL_COLORS[lv] if j == 1 else UI_TEXT)
 
 
+# Right of the menu: this week's challenge, when it ends, and how (or why not) to start it.
+func draw_weekly_tip() -> void:
+	var id := weekly_now()
+	var rules := weekly_rules(id)
+	var lines := [str(rules.get("desc", "")),
+			"%s level, %d waves, the week's map (%s)." % [DIFFICULTIES[WEEKLY_LEVEL], WEEKLY_WAVES, weekly_map_label(id)],
+			"Rising tide: monster health +%d%% each wave from %d." % [roundi(WEEKLY_TIDE * 100.0), WEEKLY_TIDE_FROM],
+			"Same for everyone this week, own leaderboard.",
+			"Ends in %s." % time_left_text(weekly_ends_in())]
+	if weekly_id == id:
+		lines.append("You're playing it now.")
+	elif can_pick_map():
+		lines.append("Click: start it (this ends the game you're playing).")
+	elif net_mode == "host" and player_count() > 1:
+		lines.append("It can only start while nobody has joined.")
+	else:
+		lines.append("It can only start before wave 1.")
+	var r := Rect2(MENU_RECT.end.x + 8, WEEKLY_RECT.position.y - 6, 376, 34 + lines.size() * 20 + 10)
+	hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.9), false, 1.0)
+	hud.draw_rect(r, Color(0.05, 0.05, 0.055, 0.92))
+	hud.draw_rect(r, UI_GOLD_DARK, false, 1.0)
+	text(r.position + Vector2(12, 24), fit_text("Weekly %s:  %s" % [id, rules.get("name", "")], r.size.x - 24, 16), 16, Color(1, 0.85, 0.3))
+	for j in lines.size():
+		text(r.position + Vector2(12, 48 + j * 20), fit_text(lines[j], r.size.x - 24, 14), 14, LEVEL_COLORS[WEEKLY_LEVEL] if j == 1 else UI_TEXT)
+
+
 # A map offer for the daily challenge: it's made again from the date, so it's never kept.
 func offer_is_daily() -> bool:
 	var n: String = map_offer.get("name", "")
@@ -1000,6 +1038,7 @@ func offer_is_daily() -> bool:
 		return false
 	var date := n.trim_prefix("Daily ")
 	return date.replace("-", "").is_valid_int() and map_offer.rows == daily_map(date).text
+
 
 
 func ed_draw_menu() -> void:

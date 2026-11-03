@@ -16,6 +16,7 @@ uniform vec3 tint : source_color = vec3(1.0);
 uniform vec3 rim_color : source_color = vec3(1.0, 0.92, 0.78);
 uniform float rim_strength = 0.3;
 uniform float rim_power = 3.0;
+global uniform vec4 mood_rim;  // the weather's rim (see painted.gdshader)
 varying float bright;
 
 void vertex() {
@@ -36,5 +37,7 @@ void fragment() {
 	ALBEDO = col;
 	ROUGHNESS = 0.6;
 	float rim = pow(1.0 - clamp(dot(NORMAL, VIEW), 0.0, 1.0), rim_power);
-	EMISSION = rim_color * mix(vec3(1.0), col, 0.5) * rim * rim_strength;
+	vec3 rc = mood_rim.a > 0.0 ? mood_rim.rgb : rim_color;
+	float rs = mood_rim.a > 0.0 ? rim_strength * mood_rim.a : rim_strength;
+	EMISSION = rc * mix(vec3(1.0), col, 0.5) * rim * rs;
 }
