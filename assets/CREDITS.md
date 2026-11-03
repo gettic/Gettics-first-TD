@@ -26,6 +26,10 @@ Made for this game (by Claude, with a Python model kit of code-built shapes and 
 
 Made for this game (by Claude, with the same Python model kit): the Barracks, `towers/barracks/barracks_<path>_<look>.glb` (path 0: levels 1-4; path 1 Knights and 2 Militia: looks 5-10, the same levels as the cannon's) with `towers/barracks/barracks_team.jpg` and `barracks_roof.jpg` (it shares the cannon's `cannon_atlas.jpg` and `cannon_glow.jpg`); its soldiers `units/soldier_footman.glb`, `soldier_knight.glb` and `soldier_militia.glb` with their idle, fight, walk and fall animations and their texture `units/soldier.jpg`; and `shaders/soldier.gdshader`.
 
+Made for this game (by Claude, with the same Python model kit): the Frost tower, `towers/frost/frost_<path>_<look>.glb` (path 0: levels 1-4; path 1 and 2: looks 5-10, the same levels as the cannon's) with `towers/frost/frost_team.jpg` and `frost_glow.jpg`; and the Spark tower, `towers/spark/spark_<path>_<look>.glb` (the same looks) with `towers/spark/spark_team.jpg` and `spark_glow.jpg` (both share the cannon's `cannon_atlas.jpg`).
+
+Made for this game (by Claude, repainted with a script): the Bone Choir's skeleton colours, `monsters/bone_choir_warrior.jpg` (from the skeleton warrior's own texture) and `monsters/bone_choir_mage.png` (from KayKit's CC0 `skeleton_texture.png`, credited above), with their glow masks `bone_choir_warrior_glow.jpg` and `bone_choir_mage_glow.png`.
+
 Made by Gettic: `logo/logo.png` and the game icon `logo/icon.png`, `logo/icon.ico` (cut from his logo).
 
 Made by Gettic with an AI tool: the Arrow tower 0.02, `towers/arrow/archer_tower_L1.glb` to `archer_tower_L10.glb` (one per look), and their textures `towers/arrow/archer_tower_L1_*.jpg` (taken out of `archer_tower_L1.glb` at full size; the other models use the same textures, so they're imported without their own copy).

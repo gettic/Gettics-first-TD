@@ -17,7 +17,7 @@ uniform float tex_scale = 0.4;  // texture repeats per tile (0.4 = once every 2.
 // The textures' average colors (linear), so they can be tinted to the game's own green and brown
 uniform vec3 grass_avg = vec3(0.1619, 0.2498, 0.08);
 uniform vec3 dirt_avg = vec3(0.1362, 0.0958, 0.0494);
-uniform vec3 grass_color : source_color = vec3(0.17, 0.33, 0.08);
+uniform vec3 grass_color : source_color = vec3(0.195, 0.34, 0.085);  // a little olive
 uniform vec3 dirt_color : source_color = vec3(0.45, 0.29, 0.14);
 uniform float detail = 0.6;  // 0 = flat color, 1 = the texture's full contrast
 uniform float is_path = 0.0;
@@ -25,8 +25,8 @@ uniform float grid = 0.0;  // grid lines, faded in while placing a tower
 uniform bool use_normals = false;  // Graphics High
 // Painted look
 uniform float paint = 1.0;
-uniform vec3 warm : source_color = vec3(1.3, 1.12, 0.62);
-uniform vec3 cool : source_color = vec3(0.62, 0.84, 0.95);
+uniform vec3 warm : source_color = vec3(1.34, 1.11, 0.6);
+uniform vec3 cool : source_color = vec3(0.6, 0.8, 0.98);
 uniform float worn = 0.3;      // lighter middle of the path
 uniform float trample = 0.25;  // darker grass beside the path
 uniform float outer = 0.0;     // 1: the land around the board

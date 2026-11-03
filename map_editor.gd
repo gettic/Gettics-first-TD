@@ -90,11 +90,6 @@ var paste_map: Dictionary = {}  # a pasted map code's map, shown before it's kep
 var share_at := 0  # when the share or pasted-map box opened (older messages aren't shown in it)
 
 
-# main.gd has the real one
-func new_game() -> void:
-	pass
-
-
 func build_hud() -> void:
 	super()
 	map_name_input = text_box(code_input.get_parent(), ED_NAME_RECT, "Name the map", MAP_NAME_MAX, 16)

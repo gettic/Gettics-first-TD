@@ -1,5 +1,5 @@
-// Stylized lake (preview): an oval pond with painted wave streaks, a foam ring
-// at the shore and glints. Opaque, so it costs little.
+// Stylized lake: an oval pond with painted wave streaks, a dark wet bank
+// at the shore (no bright ring) and glints. Opaque, so it costs little.
 shader_type spatial;
 render_mode diffuse_lambert_wrap, specular_schlick_ggx;
 
@@ -8,6 +8,7 @@ uniform vec2 radius = vec2(4.0, 2.2);
 uniform vec3 deep_color : source_color = vec3(0.02, 0.12, 0.2);
 uniform vec3 shallow_color : source_color = vec3(0.08, 0.3, 0.32);
 uniform vec3 foam_color : source_color = vec3(0.6, 0.72, 0.75);
+uniform vec3 shore_color : source_color = vec3(0.1, 0.17, 0.15);
 varying vec3 wpos;
 
 void vertex() {
@@ -44,9 +45,9 @@ void fragment() {
 	// Painted wave streaks drifting across
 	float w = sin(wpos.x * 2.5 + wpos.z * 1.2 + TIME * 1.1 + noise(wpos.xz * 1.7) * 5.0);
 	col = mix(col, foam_color, smoothstep(0.93, 1.0, w) * 0.2);
-	// Foam ring at the shore, breathing in and out
+	// A dark wet bank at the shore, breathing in and out
 	float f = smoothstep(0.9, 0.97, r + sin(TIME * 1.4 + noise(wpos.xz * 3.0) * 6.0) * 0.035);
-	col = mix(col, foam_color, f * 0.6);
+	col = mix(col, shore_color, f * 0.7);
 	ALBEDO = col;
 	ROUGHNESS = 0.3;
 	SPECULAR = 0.45;

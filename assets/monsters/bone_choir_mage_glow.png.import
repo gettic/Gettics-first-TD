@@ -2,24 +2,20 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://bkr8ct8a21lkl"
-path.s3tc="res://.godot/imported/archer_tower_L1_Mortar_color.jpg-d93b37494fb8378842f4ed61da71a908.s3tc.ctex"
+uid="uid://7b1me3voo10n"
+path="res://.godot/imported/bone_choir_mage_glow.png-5b57e3bb516fd0c4ad86c67f7e19714c.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc"],
-"vram_texture": true
-}
-generator_parameters={
-"md5": "39fb6b3dc9109ff135f3972debbc12dd"
+"vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/towers/arrow/archer_tower_L1_Mortar_color.jpg"
-dest_files=["res://.godot/imported/archer_tower_L1_Mortar_color.jpg-d93b37494fb8378842f4ed61da71a908.s3tc.ctex"]
+source_file="res://assets/monsters/bone_choir_mage_glow.png"
+dest_files=["res://.godot/imported/bone_choir_mage_glow.png-5b57e3bb516fd0c4ad86c67f7e19714c.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=0
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -27,7 +23,7 @@ compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=true
+mipmaps/generate=false
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""

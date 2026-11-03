@@ -2,32 +2,28 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://blbocg0djs6pe"
-path.s3tc="res://.godot/imported/archer_tower_L1_Plaster_normal.jpg-dda017ab402cdf4c4d39b7598c2e566e.s3tc.ctex"
+uid="uid://b3v4jqy4dtlke"
+path="res://.godot/imported/bone_choir_warrior.jpg-86bf48b1c919c950426fade58c6e6b93.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc"],
-"vram_texture": true
-}
-generator_parameters={
-"md5": "8800f6c7d8a0a7accb259a553424506c"
+"vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/towers/arrow/archer_tower_L1_Plaster_normal.jpg"
-dest_files=["res://.godot/imported/archer_tower_L1_Plaster_normal.jpg-dda017ab402cdf4c4d39b7598c2e566e.s3tc.ctex"]
+source_file="res://assets/monsters/bone_choir_warrior.jpg"
+dest_files=["res://.godot/imported/bone_choir_warrior.jpg-86bf48b1c919c950426fade58c6e6b93.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=0
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
 compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
-compress/normal_map=1
+compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=true
+mipmaps/generate=false
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""

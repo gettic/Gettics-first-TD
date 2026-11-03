@@ -65,7 +65,7 @@ func build_world() -> void:
 	env.adjustment_enabled = true
 	env.adjustment_contrast = 1.1
 	# Shadows a little cool, highlights a little warm
-	env.adjustment_color_correction = split_tone(0.5)
+	env.adjustment_color_correction = split_tone(0.8)
 	env.ssao_radius = 0.8
 	env.ssao_intensity = 2.5
 	env.ssao_power = 1.6
@@ -795,7 +795,9 @@ func build_border() -> void:
 		mm.set_instance_transform(i, xf[i])
 	var mmi := MultiMeshInstance3D.new()
 	mmi.multimesh = mm
-	mmi.material_override = painted(mat(Color(0.62, 0.56, 0.48)))
+	# Dark mossy stone with little rim light, so no pale line runs round the board
+	mmi.material_override = painted(mat(Color(0.34, 0.33, 0.3)))
+	mmi.material_override.set_shader_parameter("rim_strength", 0.08)
 	mmi.material_override.set_shader_parameter("snow_cap", 1.0)  # Frostfall Fair (see apply_festival())
 	map_root.add_child(mmi)
 
@@ -1411,31 +1413,32 @@ func mood_light() -> void:
 	var sky: ProceduralSkyMaterial = env.sky.sky_material
 	var high := graphics_high
 	var s := view_scale
-	# Day: warm late-afternoon sun from the side, a cool fill light from the other side
+	# Day: golden sun from the side, blue-violet sky light in the shadows, and a
+	# warm rim on every model. The haze far out is dark forest, not a bright band.
 	sun.rotation_degrees = Vector3(-40, -40, 0)
-	sun.light_color = Color(1.0, 0.8, 0.58)
-	sun.light_energy = 1.3 if compat else 1.75
+	sun.light_color = Color(1.0, 0.76, 0.5)
+	sun.light_energy = 1.45 if compat else 1.95
 	sun.shadow_opacity = 1.0
 	sun.light_angular_distance = 1.5 if high else 0.0
-	fill_light.light_color = Color(0.5, 0.62, 1.0)
-	fill_light.light_energy = 0.4 if compat else 0.5
-	sky.sky_top_color = Color(0.35, 0.52, 0.8)
-	sky.sky_horizon_color = Color(0.85, 0.75, 0.6)
-	sky.ground_horizon_color = Color(0.85, 0.75, 0.6).darkened(0.3)
-	env.background_color = Color(0.62, 0.6, 0.55)
-	env.ambient_light_energy = 0.48 if compat else 0.6
+	fill_light.light_color = Color(0.44, 0.48, 1.0)
+	fill_light.light_energy = 0.55 if compat else 0.7
+	sky.sky_top_color = Color(0.3, 0.38, 0.76)
+	sky.sky_horizon_color = Color(0.66, 0.62, 0.74)
+	sky.ground_horizon_color = Color(0.36, 0.32, 0.46)
+	env.background_color = Color(0.12, 0.15, 0.09)
+	env.ambient_light_energy = 0.45 if compat else 0.56
 	env.tonemap_exposure = 0.72 if compat else 1.0
-	env.adjustment_saturation = 1.02 if compat else 1.2
+	env.adjustment_saturation = 1.0 if compat else 1.17
 	env.glow_intensity = 0.75 if high else 0.45
 	env.glow_hdr_threshold = 0.85
-	env.fog_light_color = Color(0.75, 0.68, 0.55)
+	env.fog_light_color = Color(0.16, 0.2, 0.12)
 	env.fog_depth_begin = 30.0 * s
 	env.fog_depth_end = 80.0 * s
 	env.fog_depth_curve = 1.5
 	var warm: Variant = null  # the ground's tints (null: the ground shader's own)
 	var cool: Variant = null
 	var snow := false
-	var rim := Vector4(1, 1, 1, 0)
+	var rim := Vector4(1.0, 0.82, 0.55, 1.4)
 	var rough := 1.0
 	var bugs := Color(1.4, 1.25, 0.9, 0.8)  # the pollen's color (alpha 0: none)
 	var bug_size := 1.0
@@ -1450,8 +1453,8 @@ func mood_light() -> void:
 			sky.sky_top_color = Color(0.3, 0.35, 0.65)
 			sky.sky_horizon_color = Color(1.0, 0.72, 0.5)
 			env.ambient_light_energy = 0.55 if compat else 0.72
-			env.fog_light_color = Color(0.9, 0.65, 0.45)
-			env.background_color = Color(0.7, 0.5, 0.38)
+			env.fog_light_color = Color(0.32, 0.22, 0.16)
+			env.background_color = Color(0.24, 0.16, 0.12)
 			warm = Color(1.2, 1.05, 0.7)
 			cool = Color(0.8, 0.82, 0.95)
 			rim = Vector4(1.0, 0.65, 0.35, 1.3)
@@ -1469,10 +1472,11 @@ func mood_light() -> void:
 			sky.sky_horizon_color = Color(0.6, 0.63, 0.67)
 			env.ambient_light_energy = 0.8 if compat else 1.05
 			env.adjustment_saturation = 0.95 if compat else 1.05
-			env.fog_light_color = Color(0.5, 0.55, 0.6)
+			# A dark wet haze far out, not a pale band round the board
+			env.fog_light_color = Color(0.26, 0.3, 0.33)
 			env.fog_depth_begin = 22.0 * s
 			env.fog_depth_end = 60.0 * s
-			env.background_color = Color(0.45, 0.48, 0.52)
+			env.background_color = Color(0.24, 0.27, 0.3)
 			warm = Color(1.05, 1.05, 0.9)
 			cool = Color(0.75, 0.85, 0.95)
 			rim = Vector4(0.75, 0.85, 1.0, 1.15)
@@ -1870,7 +1874,7 @@ func build_tower_node(t: Tower) -> void:
 	var root := Node3D.new()
 	root.position = to3d(t.pos)
 	add_child(root)
-	# Levels after 4 keep the level 4 look (the level shows on a badge, see draw_level_badges())
+	# Levels 1-4 each have their own look, then a new model at levels 5, 10, 15, 20, 30, 40 (see arrow_look())
 	var look := mini(t.level, 3)
 	if t.type == "barracks":
 		t.head = build_barracks_tower(root, t)
@@ -1903,27 +1907,11 @@ func build_tower_node(t: Tower) -> void:
 	var head := Node3D.new()
 	head.position = Vector3(0, 0.3 + h + 0.15, 0)
 	root.add_child(head)
-	match t.type:
-		"frost":
-			# Two four-sided cones make a crystal
-			var cone := CylinderMesh.new()
-			cone.top_radius = 0.0
-			cone.bottom_radius = 0.18
-			cone.height = 0.35
-			cone.radial_segments = 4
-			cone.rings = 1
-			var crystal := model_mat(col, 1.2)
-			add_mesh(head, cone, crystal, Vector3(0, 0.17, 0))
-			add_mesh(head, cone, crystal, Vector3(0, -0.17, 0)).rotation_degrees.x = 180
-		"spark":
-			var orb := SphereMesh.new()
-			orb.radius = 0.2
-			orb.height = 0.4
-			add_mesh(head, orb, model_mat(col, 2.0), Vector3(0, 0.1, 0))
-			var ring := TorusMesh.new()
-			ring.inner_radius = 0.26
-			ring.outer_radius = 0.31
-			add_mesh(head, ring, dark_mat, Vector3(0, 0.1, 0)).rotation_degrees.x = 60
+	# A plain glowing ball on top: a placeholder for a new tower type until its model is ready
+	var orb := SphereMesh.new()
+	orb.radius = 0.2
+	orb.height = 0.4
+	add_mesh(head, orb, model_mat(col, 1.5), Vector3(0, 0.1, 0))
 	add_pips(root, look, Vector3(0, 0.32, 0.36))
 	paint_tree(root)
 	t.node = root
@@ -2114,9 +2102,23 @@ func pack_mat(mesh: Mesh, slot: int) -> ShaderMaterial:
 # yoke, tipped toward its target. Stills with glowing bulbs from level 3. Venom
 # grows a crown of fangs and brews bright acid; Miasma gets smokestacks, more
 # vats and a murky brew. Green motes rise from the cauldron on High.
+#
+# Frost: a rune spire. A slate plinth with ice growing round its foot, a pale
+# spire with glowing ice runes, and a brass cradle holding a floating crystal
+# that turns to aim. Deep Freeze: a huge crystal in an iron cage. Blizzard:
+# shards on a brass ring round the crystal.
+#
+# Spark: an arcane conductor. A sandstone plinth, a violet column in copper
+# coils and a crown of prongs round a glowing orb (the lightning starts in the
+# orb, see fire_lightning()). Storm: a taller column, three rune rings, more
+# prongs and arcs; Overload: one huge pink orb, the prongs bent wide. The crown
+# slowly spins (clients don't know who it aims at).
 const KIT_FILES := {"cannon": "res://assets/towers/cannon/cannon_%d_%d.glb",
-		"poison": "res://assets/towers/poison/poison_%d_%d.glb"}
-const KIT_WIDTH := {"cannon": 0.8, "poison": 0.86}  # L1's width on a 1-unit tile
+		"poison": "res://assets/towers/poison/poison_%d_%d.glb",
+		"frost": "res://assets/towers/frost/frost_%d_%d.glb",
+		"spark": "res://assets/towers/spark/spark_%d_%d.glb"}
+const KIT_WIDTH := {"cannon": 0.8, "poison": 0.86, "frost": 0.9, "spark": 0.84}  # L1's width on a 1-unit tile
+const KIT_GLOW := {"poison": 1.1, "frost": 0.9, "spark": 1.3}  # brew.gdshader's glow strength
 var kit_parts := {}  # tower type -> Vector2i(path, look) -> {"body", "head": [[mesh, transform], ...], "pivot", "pot"}
 var kit_mats := {}  # shared materials by type and name (the team cloth also by owner)
 var kit_scale := {}  # tower type -> the scale of all its looks (from L1)
@@ -2219,7 +2221,8 @@ func add_kit_part(type: String, parent: Node3D, parts: Array, slot: int) -> void
 
 # The models' three materials: "Atlas" (stone, iron, brass, wood; the same for
 # every kind), "TeamColor" (cloth in the owner's color, seen from both sides) and
-# "Glow" (the cannon's furnaces, the poison tower's brew, see brew.gdshader).
+# "Glow" (the cannon's furnaces; the poison brew, frost ice and spark orb pulse
+# with brew.gdshader).
 # The baked shading is in the models' vertex colors.
 func kit_mat(type: String, name: String, slot: int) -> Material:
 	var key := "Atlas"
@@ -2229,11 +2232,11 @@ func kit_mat(type: String, name: String, slot: int) -> Material:
 		key = "%s %s" % [type, name]
 	if not kit_mats.has(key):
 		var folder := "res://assets/towers/%s/%s_" % [type, type]
-		if name == "Glow" and type == "poison":
+		if name == "Glow" and KIT_GLOW.has(type):
 			var b := ShaderMaterial.new()
 			b.shader = load("res://assets/shaders/brew.gdshader")
 			b.set_shader_parameter("tex", load(folder + "glow.jpg"))
-			b.set_shader_parameter("energy", 0.8 if compat else 1.1)
+			b.set_shader_parameter("energy", KIT_GLOW[type] * (0.73 if compat else 1.0))
 			kit_mats[key] = b
 			return b
 		var m := StandardMaterial3D.new()
@@ -2849,6 +2852,8 @@ func update_visuals(delta: float) -> void:
 	for t: Tower in towers.values():
 		if t.type == "barracks":
 			pass  # nothing turns
+		elif t.type == "spark":
+			t.head.rotation.y += delta * 0.5  # the crown slowly spins
 		elif t.type == "arrow" or KIT_FILES.has(t.type):
 			t.head.rotation.y = atan2(-t.aim.x, -t.aim.y)
 		else:
@@ -2960,7 +2965,13 @@ func make_enemy(kind: String) -> Enemy:
 # Monster kind -> its look. Normal and armored monsters are the skeleton warrior
 # (made for this game, assets/monsters/bone_warrior.glb; armored a bit bigger and
 # cooler), the boss is a KayKit skeleton mage, the others are built from simple
-# shapes here.
+# shapes here. The skeletons wear the Bone Choir's colours: warm ivory bone with
+# violet hollows, violet cloth, verdigris bronze and glowing soul-green eyes
+# (their textures repainted for this game, see assets/CREDITS.md).
+const CHOIR_WARRIOR := "res://assets/monsters/bone_choir_warrior.jpg"
+const CHOIR_MAGE := "res://assets/monsters/bone_choir_mage.png"
+const SOUL_GLOW := {CHOIR_WARRIOR: "res://assets/monsters/bone_choir_warrior_glow.jpg",
+		CHOIR_MAGE: "res://assets/monsters/bone_choir_mage_glow.png"}
 const MONSTER_LOOKS := {"normal": "minion", "armored": "warrior", "fast": "spider", "boss": "mage"}
 const SKELETON_SIZE := 0.31  # KayKit skeletons are about 2.2 tall: about 0.7 in the game
 const BONE_WARRIOR := "res://assets/monsters/bone_warrior.glb"
@@ -3001,8 +3012,10 @@ func build_monsters() -> void:
 		add_glb_monster(look + " split", BONE_WARRIOR, h * 1.06, tint * SPLIT_TINT, SPLIT_GLOW, mobs[look][4])
 		add_mob_variant(look, "splitling", SPLIT_TINT, SPLIT_GLOW)
 		add_mob_variant(look, "heal", Color(1.0, 0.9, 0.6), Color(1.0, 0.72, 0.25))
-	add_skeleton("mage", "Skeleton_Mage", "Walking_C", SKELETON_SIZE * 1.8,
-			[["Skeleton_Staff", "handslot.r"]], Color(1.0, 0.75, 0.75))
+	# The boss 1.2x bigger than before, so it reads as a boss from above (still
+	# smaller than Grimwhistle, see add_grim())
+	add_skeleton("mage", "Skeleton_Mage", "Walking_C", SKELETON_SIZE * 2.16,
+			[["Skeleton_Staff", "handslot.r"]], Color(1.0, 0.9, 0.88))
 	mob_shapes()
 	add_creature("unicorn", unicorn_pose, 0.7)
 	add_creature("spider", spider_pose, 0.35)
@@ -3053,7 +3066,15 @@ func mob_mats(base: StandardMaterial3D) -> Array:
 	sick.emission_energy_multiplier = 0.22
 	var sick_icy := sick.duplicate() as StandardMaterial3D
 	sick_icy.albedo_color = base.albedo_color * Color(0.55, 0.95, 0.85)
-	return [painted(base), painted(icy), painted(frozen), painted(past), painted(sick), painted(sick_icy)]
+	var out := [painted(base), painted(icy), painted(frozen), painted(past), painted(sick), painted(sick_icy)]
+	# The Bone Choir's soul-green eyes and gems glow (a mask next to the texture)
+	if base.albedo_texture != null and SOUL_GLOW.has(base.albedo_texture.resource_path):
+		var g: Texture2D = load(SOUL_GLOW[base.albedo_texture.resource_path])
+		for p: Material in out:
+			if p is ShaderMaterial:
+				p.set_shader_parameter("glow_tex", g)
+				p.set_shader_parameter("glow_energy", 2.0 if compat else 3.0)
+	return out
 
 
 # One mesh from the collected parts, with simpler versions for far away
@@ -3131,8 +3152,9 @@ func add_skeleton(look: String, file: String, walk: String, size: float, weapons
 		poses.append(pose_mesh(parts))
 	root.free()
 	var m := base_mat.duplicate() as StandardMaterial3D
-	# The .glb files' own copies of the texture aren't imported: all share this one
-	m.albedo_texture = load("res://assets/monsters/skeleton_texture.png")
+	# The .glb files' own copies of the texture aren't imported: all share this one,
+	# repainted in the Bone Choir's colours
+	m.albedo_texture = load(CHOIR_MAGE)
 	m.albedo_color = tint
 	mobs[look] = [poses, mob_mats(m), anim.length, poses[0].get_aabb().end.y, []]
 
@@ -3169,6 +3191,8 @@ func add_glb_monster(look: String, file: String, height: float, tint: Color, glo
 			base = mi.get_active_material(0)
 	root.free()
 	var m := base.duplicate() as StandardMaterial3D
+	if file == BONE_WARRIOR:
+		m.albedo_texture = load(CHOIR_WARRIOR)
 	m.albedo_color = tint
 	m.vertex_color_use_as_albedo = festival == "lantern"  # the pumpkin hats' colors
 	glow_mat(m, glow)

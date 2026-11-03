@@ -14,10 +14,10 @@ Monsters come out of a glowing portal in a crypt gate at a corner of the map, wa
 
 Play alone or with up to 4 players: each player gets their own gate at a corner of the square (see [Multiplayer](#multiplayer)). Or draw your own maps in the [Map editor](#map-editor) and share them.
 
-**The art.** The 3D world has a hand-painted look (painted shaders, warm light, a forest and a lake around the board).
+**The art.** The 3D world has a hand-painted look (painted shaders, a golden sun with cool violet shade and a warm rim light on every model, a forest and a lake around the board).
 
-- Free CC0 models from the KayKit packs by Kay Lousberg: rocks and the skeleton mage boss with its walk. Painted CC0 grass and dirt textures by Cethiel.
-- Made for the game with a model kit: the Cannon and Poison towers (a new look at levels 1-5, 10, 15, 20, 30 and 40 for each path) and the skeleton warrior (with its walk and death).
+- Free CC0 models from the KayKit packs by Kay Lousberg: rocks and the skeleton mage boss with its walk (repainted in the Bone Choir colours). Painted CC0 grass and dirt textures by Cethiel.
+- Made for the game with a model kit: the Cannon, Poison, Frost and Spark towers (a new look at levels 1-5, 10, 15, 20, 30 and 40 for each path) and the skeleton warrior (with its walk and death).
 - Made for the game: the Barracks (a guard hall, a stone keep and a wooden camp) and its soldiers (footmen, knights and militia).
 - By Gettic: the Arrow tower models, the logo and the game icon.
 - Made for the game: the Bone Choir's crypt gate (a skull over iron doors that swing open, with a swirling portal).
@@ -111,7 +111,7 @@ New players get short tips: a gold-framed card with an arrow to what it is about
 
 Towers can be upgraded up to level 60. From level 5 on, every level adds 28-36% damage (a bit different for each level and tower), and every 5th level (5, 10, 15...) is a big one with 62-70%. Range, fire rate, splash, slow and chain also grow a little, up to a limit. Each upgrade costs 38% more than the last (80% more for the big levels), so very high levels get too expensive to reach.
 
-**Looks.** The Arrow, Cannon and Poison towers get a new model at levels 1-5, 10, 15, 20, 30 and 40 (Cannon and Poison a different one for each path; a Volley Arrow tower has three archers). Frost and Spark keep their level-4 look. The Barracks has its own look at levels 1-4 (more crates, a tower, a chimney and walls), and a new one at levels 5, 10, 15, 20, 30 and 40 for each path: a stone keep for Knights, a wooden camp for Militia. Every tower above level 4 shows a small "Lv" badge, and big numbers are shortened (240k, 1.2M).
+**Looks.** The Arrow, Cannon, Frost, Spark and Poison towers get a new model at levels 1-5, 10, 15, 20, 30 and 40 (all but Arrow a different one for each path; a Volley Arrow tower has three archers). Frost is a rune spire with a floating crystal: Deep Freeze cages it, Blizzard rings it with shards. Spark is an arcane conductor with copper coils and a glowing orb in a crown of prongs, with Storm and Overload looks. The Barracks has its own look at levels 1-4 (more crates, a tower, a chimney and walls), and a new one at levels 5, 10, 15, 20, 30 and 40 for each path: a stone keep for Knights, a wooden camp for Militia. Every tower above level 4 shows a small "Lv" badge, and big numbers are shortened (240k, 1.2M).
 
 | Tower | Cost | What it does |
 |---|---|---|
@@ -175,7 +175,7 @@ When two monsters are equal, the one that has walked furthest is picked. The Bar
   - Knights hold him half as long as a boss, and he wears soldiers down twice as fast.
   - When every Grimwhistle has fallen, the monsters left crumble (no gold) and you win.
 - **Wave preview:** under the wave number in the console, three small chips show the next 3 waves: the monster kind (by color and mark: speed lines for fast, a steel rim for armored, a crown for a boss), how many come (all gates together), and a blinking red **BOSS** chip before a boss wave. A special wave has a round badge on its chip (two blobs for splitters, a shield, or a cross for healers). Hover a chip for what's coming. The seconds until the next wave are at the right of the wave number, with a thin gold bar under the first chip.
-- **The monsters:** wave 1 is **unicorns**. After that, normal monsters are bone warriors with sword and shield, armored ones are bigger, steel-tinted bone warriors, fast ones are bone spiders and bosses are big skeleton mages. Slowed monsters look icy, frozen ones stand in ice, and poisoned ones turn sickly green. Health bars show once a monster is hurt.
+- **The monsters:** wave 1 is **unicorns**. After that, normal monsters are bone warriors with sword and shield, armored ones are bigger, steel-tinted bone warriors, fast ones are bone spiders and bosses are big skeleton mages. The skeletons are the Bone Choir: ivory bone, violet cloth, verdigris bronze and glowing soul-green eyes. Slowed monsters look icy, frozen ones stand in ice, and poisoned ones turn sickly green. Health bars show once a monster is hurt.
 
 You start with 150 gold (225 on Easy). You earn gold for each kill and a bonus at the start of each wave; both grow with the monsters' health (playing alone, kills pay about 15% more later on). The console at the bottom shows how many monsters are alive: you lose if it reaches **50** (per player, see below). You win when Grimwhistle has fallen and the monsters left are gone (there are fireworks).
 
@@ -320,7 +320,7 @@ Playing alone, press **Esc** and click **Map editor** to make your own maps (if 
 - **Gate** places a gate: press **1-4** (or click the button again) to pick which one. A gate stands at the end of its own road to the loop.
 - **Rock**, **Tree** and **Water** block building (rocks and trees are 3D models, water is a lake with moving waves). **Areas** shows each player's area, **Clear** (click twice) makes the whole map grass.
 - **Width** and **Height**: from 12 x 9 up to 48 x 36 tiles.
-- **Check** shows whether the map works: the path must be one closed loop, one tile wide, that doesn't touch itself, with at least 8 tiles; gate 1 is needed and gates are numbered without gaps (up to 4, one per player). Monsters always walk the loop clockwise. Very uneven player areas only give a yellow warning.
+- The **Check** panel always shows whether the map works: the path must be one closed loop, one tile wide, that doesn't touch itself, with at least 8 tiles; gate 1 is needed and gates are numbered without gaps (up to 4, one per player). Monsters always walk the loop clockwise. Very uneven player areas only give a yellow warning.
 - **Save** keeps the map under its name (in the game's user folder, maps\<name>.txt). **Load...** opens a saved map or a copy of a built-in map (they can't be changed; a built-in name can't be saved over, and an older saved map with such a name shows as `<name> (yours)`). **New** starts over.
 - **Play this map** starts a game on it, **Exit the editor** goes back to the map you played before. Only working maps can be saved, shared or played.
 
@@ -430,7 +430,7 @@ Good places to start:
 - `PLAYER_COLORS` and `PLAYER_NAMES` list the 8 player colours and their names (the name is also used when a player has no name). `color_of()`, `color_name()` and `my_color()` in `game_base.gd` give a player's colour, `settle_colors()` and `pick_color()` in `game_net.gd` make sure no two players share one, and `draw_color_picker()` in `game_ui.gd` is the picker in the Profile box. `SILLY_NAMES` is the list of random names for players who leave the name box empty.
 - `ZOOM_MIN`, `ZOOM_MAX` and `ZOOM_STEP` set how far you can zoom in and out, and how much each scroll notch zooms.
 - `start_wave()` and `spawn_enemy()` in `main.gd` start each wave and give each monster kind its health, armor and gold.
-- `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting, haze and effects; `build_map()` the ground (painted grass and dirt, see `assets/shaders/ground.gdshader`) and the land around the board. Models get the painted look of `assets/shaders/painted.gdshader` (see `painted()`). `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Which model a tower level shows: `arrow_look()` and `ARROW_FROM` (Arrow), `kit_look()` and `KIT_FILES` (Cannon and Poison). Model files are in `assets/`, with their sources in `assets/CREDITS.md`.
+- `build_world()` in `game_world.gd` sets up the 3D scene: camera angle, lighting, haze and effects; `build_map()` the ground (painted grass and dirt, see `assets/shaders/ground.gdshader`) and the land around the board. Models get the painted look of `assets/shaders/painted.gdshader` (see `painted()`). `build_gate()` builds the gates, and `build_tower_node()` each tower's 3D model. Which model a tower level shows: `arrow_look()` and `ARROW_FROM` (Arrow), `kit_look()` and `KIT_FILES` (Cannon, Poison, Frost and Spark). Model files are in `assets/`, with their sources in `assets/CREDITS.md`.
 - Sound: `SOUNDS` (sound effects, files in `assets/sounds`), `MUSIC_LAYERS` and `MUSIC_MOODS` (music, 4 layers in `assets/music`) in `game_audio.gd`. `play_sound()` plays one. The volumes are saved in `settings.cfg` under `[audio]`.
 - Tutorial tips: the tips are `TIPS` in `game_base.gd`; when each one shows is in `tip_ready()` and `tip_done()` in `main.gd`; the card is `draw_tip_card()` in `game_ui.gd`. Saved in `settings.cfg` under `[tutorial]`.
 - Tower info cards: `tower_card()` and `draw_tower_card()` in `game_ui.gd` (every number comes from `TOWERS` and `PATHS`).

@@ -812,7 +812,7 @@ func load_board() -> void:
 	board_http.timeout = 8.0
 	add_child(board_http)
 	board_http.request_completed.connect(_on_board_loaded)
-	# The box shows the normal boards (it has no endless tab yet)
+	# The board of the tab being shown (board_id() in game_ui.gd picks it)
 	var url := relay_url + "/scores?board=%s&me=%s" % [board_id(board_level, 0), my_name().to_lower().uri_encode()]
 	if board_http.request(url) != OK:
 		_on_board_loaded(HTTPRequest.RESULT_CANT_CONNECT, 0, PackedStringArray(), PackedByteArray())

@@ -700,7 +700,7 @@ func name_of(slot: int) -> String:
 # none = their slot's colour). The host (or a player alone) decides who gets
 # which (settle_colors() in game_net.gd) and sends slot_colors to the others.
 # For graphics and ui: color_of(), color_name(), color_is_dark(), and the hook
-# colors_changed() (see "graphics plan\player colour\api.md").
+# colors_changed().
 
 # The colour number (0-7) of player slot 0-3.
 func color_index(slot: int) -> int:
@@ -1955,7 +1955,7 @@ const TIPS := {
 	"boss": {"text": "A boss wave is coming! Bosses have huge health and count as 5 monsters.", "anchor": "wave_preview"},
 	"special": {"text": "From wave 31, waves get a trait: splitters, healers or shields. The wave preview shows which.", "anchor": "wave_preview"},
 }
-var tips_on := true  # the Settings row "Tutorial: On / Off"
+var tips_on := true  # the Settings row "Tutorial tips"
 var tips_seen: Array = []  # ids of the tips already shown (or already learned)
 var tip_queue: Array = []  # ids waiting to be shown; the first one is on screen
 var tip_spots := {}  # id -> the map spot of the tower an anchor "tower" points at

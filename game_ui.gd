@@ -403,8 +403,8 @@ func draw_frost_edge(k: float) -> void:
 		hud.draw_rect(s, Color(0.75, 0.9, 1.0, 0.22 * flash))
 
 
-# Towers above level 4 look like level 4, so their level shows on a small
-# badge at their foot: "Lv 12".
+# Towers from level 5 up show their level on a small badge at their foot:
+# "Lv 12".
 func draw_level_badges() -> void:
 	for t: Tower in towers.values():
 		if t.level <= 3:

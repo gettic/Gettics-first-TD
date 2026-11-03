@@ -2,24 +2,20 @@
 
 importer="texture"
 type="CompressedTexture2D"
-uid="uid://cni1v4jyc8run"
-path.s3tc="res://.godot/imported/archer_tower_L1_Plaster_color.jpg-80be924158ee6dbe2682f045b73d110c.s3tc.ctex"
+uid="uid://ca2btb4hrn6mf"
+path="res://.godot/imported/spark_team.jpg-e49bb7cb4d53a0d546408d7b73001578.ctex"
 metadata={
-"imported_formats": ["s3tc_bptc"],
-"vram_texture": true
-}
-generator_parameters={
-"md5": "be11cf9526fe3719e6cc16be6d7f6bd9"
+"vram_texture": false
 }
 
 [deps]
 
-source_file="res://assets/towers/arrow/archer_tower_L1_Plaster_color.jpg"
-dest_files=["res://.godot/imported/archer_tower_L1_Plaster_color.jpg-80be924158ee6dbe2682f045b73d110c.s3tc.ctex"]
+source_file="res://assets/towers/spark/spark_team.jpg"
+dest_files=["res://.godot/imported/spark_team.jpg-e49bb7cb4d53a0d546408d7b73001578.ctex"]
 
 [params]
 
-compress/mode=2
+compress/mode=0
 compress/high_quality=false
 compress/lossy_quality=0.7
 compress/uastc_level=0
@@ -27,7 +23,7 @@ compress/rdo_quality_loss=0.0
 compress/hdr_compression=1
 compress/normal_map=0
 compress/channel_pack=0
-mipmaps/generate=true
+mipmaps/generate=false
 mipmaps/limit=-1
 roughness/mode=0
 roughness/src_normal=""

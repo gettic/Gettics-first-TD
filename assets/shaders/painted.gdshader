@@ -13,6 +13,9 @@ uniform bool use_normal = false;
 uniform float normal_depth = 1.0;
 uniform vec3 emission : source_color = vec3(0.0);
 uniform float emission_energy = 0.0;
+// A glow mask (white = glows in the texture's own color), for the monsters' eyes and gems
+uniform sampler2D glow_tex : hint_default_black, filter_linear_mipmap;
+uniform float glow_energy = 0.0;
 uniform float saturation = 1.0;
 uniform vec3 tint : source_color = vec3(1.0);
 uniform vec3 rim_color : source_color = vec3(1.0, 0.9, 0.75);
@@ -59,6 +62,9 @@ void fragment() {
 	vec3 rc = mood_rim.a > 0.0 ? mood_rim.rgb : rim_color;
 	float rs = mood_rim.a > 0.0 ? rim_strength * mood_rim.a : rim_strength;
 	EMISSION = emission * emission_energy + rc * mix(vec3(1.0), col, 0.5) * rim * rs;
+	if (glow_energy > 0.0) {
+		EMISSION += col * texture(glow_tex, UV).r * glow_energy;
+	}
 	if (use_normal) {
 		NORMAL_MAP = texture(normal_tex, UV).rgb;
 		NORMAL_MAP_DEPTH = normal_depth;
