@@ -172,6 +172,15 @@ func build_map() -> void:
 		console_layer.queue_redraw()
 
 
+# New player colours: the overlay reads color_of() as it draws, so drawing the
+# layers once more is all it needs.
+func colors_changed() -> void:
+	super()
+	for layer: CanvasItem in [map_hud, console_layer, stats_layer]:
+		if layer != null:
+			layer.queue_redraw()
+
+
 # Runs draw_func with the drawing helpers drawing on node instead of hud.
 func draw_on(node: Node2D, draw_func: Callable) -> void:
 	var top := hud
@@ -291,7 +300,7 @@ func draw_chat() -> void:
 				return
 			var x := CHAT_INPUT_RECT.position.x + 4.0
 			if r == 0 and who != "":
-				chat_text(Vector2(x, y), who, size, Color(PLAYER_COLORS[slot], alpha))
+				chat_text(Vector2(x, y), who, size, Color(ink_of(slot), alpha))
 				x += who_w
 			chat_text(Vector2(x, y), rows[r], size, col)
 			y -= size + 4.0
@@ -440,18 +449,18 @@ func draw_ask() -> void:
 	var r := ASK_RECT
 	ui_box(r)
 	# A strip in the asking player's color
-	hud.draw_rect(Rect2(r.position.x + 10, r.position.y + 40, r.size.x - 20, 2), PLAYER_COLORS[from] * Color(1, 1, 1, 0.7))
+	hud.draw_rect(Rect2(r.position.x + 10, r.position.y + 40, r.size.x - 20, 2), ink_of(from) * Color(1, 1, 1, 0.7))
 	var line := "%s wants to build a %s tower in your area" % [name_of(from), str(ask[2]).capitalize()]
 	if asks.size() > 1:
 		line += "  (+%d more)" % (asks.size() - 1)
-	text(r.position + Vector2(20, 32), line, 17, PLAYER_COLORS[from])
+	text(r.position + Vector2(20, 32), line, 17, ink_of(from))
 	text(r.position + Vector2(20, 68), "The spot is marked with a ring on the map.", 14, UI_GREY)
 	button(ASK_YES_RECT, "Yes (Y)", true, true)
 	button(ASK_NO_RECT, "No (N)")
 	# Point at the spot with a pulsing ring (on the map: not shifted with the console)
 	var spot := camera.unproject_position(Vector3(cell.x + 0.5, 0.1, cell.y + 0.5))
 	hud.draw_set_transform(Vector2.ZERO)
-	hud.draw_arc(spot, 16.0 + sin(time * 6.0) * 4.0, 0, TAU, 32, PLAYER_COLORS[from], 3.0)
+	hud.draw_arc(spot, 16.0 + sin(time * 6.0) * 4.0, 0, TAU, 32, ink_of(from), 3.0)
 	hud.draw_set_transform(Vector2(0, ui_extra))
 
 
@@ -751,11 +760,26 @@ func draw_health_bars() -> void:
 		var bar := Vector2(p.x - SOLDIER_BAR_W / 2.0, p.y)
 		hud.draw_rect(Rect2(bar - Vector2(1, 1), Vector2(SOLDIER_BAR_W + 2, 5)), Color(0, 0, 0, 0.85))
 		hud.draw_rect(Rect2(bar, Vector2(SOLDIER_BAR_W, 3)), Color(0.18, 0.15, 0.12))
-		hud.draw_rect(Rect2(bar, Vector2(SOLDIER_BAR_W * clampf(s[1], 0.0, 1.0), 3)), PLAYER_COLORS[s[2]])
+		hud.draw_rect(Rect2(bar, Vector2(SOLDIER_BAR_W * clampf(s[1], 0.0, 1.0), 3)), ink_of(s[2]))
 
 
 func text(pos: Vector2, s: String, size := 16, col := Color.WHITE) -> void:
 	hud.draw_string(font, pos, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, col)
+
+
+const DARK_INK := Color(0.7, 0.7, 0.76)  # Black players' names and bars: readable on dark stone
+
+
+# A player's colour for text, lines and bars on the dark UI (Black shows as silver).
+func ink_of(slot: int) -> Color:
+	return DARK_INK if color_is_dark(slot) else color_of(slot)
+
+
+# A dot in a player's colour; Black gets a light ring so it shows on dark stone.
+func player_dot(c: Vector2, radius: float, slot: int) -> void:
+	if color_is_dark(slot):
+		hud.draw_circle(c, radius + 1.5, DARK_INK)
+	hud.draw_circle(c, radius, color_of(slot))
 
 
 # Big numbers made short: 9500, 24k, 240k, 1.2M, 3.4B, 5T, 7Qa (quadrillion), 2Qi (quintillion).
@@ -926,7 +950,10 @@ func draw_minimap() -> void:
 	var k := m.size.x / map_cols  # pixels per tile
 	for g in gate_cells.size():
 		if gate_cells[g] != null and players[g] != null:
-			hud.draw_rect(Rect2(m.position + Vector2(gate_cells[g]) * k, Vector2(k, k)).grow(1), PLAYER_COLORS[g])
+			var gr := Rect2(m.position + Vector2(gate_cells[g]) * k, Vector2(k, k)).grow(1)
+			if color_is_dark(g):
+				hud.draw_rect(gr.grow(1), DARK_INK)
+			hud.draw_rect(gr, color_of(g))
 	for t: Tower in towers.values():
 		var r := Rect2(m.position + Vector2(t.cell) * k, Vector2(k, k)).grow(-1)
 		hud.draw_rect(r.grow(1), Color(0, 0, 0, 0.8))
@@ -940,7 +967,7 @@ func draw_minimap() -> void:
 	for g: Array in pings:
 		var c: Vector2 = (m.position + g[1] / CELL * k).clamp(m.position, m.end)
 		var age: float = PING_TIME - g[2]
-		var col: Color = PLAYER_COLORS[g[0]]
+		var col: Color = ink_of(g[0])
 		var a := clampf(g[2] / 0.5, 0.0, 1.0)
 		hud.draw_circle(c, 3.0, Color(col, a))
 		hud.draw_arc(c, 4.0 + fmod(age, 1.0) * 8.0, 0, TAU, 16, Color(col, a * (1.0 - fmod(age, 1.0))), 1.5)
@@ -993,14 +1020,14 @@ func draw_wave_info() -> void:
 			var c: Vector2 = d[1]
 			if slot == hover:
 				hud.draw_circle(c, 10, Color(UI_GOLD_LIGHT, 0.35))
-			hud.draw_circle(c, 6, PLAYER_COLORS[slot])
+			player_dot(c, 6, slot)
 			if slot == local_slot:
 				hud.draw_arc(c, 9, 0, TAU, 20, UI_GOLD_LIGHT, 1.5)
 		var px: float = x + dots.size() * 22
 		if hover >= 0:
 			text(Vector2(px + 4, BAR_TOP + 145), "Give gold to %s" % name_of(hover), 14, UI_GOLD_LIGHT)
 		else:
-			text(Vector2(px + 4, BAR_TOP + 145), "You: %s" % name_of(local_slot), 14, PLAYER_COLORS[local_slot])
+			text(Vector2(px + 4, BAR_TOP + 145), "You: %s" % name_of(local_slot), 14, ink_of(local_slot))
 	else:
 		text(Vector2(x, BAR_TOP + 145), build_keys_hint, 13, UI_DIM)
 
@@ -1318,7 +1345,7 @@ func draw_selected() -> void:
 		stat_row(Vector2(x, BAR_TOP + 140), "Speed", "%.2fs" % data["cooldown"][lv], "")
 		hud.draw_multiline_string(font, Vector2(right, BAR_TOP + 96), data["desc"], HORIZONTAL_ALIGNMENT_LEFT, 130, 14, 2, UI_GREY)
 	if not mine:
-		text(Vector2(right, BAR_TOP + 140), "Built by %s" % name_of(selected.owner), 14, PLAYER_COLORS[selected.owner])
+		text(Vector2(right, BAR_TOP + 140), "Built by %s" % name_of(selected.owner), 14, ink_of(selected.owner))
 	elif lv >= MAX_LEVEL - 1:
 		text(Vector2(right, BAR_TOP + 140), "Max level", 14, UI_GOLD_LIGHT)
 	elif needs_path(selected):
@@ -1789,7 +1816,7 @@ func draw_menu() -> void:
 			draw_player_list(Vector2(left, 428))
 			button(STOP_RECT, "Stop hosting")
 		"client":
-			text(Vector2(left, 234), "You are playing as %s." % name_of(local_slot), 16, PLAYER_COLORS[local_slot])
+			text(Vector2(left, 234), "You are playing as %s." % name_of(local_slot), 16, ink_of(local_slot))
 			draw_player_list(Vector2(left, 266))
 			button(STOP_RECT, "Leave the game")
 	button(MENU_SAVE_RECT, "Save", call("can_save") == "")
@@ -2134,7 +2161,7 @@ func draw_player_list(pos: Vector2) -> void:
 	for slot in MAX_PLAYERS:
 		if players[slot] == null:
 			continue
-		hud.draw_circle(Vector2(pos.x + 8, y - 5), 6, PLAYER_COLORS[slot])
+		player_dot(Vector2(pos.x + 8, y - 5), 6, slot)
 		var who: String = name_of(slot)
 		if slot == local_slot:
 			who += " (you)"
@@ -2652,8 +2679,8 @@ func draw_stats_panel() -> void:
 		var slot: int = row[0]
 		kills += row[2]
 		damage += row[3]
-		hud.draw_circle(Vector2(left + 6, y - 5), 6, PLAYER_COLORS[slot])
-		text(Vector2(left + 20, y), row[1], 16, PLAYER_COLORS[slot].lightened(0.3))
+		player_dot(Vector2(left + 6, y - 5), 6, slot)
+		text(Vector2(left + 20, y), row[1], 16, ink_of(slot).lightened(0.3))
 		if slot == end_stats["mvp"]:
 			var nw := font.get_string_size(row[1], HORIZONTAL_ALIGNMENT_LEFT, -1, 16).x
 			var mr := Rect2(left + 28 + nw, y - 15, 42, 19)
@@ -2686,7 +2713,7 @@ func draw_stats_panel() -> void:
 		var tname: String = tower_data(t[0], t[1], t[2])["name"]
 		text(Vector2(left + 26, y), "%s  Lv %d" % [tname, t[2] + 1], 15, UI_GOLD_LIGHT if i == 0 else UI_TEXT)
 		if team:
-			text(Vector2(left + 176, y), t[4], 14, PLAYER_COLORS[t[3]].lightened(0.3))
+			text(Vector2(left + 176, y), t[4], 14, ink_of(t[3]).lightened(0.3))
 		ui_bar(Rect2(left + 306, y - 10, 180, 8), t[5] / maxf(most, 1.0), Color(0.9, 0.45, 0.2))
 		text(Vector2(left + 496, y), short(t[5]), 15, UI_TEXT)
 		text(Vector2(left + 640, y), short(t[6]), 15, UI_TEXT)
@@ -2887,7 +2914,7 @@ func fw_colors() -> Array:
 	var cols := FW_PARTY.duplicate()
 	for slot in MAX_PLAYERS:
 		if players[slot] != null:
-			cols.append(PLAYER_COLORS[slot].lerp(Color.WHITE, 0.2))
+			cols.append(ink_of(slot).lerp(Color.WHITE, 0.2))
 	return cols
 
 
@@ -3152,7 +3179,7 @@ func draw_pings() -> void:
 	var view := Rect2(0, TOP_BAR_H, SCREEN_W, BAR_TOP + ui_extra - TOP_BAR_H)
 	for g: Array in pings:
 		var slot: int = g[0]
-		var col: Color = PLAYER_COLORS[slot]
+		var col: Color = ink_of(slot)
 		var light := col.lightened(0.35)
 		var age: float = PING_TIME - g[2]
 		var a := clampf(g[2] / 0.5, 0.0, 1.0) * clampf(age / 0.12, 0.0, 1.0)
@@ -3301,7 +3328,7 @@ func draw_gift_box() -> void:
 	var ww := font.get_string_size(who, HORIZONTAL_ALIGNMENT_LEFT, -1, 20).x
 	var hx := b.get_center().x - (hw + ww) / 2.0
 	text(Vector2(hx, b.position.y + 40), head, 20, Color(1, 0.85, 0.3))
-	text(Vector2(hx + hw, b.position.y + 40), who, 20, PLAYER_COLORS[gift_to].lightened(0.3))
+	text(Vector2(hx + hw, b.position.y + 40), who, 20, ink_of(gift_to).lightened(0.3))
 	centered(b.position.y + 68, "You have %s gold. Pick how much:" % short(gold), 15, UI_GREY)
 	for i in GIFT_SHARES.size():
 		var r := gift_button_rect(i)
@@ -4285,7 +4312,11 @@ func draw_tower_card(i: int) -> void:
 
 const PROFILE_RECT := Rect2(400, 50, 124, 28)  # the Esc menu's button, top left (Map editor under it)
 const PROFILE_BOX := Rect2(330, 40, 620, 640)
-const PROFILE_NAME_RECT := Rect2(436, 112, 320, 36)  # the name box moves here while the Profile is open
+const PROFILE_NAME_RECT := Rect2(436, 112, 204, 36)  # the name box moves here while the Profile is open
+const SWATCH_X := 730.0  # the colour picker: 8 swatches right of the name
+const SWATCH_Y := 130.0
+const SWATCH_STEP := 26.0
+const SWATCH_R := 9.0
 const PROFILE_ACH_RECT := Rect2(354, 620, 196, 40)
 const PROFILE_CHRON_RECT := Rect2(558, 620, 150, 40)
 const PROFILE_RESET_RECT := Rect2(716, 620, 116, 40)
@@ -4429,6 +4460,7 @@ func update_profile_boxes() -> void:
 	var spot := (PROFILE_NAME_RECT.position if profile_open else NAME_INPUT_RECT.position) + Vector2(0, ui_extra / 2.0)
 	if name_input.position != spot:
 		name_input.position = spot
+		name_input.size = PROFILE_NAME_RECT.size if profile_open else NAME_INPUT_RECT.size
 	if profile_open:
 		code_input.visible = false
 		name_input.visible = net_mode == "" and not ach_open and not chron_open and not reset_ask
@@ -4463,6 +4495,13 @@ func profile_click(p: Vector2) -> void:
 	if chron_open:
 		if CHRON_BACK_RECT.has_point(p):
 			chron_open = false
+		return
+	var sw := swatch_at(p)
+	if sw >= 0:
+		if sw != shown_color():
+			var why := pick_color(sw)
+			if why != "":
+				flash(why)
 		return
 	if PROFILE_ACH_RECT.has_point(p):
 		open_achievements()
@@ -4505,8 +4544,8 @@ func draw_profile() -> void:
 	# The name: its box (alone), or just the name in a multiplayer game
 	text(Vector2(x, PROFILE_NAME_RECT.position.y + 24), "Name:", 16, UI_TEXT)
 	if net_mode != "":
-		text(Vector2(PROFILE_NAME_RECT.position.x + 8, PROFILE_NAME_RECT.position.y + 24), name_of(local_slot), 17, UI_GOLD_LIGHT)
-	right_text(Vector2(right, PROFILE_NAME_RECT.position.y + 24), "On this computer", 13, UI_DIM)
+		text(Vector2(PROFILE_NAME_RECT.position.x + 8, PROFILE_NAME_RECT.position.y + 24), fit_text(name_of(local_slot), PROFILE_NAME_RECT.size.x - 12, 17), 17, UI_GOLD_LIGHT)
+	draw_color_picker(right)
 	ui_heading(Vector2(x, 172), "GAMES", w)
 	var left := [["Games played", short(s.games)], ["Won / lost", "%s / %s" % [short(s.wins), short(s.losses)]],
 			["Time played", play_time(s.seconds)], ["Multiplayer games", short(s.mp_games)]]
@@ -4570,6 +4609,64 @@ func draw_profile() -> void:
 	button(PROFILE_CHRON_RECT, "Chronicle  %d / %d" % [(profile.get("chronicle", {}) as Dictionary).size(), STORY_CARDS.size()], true, true)
 	button(PROFILE_RESET_RECT, "Reset profile")
 	button(PROFILE_BACK_RECT, "Back (Esc)", true, true)
+
+
+# ----- the colour picker (pick_color() in game_net.gd decides and sends it)
+
+func swatch_center(i: int) -> Vector2:
+	return Vector2(SWATCH_X + i * SWATCH_STEP, SWATCH_Y)
+
+
+# The swatch under p, or -1.
+func swatch_at(p: Vector2) -> int:
+	for i in PLAYER_COLORS.size():
+		if p.distance_to(swatch_center(i)) <= SWATCH_STEP / 2.0:
+			return i
+	return -1
+
+
+# The colour shown as picked: this player's colour now (while joining: the pick).
+func shown_color() -> int:
+	if (net_mode == "connecting" or net_mode == "map_offer") and my_color() >= 0:
+		return my_color()
+	return color_index(local_slot)
+
+
+# "Colour:" and 8 swatches; colours other players have are dimmed and crossed
+# out. Under them: the colour under the mouse (and who has it), else the picked
+# one, or a refusal from pick_color() / the host.
+func draw_color_picker(right: float) -> void:
+	var y := PROFILE_NAME_RECT.position.y + 24
+	text(Vector2(SWATCH_X - 78, y), "Colour:", 16, UI_TEXT)
+	var mine := shown_color()
+	var hover := -1 if ach_open or chron_open or reset_ask else swatch_at(ui_mouse(true))
+	for i in PLAYER_COLORS.size():
+		var c := swatch_center(i)
+		var col: Color = PLAYER_COLORS[i]
+		var locked := color_locked(i)
+		hud.draw_circle(c, SWATCH_R + 1.5, DARK_INK if i == DARK_COLOR else Color(0, 0, 0, 0.7))
+		hud.draw_circle(c, SWATCH_R, col.darkened(0.55) if locked else col)
+		if locked:
+			var d := Vector2(SWATCH_R, -SWATCH_R) * 0.6
+			hud.draw_line(c - d, c + d, Color(0.05, 0.04, 0.03), 3.0)
+			hud.draw_line(c - d, c + d, Color(0.75, 0.3, 0.25), 1.5)
+		else:
+			hud.draw_circle(c - Vector2(3, 3), 2.2, Color(1, 1, 1, 0.45))
+		if i == mine:
+			hud.draw_arc(c, SWATCH_R + 4.0, 0, TAU, 24, UI_GOLD_LIGHT, 2.0)
+		elif i == hover:
+			hud.draw_arc(c, SWATCH_R + 4.0, 0, TAU, 24, Color(1, 1, 1, 0.55), 1.5)
+	var note := menu_message()
+	var col := Color(1, 1, 0.6)
+	if hover >= 0:
+		note = PLAYER_NAMES[hover]
+		col = UI_GREY
+		if color_locked(hover):
+			note += ": %s has it" % name_of(color_holder(hover))
+	elif note == "":
+		note = PLAYER_NAMES[mine]
+		col = UI_DIM
+	right_text(Vector2(right, y + 24), fit_text(note, 300, 12), 12, col)
 
 
 func draw_reset_ask() -> void:

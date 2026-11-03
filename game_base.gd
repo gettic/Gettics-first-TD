@@ -180,8 +180,13 @@ const MAPS_DIR := "user://maps"  # saved maps: <name>.txt, the map's rows of let
 const MAP_NAME_MAX := 24
 const MAP_FILE_MAX := 4096  # bytes: a 48 x 36 map is under 1800
 const MAX_PLAYERS := 4
-const PLAYER_NAMES := ["Blue", "Red", "Yellow", "Green"]
-const PLAYER_COLORS := [Color(0.3, 0.55, 1.0), Color(1.0, 0.3, 0.3), Color(1.0, 0.85, 0.2), Color(0.25, 0.8, 0.45)]
+# The colours a player can pick (index = colour number 0-7; the first 4 are each
+# slot's colour when nobody picked one). Use color_of(slot) / color_name(slot)
+# for a player's colour: see "player colours" below.
+const PLAYER_NAMES := ["Blue", "Red", "Yellow", "Green", "Orange", "Cyan", "Pink", "Black"]
+const PLAYER_COLORS := [Color(0.3, 0.55, 1.0), Color(1.0, 0.3, 0.3), Color(1.0, 0.85, 0.2), Color(0.25, 0.8, 0.45),
+		Color(1.0, 0.55, 0.15), Color(0.2, 0.85, 0.9), Color(1.0, 0.42, 0.6), Color(0.14, 0.14, 0.16)]
+const DARK_COLOR := 7  # Black: needs a light rim or ring to show
 # A player who hasn't typed a name gets one of these (a new one each time the game starts)
 const SILLY_NAMES := [
 	"Sir Wobbles", "Captain Noodle", "Lady Pickles", "Baron Fluff", "Duke Waffle",
@@ -527,6 +532,9 @@ class Player:
 	var gold := 0
 	var name := ""  # chosen by the player, checked by the host ("": not known yet)
 	var cooldowns := {}  # ability (see ABILITIES) -> game seconds until it's ready again (missing: ready)
+	var pick := -1  # host: the colour (0-7) this player asked for, -1: none (see settle_colors())
+	var joined := 0  # host: join order (an earlier player keeps their colour in a clash)
+	var color_set := false  # host: already had a colour, which they keep while their pick is taken
 
 
 # The map being played (set by use_map())
@@ -554,6 +562,9 @@ var new_enemies: Array[Enemy] = []  # host: splitlings born this frame, added in
 
 var players: Array = [null, null, null, null]  # Player per slot, null = free
 var local_slot := 0  # this computer's player
+# Each slot's colour number (index in PLAYER_COLORS), also for empty slots; never
+# two the same. Set by settle_colors() (host / alone) or the host's messages.
+var slot_colors: Array = [0, 1, 2, 3]
 # This computer's gold
 var gold: int:
 	get:
@@ -681,7 +692,61 @@ func clear_world() -> void:
 func name_of(slot: int) -> String:
 	if slot >= 0 and slot < MAX_PLAYERS and players[slot] != null and players[slot].name != "":
 		return players[slot].name
-	return PLAYER_NAMES[clampi(slot, 0, MAX_PLAYERS - 1)]
+	return color_name(slot)
+
+
+# ----- player colours
+# Every player picks one of PLAYER_COLORS in their profile (profile.color, -1:
+# none = their slot's colour). The host (or a player alone) decides who gets
+# which (settle_colors() in game_net.gd) and sends slot_colors to the others.
+# For graphics and ui: color_of(), color_name(), color_is_dark(), and the hook
+# colors_changed() (see "graphics plan\player colour\api.md").
+
+# The colour number (0-7) of player slot 0-3.
+func color_index(slot: int) -> int:
+	return slot_colors[clampi(slot, 0, MAX_PLAYERS - 1)]
+
+
+# The colour of player slot 0-3.
+func color_of(slot: int) -> Color:
+	return PLAYER_COLORS[color_index(slot)]
+
+
+# Its name: "Blue" ... "Black".
+func color_name(slot: int) -> String:
+	return PLAYER_NAMES[color_index(slot)]
+
+
+# Black: needs a light rim or ring to show on dark things.
+func color_is_dark(slot: int) -> bool:
+	return color_index(slot) == DARK_COLOR
+
+
+# This computer's pick from the profile: 0-7, or -1 (none: the slot's colour).
+func my_color() -> int:
+	var c: Variant = profile.get("color", -1)
+	return c if c is int and c >= -1 and c < PLAYER_COLORS.size() else -1
+
+
+# The slot of another player (or a saved player still to come back to a loaded
+# game) who has colour i, -1 if nobody does. me: the slot asking.
+func color_holder(i: int, me := -1) -> int:
+	if me < 0:
+		me = local_slot
+	for s in MAX_PLAYERS:
+		if s != me and slot_colors[s] == i and (players[s] != null or saved_slots.has(s)):
+			return s
+	return -1
+
+
+func color_locked(i: int) -> bool:
+	return color_holder(i) >= 0
+
+
+# Called on every computer after slot_colors changed. game_world.gd / game_ui.gd
+# override it (calling super()) to recolour what was built with the old colours.
+func colors_changed() -> void:
+	pass
 
 
 # Makes text from another player safe to show: no control or invisible
@@ -1213,7 +1278,7 @@ func show_soldiers(t: Tower) -> void:
 		soldier_mesh.height = 0.25
 	if not soldier_mats.has(t.owner):
 		var m := StandardMaterial3D.new()
-		m.albedo_color = PLAYER_COLORS[t.owner].lerp(Color(0.75, 0.6, 0.4), 0.3)
+		m.albedo_color = color_of(t.owner).lerp(Color(0.75, 0.6, 0.4), 0.3)
 		soldier_mats[t.owner] = m
 	var n := t.soldier_look.size()
 	while group.get_child_count() < n:
@@ -2212,7 +2277,7 @@ func new_profile() -> Dictionary:
 		progress[k] = 0
 	return {"stats": stats, "levels": levels, "daily": {"played": 0, "won": 0, "dates": [], "twists": [], "best_streak": 0},
 			"weekly": {"played": 0, "won": 0, "weeks": []}, "towers": tower_stats, "progress": progress, "achievements": {},
-			"chronicle": {}}
+			"chronicle": {}, "color": -1}
 
 
 # A whole number from a file or the network (0 for anything else).
@@ -2279,6 +2344,9 @@ func read_profile(path: String) -> Dictionary:
 			var date: Variant = cfg.get_value("chronicle", id, "")
 			if STORY_CARDS.has(id) and date is String:
 				out.chronicle[id] = date.left(10)
+	# The player's colour (see my_color()); older profiles have none
+	var c: Variant = cfg.get_value("player", "color", -1)
+	out.color = c if c is int and c >= -1 and c < PLAYER_COLORS.size() else -1
 	return out
 
 
@@ -2301,6 +2369,7 @@ func write_profile(path: String) -> Error:
 		cfg.set_value("achievements", id, profile.achievements[id])
 	for id: String in profile.chronicle:
 		cfg.set_value("chronicle", id, profile.chronicle[id])
+	cfg.set_value("player", "color", profile.get("color", -1))
 	return cfg.save(path)
 
 
@@ -2325,15 +2394,19 @@ func save_profile() -> void:
 
 
 # The Profile box's "Reset profile" (after its confirm box): forgets every stat
-# and achievement and deletes the file. The name, settings and saves stay.
+# and achievement and deletes the file. The name, colour, settings and saves stay.
 func reset_profile() -> void:
+	var color := my_color()
 	profile = new_profile()
+	profile.color = color
 	achievement_queue.clear()
 	story_queue.clear()  # the Chronicle starts over too
 	story_end = ""
 	profile_seconds = 0.0
 	if DisplayServer.get_name() != "headless" and FileAccess.file_exists(PROFILE_FILE):
 		DirAccess.remove_absolute(PROFILE_FILE)
+		if color >= 0:
+			write_profile(PROFILE_FILE)  # a fresh profile that only keeps the colour
 
 
 # This computer earns an achievement (once): dated today, queued for the popup.

@@ -271,7 +271,7 @@ func accept_offer(keep: bool) -> void:
 		return
 	map_offer.keep = keep and not offer_is_weekly()  # a week's map is made again from its id
 	map_offer.accepted = true
-	net_try_join.rpc_id(1, my_name(), map_offer.hash, true)
+	net_try_join.rpc_id(1, my_name(), map_offer.hash, true, my_color())
 
 
 func cancel_offer() -> void:
@@ -358,6 +358,134 @@ func name_taken(name: String, slot: int) -> bool:
 		if p != null and p.slot != slot and p.name.to_lower() == name.to_lower():
 			return true
 	return false
+
+
+# ----- player colours (see "player colours" in game_base.gd)
+
+var next_joined := 1  # host: the next Player.joined (this computer's player is 0)
+
+
+# Host / alone: who gets which colour (no two the same). First this computer's
+# player (its pick: my_color()), then saved players still to come back to a
+# loaded game (they keep their saved colour), then the other players by join
+# order. Each player gets their pick if it's free; else the colour they already
+# had; else (no pick) their slot's colour; else the first free colour. Empty
+# slots keep theirs, else their slot's, else the first free one. Calls
+# colors_changed() and returns true if anything changed (the host then sends
+# it with send_players()).
+func settle_colors() -> bool:
+	if net_mode == "client" or net_mode == "connecting" or net_mode == "map_offer":
+		return false
+	var before := slot_colors.duplicate()
+	var now: Array = [-1, -1, -1, -1]
+	var used := {}
+	var order := [local_slot]
+	for s in MAX_PLAYERS:
+		if s != local_slot and players[s] == null and saved_slots.has(s):
+			order.append(s)
+	var others := []
+	for s in MAX_PLAYERS:
+		if s != local_slot and players[s] != null:
+			others.append(s)
+	others.sort_custom(func(a: int, b: int) -> bool: return players[a].joined < players[b].joined)
+	order.append_array(others)
+	for s in MAX_PLAYERS:
+		if not s in order:
+			order.append(s)
+	for s: int in order:
+		var p: Player = players[s]
+		var tries := []
+		if p == null:
+			tries = [before[s], s]  # an empty slot, or a saved player's slot
+		else:
+			var pick: int = my_color() if s == local_slot else p.pick
+			if pick >= 0:
+				tries.append(pick)
+			if p.color_set and s != local_slot:
+				tries.append(before[s])
+			if pick < 0:
+				tries.append(s)
+		tries.append_array(range(PLAYER_COLORS.size()))
+		for c: int in tries:
+			if c >= 0 and c < PLAYER_COLORS.size() and not used.has(c):
+				now[s] = c
+				used[c] = true
+				break
+		if p != null:
+			p.color_set = true
+	slot_colors = now
+	if now == before:
+		return false
+	colors_changed()
+	return true
+
+
+# The profile's colour picker: picks colour i (0-7, -1: none = the slot's
+# colour), keeps it in the profile and uses it. Returns why not, or "".
+func pick_color(i: int) -> String:
+	if i < -1 or i >= PLAYER_COLORS.size():
+		return "There's no such colour"
+	if i >= 0 and color_locked(i):
+		return "%s has %s" % [name_of(color_holder(i)), PLAYER_NAMES[i]]
+	if profile.is_empty():
+		profile = new_profile()
+	profile.color = i
+	save_profile()
+	match net_mode:
+		"client":
+			net_request.rpc_id(1, "color", [i])
+		"connecting", "map_offer":
+			pass  # sent with the join
+		_:
+			if settle_colors():
+				send_players()
+	return ""
+
+
+# Host: a player's colour pick from net_request.
+func host_pick_color(slot: int, i: Variant) -> void:
+	var p: Player = players[slot]
+	if p == null or not (i is int and i >= -1 and i < PLAYER_COLORS.size()):
+		return
+	if i >= 0 and color_holder(i, slot) >= 0:
+		note_to(slot, "%s has %s" % [name_of(color_holder(i, slot)), PLAYER_NAMES[i]])
+		return
+	p.pick = i
+	p.color_set = false  # no pick: back to their slot's colour if it's free
+	if settle_colors():
+		send_players()
+
+
+# Players: the colours from the host (4 colour numbers 0-7, no two the same).
+func use_host_colors(v: Variant) -> void:
+	if not (v is Array and v.size() == MAX_PLAYERS):
+		return
+	var seen := {}
+	for c: Variant in v:
+		if not (c is int and c >= 0 and c < PLAYER_COLORS.size()) or seen.has(c):
+			return
+		seen[c] = true
+	if v != slot_colors:
+		slot_colors = v.duplicate()
+		colors_changed()
+
+
+# A loaded game (main.gd apply_save()): the saved colours (older saves have none:
+# each slot's own), then this computer's pick.
+func colors_from_save(v: Variant) -> void:
+	var ok: bool = v is Array and v.size() == MAX_PLAYERS
+	if ok:
+		var seen := {}
+		for c: Variant in v:
+			if not (c is int and c >= 0 and c < PLAYER_COLORS.size()) or seen.has(c):
+				ok = false
+				break
+			seen[c] = true
+	slot_colors = v.duplicate() if ok else [0, 1, 2, 3]
+	if not settle_colors():
+		colors_changed()  # always: the map and towers were just built
+	if net_mode == "host":
+		send_players()
 
 
 # ----- chat
@@ -1286,6 +1414,7 @@ func stop_hosting() -> void:
 		if slot != local_slot:
 			players[slot] = null
 			spawn_queues[slot].clear()
+	settle_colors()
 
 
 # Back to playing alone, with a fresh game.
@@ -1303,7 +1432,7 @@ func _on_connected_to_host() -> void:
 		net_join.rpc_id(1, version)
 		# Separate from net_join, so a host with another version can still
 		# tell us the versions differ (it doesn't know this message)
-		net_try_join.rpc_id(1, my_name(), map_hash(map_rows_text), false)
+		net_try_join.rpc_id(1, my_name(), map_hash(map_rows_text), false, my_color())
 
 
 func _on_connection_failed() -> void:
@@ -1339,6 +1468,7 @@ func _on_peer_disconnected(id: int) -> void:
 			players[slot] = null
 			spawn_queues[slot].clear()
 			wave_votes.erase(slot)
+			settle_colors()  # someone waiting for this colour gets it now
 			send_players()
 			if p_name != "":
 				chat_note("%s left the game" % p_name)
@@ -1350,7 +1480,7 @@ func send_players() -> void:
 	for p in players:
 		if p != null:
 			list.append([p.peer, p.slot, p.name])
-	send_all("net_players", [list])
+	send_all("net_players", [list, slot_colors])
 
 
 func send_tower(t: Tower) -> void:
@@ -1475,9 +1605,10 @@ func net_join(their_version: String) -> void:
 
 # After net_join: the player's name and which map they have (its sha256).
 # confirmed: they said yes to the map the host offered them. Its name sorts
-# after net_refused, like net_say (see there).
+# after net_refused, like net_say (see there). color: the colour they picked
+# (0-7, -1: none; older games don't send it).
 @rpc("any_peer", "call_remote", "reliable")
-func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant) -> void:
+func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant, color: Variant = -1) -> void:
 	if net_mode != "host":
 		return
 	var peer := multiplayer.get_remote_sender_id()
@@ -1507,9 +1638,15 @@ func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant) -
 	p.peer = peer
 	p.slot = slot
 	p.name = unique_name(their_name, slot)
+	p.pick = color if color is int and color >= -1 and color < PLAYER_COLORS.size() else -1
+	p.joined = next_joined
+	next_joined += 1
+	# A saved player coming back keeps the slot's saved colour while their pick is taken
+	p.color_set = saved_slots.has(slot)
 	players[slot] = p
 	# Back in a loaded game: their saved gold, cooldowns and stats
 	var restored := restore_saved_player(p)
+	settle_colors()  # everyone gets it with send_players() below
 	if not restored:
 		# Joining late: half the gold the others could have earned by now (at least the start gold)
 		p.gold = maxi(start_gold(), int(gold_before_wave(wave) / 2.0))
@@ -1523,7 +1660,7 @@ func net_try_join(their_name: Variant, their_map: Variant, confirmed: Variant) -
 		stat_names[slot] = p.name
 	gift_time[slot] = -100.0
 	ping_budget[slot] = PING_BURST
-	net_welcome.rpc_id(peer, slot, mine)
+	net_welcome.rpc_id(peer, slot, mine, slot_colors)
 	net_set_difficulty.rpc_id(peer, difficulty)
 	if endless:
 		net_set_endless.rpc_id(peer, true)
@@ -1562,6 +1699,9 @@ func net_request(action: String, args: Array) -> void:
 			if action == "ping" and args.size() == 1 and args[0] is Vector2:
 				host_ping(p.slot, args[0])
 				return
+			if action == "color" and args.size() == 1:
+				host_pick_color(p.slot, args[0])
+				return
 			var error := perform(p.slot, action, args)
 			if error != "":
 				net_message.rpc_id(peer, error)
@@ -1592,9 +1732,10 @@ func net_show_map(title: Variant, host_name: Variant, rows: Variant) -> void:
 
 
 # slot: our player slot. map: the sha256 of the host's map, which must be ours,
-# a built-in map (BUILTIN_MAPS) or the one we said yes to.
+# a built-in map (BUILTIN_MAPS) or the one we said yes to. colors: slot_colors,
+# before the towers come.
 @rpc("authority", "call_remote", "reliable")
-func net_welcome(slot: Variant, map: Variant) -> void:
+func net_welcome(slot: Variant, map: Variant, colors: Variant = null) -> void:
 	if net_mode != "connecting" and net_mode != "map_offer":
 		return
 	if not (slot is int and slot >= 0 and slot < MAX_PLAYERS and map is String):
@@ -1636,11 +1777,12 @@ func net_welcome(slot: Variant, map: Variant) -> void:
 	me.slot = slot
 	me.name = my_name()  # until the host's list says which name we got
 	players[slot] = me
+	use_host_colors(colors)
 	menu_open = false
 	code_input.release_focus()
 	name_input.release_focus()
 	net_status = ""
-	flash("You joined as %s!" % PLAYER_NAMES[slot])
+	flash("You joined as %s!" % color_name(slot))
 
 
 @rpc("authority", "call_remote", "reliable")
@@ -1651,10 +1793,12 @@ func net_refused(reason: String) -> void:
 	net_status = clean_text(reason, 300)
 
 
+# list: [peer, slot, name] per player; colors: slot_colors.
 @rpc("authority", "call_remote", "reliable")
-func net_players(list: Array) -> void:
+func net_players(list: Array, colors: Variant = null) -> void:
 	if net_mode != "client":
 		return
+	use_host_colors(colors)
 	var old := players
 	players = [null, null, null, null]
 	for item in list:

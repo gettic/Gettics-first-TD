@@ -1,6 +1,7 @@
 // Barracks soldiers: the painted look (see painted.gdshader) drawn with
 // MultiMeshes. Each soldier's owner color comes in its custom data and tints
 // the team parts (marked in the vertex color's alpha: tabard, plume, shield).
+// Its alpha 0 means Black: the team parts get a strong silver rim to show.
 shader_type spatial;
 render_mode diffuse_lambert_wrap, specular_schlick_ggx, cull_disabled;
 
@@ -16,11 +17,13 @@ global uniform vec4 mood_rim;  // the weather's rim (see painted.gdshader)
 varying float wy;
 varying vec3 team;
 varying float mask;
+varying float dark;
 
 void vertex() {
 	wy = VERTEX.y;
 	team = INSTANCE_CUSTOM.rgb;
 	mask = COLOR.a;
+	dark = 1.0 - INSTANCE_CUSTOM.a;
 }
 
 void fragment() {
@@ -36,5 +39,7 @@ void fragment() {
 	float rim = pow(clamp(1.0 - dot(NORMAL, VIEW), 0.0, 1.0), 3.0);
 	vec3 rc = mood_rim.a > 0.0 ? mood_rim.rgb : rim_color;
 	float rs = mood_rim.a > 0.0 ? rim_strength * mood_rim.a : rim_strength;
+	rc = mix(rc, vec3(0.82, 0.88, 1.0), dark * mask);
+	rs *= 1.0 + 4.0 * dark * clamp(mask, 0.0, 1.0);
 	EMISSION = rc * mix(vec3(1.0), col, 0.5) * rim * rs;
 }

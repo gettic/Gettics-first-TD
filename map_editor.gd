@@ -327,7 +327,7 @@ func draw_map_preview(rows: Array, r: Rect2) -> void:
 				"#":
 					hud.draw_rect(cell, Color(0.4, 0.28, 0.16))
 				"1", "2", "3", "4":
-					hud.draw_rect(cell, PLAYER_COLORS[int(ch) - 1])
+					hud.draw_rect(cell, ink_of(int(ch) - 1))
 				"w":
 					hud.draw_rect(cell, Color(0.25, 0.45, 0.85))
 				"r":
@@ -523,7 +523,7 @@ func update_visuals(delta: float) -> void:
 			ground_mats[0].set_shader_parameter("grid", 1.0)
 		for slot in area_planes.size():
 			area_planes[slot].visible = ed_areas
-			area_planes[slot].material_override.albedo_color = Color(PLAYER_COLORS[slot], 0.105 if compat else 0.035)
+			area_planes[slot].material_override.albedo_color = Color(color_of(slot), 0.105 if compat else 0.035)
 
 
 # ---------------------------------------------------------------- editing
@@ -1113,8 +1113,8 @@ func ed_draw_marks() -> void:
 		var gc: Vector2i = gate_cells[g]
 		var sp := camera.unproject_position(Vector3(gc.x + 0.5, 1.9, gc.y + 0.5))
 		hud.draw_circle(sp, 11, Color(0, 0, 0, 0.7))
-		hud.draw_circle(sp, 9, PLAYER_COLORS[g])
-		text(sp + Vector2(-4.5, 6), str(g + 1), 16, Color.BLACK)
+		player_dot(sp, 9, g)
+		text(sp + Vector2(-4.5, 6), str(g + 1), 16, Color.WHITE if color_is_dark(g) else Color.BLACK)
 	if ed_list_open or menu_open or share_open or not paste_map.is_empty() or ed_over_console(ui_mouse()):
 		return
 	var c := mouse_cell()
@@ -1128,7 +1128,7 @@ func ed_tool_color(t: String) -> Color:
 	match t:
 		"Path": return Color(0.75, 0.5, 0.25)
 		"Erase": return Color(1, 0.35, 0.3)
-		"Gate": return PLAYER_COLORS[ed_gate]
+		"Gate": return ink_of(ed_gate)
 		"Rock": return Color(0.65, 0.65, 0.68)
 		"Tree": return Color(0.25, 0.75, 0.3)
 		"Water": return Color(0.3, 0.6, 1.0)
@@ -1175,7 +1175,7 @@ func ed_draw_console() -> void:
 		match t:
 			"Areas":
 				for k in 4:
-					hud.draw_rect(Rect2(ic + Vector2((k % 2) * 4 - 4, (k / 2) * 4 - 4), Vector2(4, 4)), PLAYER_COLORS[k])
+					hud.draw_rect(Rect2(ic + Vector2((k % 2) * 4 - 4, (k / 2) * 4 - 4), Vector2(4, 4)), ink_of(k))
 			"Clear":
 				pass
 			_:

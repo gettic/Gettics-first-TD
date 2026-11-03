@@ -490,11 +490,10 @@ func gate_mat(name: String, slot: int) -> Material:
 				var s := StandardMaterial3D.new()
 				s.vertex_color_use_as_albedo = true
 				s.albedo_texture = load("res://assets/towers/cannon/cannon_team.jpg")
-				s.albedo_color = PLAYER_COLORS[slot]
 				s.emission_enabled = true
-				s.emission = PLAYER_COLORS[slot]
 				s.emission_energy_multiplier = 0.35
 				m = painted(s)
+				paint_team(m, "gem", slot)
 			"BoneP":
 				# The sculpted skulls and horns: no texture, their look is painted into the vertex colors
 				var s := StandardMaterial3D.new()
@@ -1893,7 +1892,7 @@ func build_tower_node(t: Tower) -> void:
 	# The base is tinted with the owner's color
 	var base := BoxMesh.new()
 	base.size = Vector3(0.8, 0.3, 0.8)
-	add_mesh(root, base, model_mat(stone_mat.albedo_color.lerp(PLAYER_COLORS[t.owner], 0.45)), Vector3(0, 0.15, 0))
+	add_mesh(root, base, team_mat("base", t.owner), Vector3(0, 0.15, 0))
 	# The tower gets taller with each level
 	var h := 0.35 + look * 0.2
 	var body := CylinderMesh.new()
@@ -2057,9 +2056,8 @@ func arrow_mat(name: String, slot: int) -> Material:
 	var key := "%s %d" % [name, slot]
 	if not arrow_mats.has(key):
 		var c: StandardMaterial3D = arrow_base[name].duplicate()
-		var col: Color = PLAYER_COLORS[slot]
-		# The roof a little greyer, so it doesn't outshine the map
-		c.albedo_color = col.lerp(Color(0.5, 0.5, 0.5), 0.25) if name == "RoofTiles" else col
+		painted(c)
+		paint_team(c, name, slot)
 		arrow_mats[key] = c
 	return arrow_mats[key]
 
@@ -2243,7 +2241,6 @@ func kit_mat(type: String, name: String, slot: int) -> Material:
 		match name:
 			"TeamColor":
 				m.albedo_texture = load(folder + "team.jpg")
-				m.albedo_color = PLAYER_COLORS[slot]
 				m.cull_mode = BaseMaterial3D.CULL_DISABLED
 			"Glow":
 				m.albedo_texture = load(folder + "glow.jpg")
@@ -2252,6 +2249,8 @@ func kit_mat(type: String, name: String, slot: int) -> Material:
 			_:
 				m.albedo_texture = load("res://assets/towers/cannon/cannon_atlas.jpg")
 		kit_mats[key] = painted(m)
+		if name == "TeamColor":
+			paint_team(kit_mats[key], name, slot)
 	return kit_mats[key]
 
 
@@ -2376,6 +2375,73 @@ func merge_parts(parts: Node3D) -> ArrayMesh:
 	return mesh
 
 
+# ---------------------------------------------------------------- player colours
+
+# Team parts (gate gems, roofs, banners, cloth, tower bases, pennants) use one
+# shared material per kind and player slot, recoloured in place when a player
+# picks a colour (colors_changed()). Black has no colour to tint or glow with,
+# so its team parts get a strong silver rim instead and stay readable at night.
+const DARK_RIM := Color(0.82, 0.88, 1.0)
+const DARK_GEM := Color(0.45, 0.5, 0.65)  # Black's gem: a faint cold glow inside the dark stone
+const DARK_AREA := Color(0.8, 0.84, 0.92)  # Black's area tint while placing a tower
+var team_mats := {}  # "kind slot" -> StandardMaterial3D for code-built team parts
+
+
+# The colour a team part shows for player slot
+func team_tint(kind: String, slot: int) -> Color:
+	var col := color_of(slot)
+	match kind:
+		"RoofTiles", "TeamRoof":
+			# Roofs a little greyer, so they don't outshine the map
+			return col.lerp(Color(0.5, 0.5, 0.5), 0.25)
+		"base":
+			return stone_mat.albedo_color.lerp(col, 0.45)
+	return col
+
+
+# A code-built team part's material, made once per kind and slot
+func team_mat(kind: String, slot: int) -> StandardMaterial3D:
+	var key := "%s %d" % [kind, slot]
+	if not team_mats.has(key):
+		var m := mat(Color.WHITE)
+		painted(m)
+		paint_team(m, kind, slot)
+		team_mats[key] = m
+	return team_mats[key]
+
+
+# Puts slot's colour on a team material (a plain one and its painted copy, or a painted one)
+func paint_team(m: Material, kind: String, slot: int) -> void:
+	var col := team_tint(kind, slot)
+	var dark := color_is_dark(slot)
+	if m is StandardMaterial3D:
+		(m as StandardMaterial3D).albedo_color = col
+		m = painted_cache.get(m)
+	var p := m as ShaderMaterial
+	if p == null:
+		return
+	p.set_shader_parameter("albedo", col)
+	if kind == "gem":
+		p.set_shader_parameter("emission", DARK_GEM if dark else col)
+	p.set_shader_parameter("rim_color", DARK_RIM if dark else Color(1.0, 0.85, 0.6))
+	p.set_shader_parameter("rim_strength", 1.0 if dark else 0.35)
+
+
+# A player picked a new colour (or joined, left, or a game was loaded): recolours
+# every team material (soldiers and area tints read color_of() every frame)
+func colors_changed() -> void:
+	super()
+	for key: String in gate_mats:
+		if key.begins_with("TeamColor "):
+			paint_team(gate_mats[key], "gem", int(key.get_slice(" ", 1)))
+	for list: Dictionary in [arrow_mats, barracks_mats, team_mats]:
+		for key: String in list:
+			paint_team(list[key], key.get_slice(" ", 0), int(key.get_slice(" ", 1)))
+	for key: String in kit_mats:
+		if key.get_slice(" ", 1) == "TeamColor":
+			paint_team(kit_mats[key], "TeamColor", int(key.get_slice(" ", 2)))
+
+
 # ---------------------------------------------------------------- Barracks
 
 # Barracks: a guard hall made with the model kit (see assets/CREDITS.md), one
@@ -2465,15 +2531,13 @@ func barracks_mat(name: String, slot: int) -> Material:
 	if not barracks_mats.has(key):
 		var m := StandardMaterial3D.new()
 		m.vertex_color_use_as_albedo = true
-		var col: Color = PLAYER_COLORS[slot]
 		if name == "TeamRoof":
 			m.albedo_texture = load("res://assets/towers/barracks/barracks_roof.jpg")
-			m.albedo_color = col.lerp(Color(0.5, 0.5, 0.5), 0.25)
 		else:
 			m.albedo_texture = load("res://assets/towers/barracks/barracks_team.jpg")
-			m.albedo_color = col
 			m.cull_mode = BaseMaterial3D.CULL_DISABLED
 		barracks_mats[key] = painted(m)
+		paint_team(barracks_mats[key], name, slot)
 	return barracks_mats[key]
 
 
@@ -2487,7 +2551,8 @@ func rally_flag(slot: int) -> Mesh:
 		part_ball(parts, 0.028, Color(1.0, 0.78, 0.3), Vector3(0, 0.58, 0))
 		var tri := PrismMesh.new()
 		tri.size = Vector3(0.16, 0.24, 0.012)
-		part_put(parts, tri, PLAYER_COLORS[slot], Vector3(0.12, 0.47, 0), Vector3(0, 0, -90))
+		# The pennant's material is the slot's own, recoloured by colors_changed()
+		add_mesh(parts, tri, team_mat("flag", slot), Vector3(0.12, 0.47, 0)).rotation_degrees = Vector3(0, 0, -90)
 		model_meshes[key] = merge_parts(parts)
 	return model_meshes[key]
 
@@ -2676,7 +2741,8 @@ func show_soldiers(t: Tower) -> void:
 			soldier_need[node] = maxi(soldier_need.get(node, 0), k + 1)
 			continue
 		mm.set_instance_transform(k, Transform3D(Basis(Vector3.UP, s.turn), s.p + Vector3(0, y, 0)))
-		mm.set_instance_custom_data(k, PLAYER_COLORS[t.owner])
+		# alpha 0: Black, its team parts get a silver rim (see soldier.gdshader)
+		mm.set_instance_custom_data(k, Color(color_of(t.owner), 0.0 if color_is_dark(t.owner) else 1.0))
 		mm.visible_instance_count = k + 1
 
 
@@ -2813,7 +2879,9 @@ func update_visuals(delta: float) -> void:
 		var plane: MultiMeshInstance3D = area_planes[slot]
 		plane.visible = showing_areas() and players[slot] != null
 		var own := slot == local_slot
-		plane.material_override.albedo_color = Color(0, 0, 0, 0.5) if own else Color(PLAYER_COLORS[slot], tint)
+		# Black's area would look like your own dark one: it gets a pale silver glow
+		var col := DARK_AREA if color_is_dark(slot) else color_of(slot)
+		plane.material_override.albedo_color = Color(0, 0, 0, 0.5) if own else Color(col, tint)
 	# Grid lines fade in on the grass while placing a tower
 	var want := 1.0 if build_type != "" and state == "playing" else 0.0
 	if grid_fade != want:

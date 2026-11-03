@@ -100,6 +100,7 @@ func play_alone() -> void:
 	me.name = my_name()
 	players[0] = me
 	local_slot = 0
+	settle_colors()
 	new_game()
 
 
@@ -2156,7 +2157,7 @@ func make_save() -> Dictionary:
 	return {"map_name": map_name, "map": map_rows_text.duplicate(), "daily": daily_date, "weekly": weekly_id, "mood": mood, "difficulty": difficulty,
 			"endless": endless, "wave": wave, "timer": next_wave_timer, "run_time": run_time, "spawn_hp": spawn_hp,
 			"spawn_queues": spawn_queues.duplicate(true), "spawn_timers": spawn_timers.duplicate(),
-			"next_enemy_id": next_enemy_id, "host_slot": local_slot, "players": list, "towers": tower_list,
+			"next_enemy_id": next_enemy_id, "host_slot": local_slot, "players": list, "colors": slot_colors.duplicate(), "towers": tower_list,
 			"enemies": monsters, "clouds": clouds.duplicate(true), "cloud_tick": cloud_tick, "cloud_turn": cloud_turn,
 			"from_save": from_save, "progress": save_progress(),
 			"stats": {"kills": stat_kills, "damage": stat_damage, "start": stat_start, "earned": stat_earned,
@@ -2280,6 +2281,7 @@ func apply_save(d: Dictionary, m: Dictionary) -> void:
 			me.cooldowns = cools
 		else:
 			saved_slots[item.slot] = {"name": clean_text(item.name, NAME_MAX), "gold": gold_left, "cooldowns": cools}
+	colors_from_save(d.get("colors"))
 	# Towers
 	for td in d.towers:
 		var t := Tower.new()
@@ -2356,7 +2358,7 @@ func held_text() -> String:
 		return held_note
 	var waiting := []
 	for slot in saved_slots:
-		waiting.append("%s (%s)" % [PLAYER_NAMES[slot], saved_slots[slot].name])
+		waiting.append("%s (%s)" % [color_name(slot), saved_slots[slot].name])
 	var text := "Loaded wave %d, on hold." % wave
 	if not waiting.is_empty():
 		text += " Waiting for %s." % ", ".join(waiting)
